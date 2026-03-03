@@ -1,0 +1,17 @@
+[project]
+name = "claude-monitor"
+version = "0.1.0"
+description = "Monitor and auto-accept Claude Code permission prompts"
+requires-python = ">=3.12"
+dependencies = [
+    "iterm2>=2.14",
+    "textual>=1.0",
+]
+
+[project.scripts]
+claude-monitor = "claude_monitor.tui:main"
+claude-monitor-hook = "claude_monitor.hook:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
