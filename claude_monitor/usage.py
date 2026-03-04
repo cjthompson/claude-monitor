@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from claude_monitor import fmt_duration
+
 log = logging.getLogger(__name__)
 
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -161,17 +163,10 @@ def _format_countdown(resets_at: datetime | None) -> str:
     if not resets_at:
         return ""
     now = datetime.now(timezone.utc)
-    diff = resets_at - now
-    total_secs = int(diff.total_seconds())
+    total_secs = int((resets_at - now).total_seconds())
     if total_secs <= 0:
         return "now"
-    if total_secs < 60:
-        return f"{total_secs}s"
-    if total_secs < 3600:
-        return f"{total_secs // 60}m"
-    h = total_secs // 3600
-    m = (total_secs % 3600) // 60
-    return f"{h}h{m:02d}m"
+    return fmt_duration(total_secs, compact=True)
 
 
 def _format_local_time(resets_at: datetime | None) -> str:
@@ -232,34 +227,29 @@ def format_usage_inline(data: UsageData, max_width: int = 999) -> str:
             _quota(h5, "5h", 12, h5_full_reset),
             _quota(d7, "7d", 12, d7_full),
         ])),
-        # Tier 2: full bars + full resets (drop cache age — already not shown)
-        lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_full_reset),
-            _quota(d7, "7d", 12, d7_full),
-        ])),
-        # Tier 3: 5h local time only, 7d full
+        # Tier 2: 5h local time only, 7d full
         lambda: SEP.join(filter(None, [
             _quota(h5, "5h", 12, h5_local),
             _quota(d7, "7d", 12, d7_full),
         ])),
-        # Tier 4: drop 7d reset
+        # Tier 3: drop 7d reset
         lambda: SEP.join(filter(None, [
             _quota(h5, "5h", 12, h5_local),
             _quota(d7, "7d", 12, ""),
         ])),
-        # Tier 5: drop 7d bar
+        # Tier 4: drop 7d bar
         lambda: SEP.join(filter(None, [
             _quota(h5, "5h", 8, h5_local),
             _quota(d7, "7d", None, ""),
         ])),
-        # Tier 6: drop 5h bar too
+        # Tier 5: drop 5h bar too
         lambda: SEP.join(filter(None, [
             _quota(h5, "5h", None, h5_local),
             _quota(d7, "7d", None, ""),
         ])),
-        # Tier 7: drop 7d entirely
+        # Tier 6: drop 7d entirely
         lambda: _quota(h5, "5h", 8, h5_local),
-        # Tier 8: just percentages
+        # Tier 7: just percentages
         lambda: _quota(h5, "5h", None, ""),
     ]
 

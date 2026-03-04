@@ -112,14 +112,6 @@ def _collect_session_ids(node):
     return set()
 
 
-def _collect_all_session_ids(tabs):
-    """Extract all session IDs from a list of (tab_id, tab_name, root) tuples."""
-    ids = set()
-    for _tab_id, _tab_name, root in tabs:
-        ids |= _collect_session_ids(root)
-    return ids
-
-
 def _filter_tabs_by_scope(tabs, self_sid, scope, window_groups=None):
     """Filter tabs based on iTerm scope setting.
 
@@ -805,7 +797,6 @@ class AutoAcceptTUI(App):
         self._iterm_to_panel: dict[str, str] = {}
         self._stop_event = threading.Event()
         self._rebuilding = False
-        self._current_layout_ids: set[str] = set()
         self._current_structure_fp = None
         self._current_size_fp = None
         self._usage_polling = False
@@ -850,7 +841,6 @@ class AutoAcceptTUI(App):
         if _layout_tabs:
             root = self.query_one("#layout-root")
             await self._mount_tabs(root, _layout_tabs, _self_session_id)
-            self._current_layout_ids = _collect_all_session_ids(_layout_tabs)
             self._current_structure_fp = _structure_fingerprint(_layout_tabs)
             self._current_size_fp = _size_fingerprint(_layout_tabs)
             log.debug(f"on_mount(): panels={list(self.panels.keys())}, dashboard={self.dashboard is not None}")
@@ -1006,7 +996,6 @@ class AutoAcceptTUI(App):
                 except Exception:
                     pass
 
-            self._current_layout_ids = _collect_all_session_ids(msg.tabs)
             self._current_structure_fp = _structure_fingerprint(msg.tabs)
             self._current_size_fp = _size_fingerprint(msg.tabs)
 
@@ -1057,11 +1046,15 @@ class AutoAcceptTUI(App):
 
     # --- Hook event handling ---
 
+    @staticmethod
+    def _iterm_sid_from_event(data: dict) -> str:
+        """Extract the normalized iTerm2 session ID from a hook event dict."""
+        return extract_iterm_session_id(data.get("_iterm_session_id") or "")
+
     def _resolve_panel(self, data: dict) -> SessionPanel | None:
         """Find the panel for a hook event, mapping via iTerm2 session ID."""
         claude_sid = data.get("session_id", "")
-        raw_iterm = data.get("_iterm_session_id") or ""
-        iterm_sid = extract_iterm_session_id(raw_iterm)
+        iterm_sid = self._iterm_sid_from_event(data)
 
         # Already mapped this claude session
         if claude_sid in self._iterm_to_panel:
@@ -1104,8 +1097,7 @@ class AutoAcceptTUI(App):
 
     def _is_dashboard_event(self, data: dict) -> bool:
         """Check if an event belongs to the TUI's own (dashboard) session."""
-        raw_iterm = data.get("_iterm_session_id") or ""
-        iterm_sid = extract_iterm_session_id(raw_iterm)
+        iterm_sid = self._iterm_sid_from_event(data)
         return bool(iterm_sid and iterm_sid == _self_session_id)
 
     def on_hook_event(self, msg: HookEvent) -> None:
@@ -1187,8 +1179,7 @@ class AutoAcceptTUI(App):
                 detail = f" `{tool_input.get('file_path', '')}`"
             elif tool == "WebFetch":
                 detail = f" `{tool_input.get('url', '')[:60]}`"
-            raw_iterm = data.get("_iterm_session_id") or ""
-            iterm_sid = extract_iterm_session_id(raw_iterm)
+            iterm_sid = self._iterm_sid_from_event(data)
             if iterm_sid and self._is_pane_paused(iterm_sid):
                 return f"[bold yellow]{'PAUSED':<8}[/]", f"{tool}{detail}"
             if panel:
@@ -1205,8 +1196,7 @@ class AutoAcceptTUI(App):
             elif ntype == "permission_prompt":
                 # Auto-approve by sending Enter to the pane (handles team scenarios
                 # where the hook fires in a subagent but the prompt shows on the leader)
-                raw_iterm = data.get("_iterm_session_id") or ""
-                iterm_sid = extract_iterm_session_id(raw_iterm)
+                iterm_sid = self._iterm_sid_from_event(data)
                 if panel and iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
                     panel.accept_count += 1
                     self._send_approve(iterm_sid)

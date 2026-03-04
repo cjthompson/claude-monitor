@@ -29,12 +29,17 @@ def extract_iterm_session_id(raw: str) -> str:
     return raw.split(":", 1)[1] if ":" in raw else raw
 
 
-def fmt_duration(seconds: float) -> str:
-    """Format a duration in seconds as a human-readable string."""
+def fmt_duration(seconds: float, compact: bool = False) -> str:
+    """Format a duration in seconds as a human-readable string.
+
+    If *compact* is True, omit seconds for values >= 60s (e.g. "3m" instead of "3m05s").
+    """
     s = int(seconds)
     if s < 60:
         return f"{s}s"
     if s < 3600:
+        if compact:
+            return f"{s // 60}m"
         return f"{s // 60}m{s % 60:02d}s"
     h = s // 3600
     m = (s % 3600) // 60
