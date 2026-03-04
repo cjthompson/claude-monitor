@@ -11,9 +11,7 @@ import os
 import sys
 import time
 
-SIGNAL_DIR = "/tmp/claude-auto-accept"
-EVENTS_FILE = os.path.join(SIGNAL_DIR, "events.jsonl")
-PAUSE_FILE = os.path.join(SIGNAL_DIR, "paused")
+from claude_monitor import SIGNAL_DIR, EVENTS_FILE, extract_iterm_session_id, read_state
 
 
 def main():
@@ -23,21 +21,27 @@ def main():
     event_name = data.get("hook_event_name", "")
     data["_timestamp"] = time.time()
     data["_tty"] = os.ttyname(sys.stderr.fileno()) if sys.stderr.isatty() else None
-    # ITERM_SESSION_ID is "w0t0p2:UUID" — extract just the UUID
     raw = os.environ.get("ITERM_SESSION_ID", "")
-    data["_iterm_session_id"] = raw.split(":", 1)[1] if ":" in raw else raw or None
+    data["_iterm_session_id"] = extract_iterm_session_id(raw) or None
+
+    # For PermissionRequest, check global and per-session pause state
+    paused = False
+    if event_name == "PermissionRequest":
+        state = read_state()
+        paused = state.get("global_paused", False)
+        if not paused:
+            iterm_sid = data["_iterm_session_id"]
+            if iterm_sid:
+                paused = iterm_sid in state.get("paused_sessions", [])
+        data["_decision"] = "deferred" if paused else "allowed"
 
     # Log the event
     with open(EVENTS_FILE, "a") as f:
         f.write(json.dumps(data) + "\n")
 
-    # Only auto-allow for PermissionRequest
-    if event_name != "PermissionRequest":
+    # Only auto-allow for PermissionRequest when not paused
+    if event_name != "PermissionRequest" or paused:
         return
-
-    # Check if paused
-    if os.path.exists(PAUSE_FILE):
-        return  # exit 0 without output → normal permission dialog
 
     # Auto-allow
     json.dump(

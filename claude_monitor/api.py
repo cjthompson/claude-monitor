@@ -1,0 +1,217 @@
+"""HTTP API server for claude-monitor.
+
+Runs on localhost:17233 in a background thread. Provides endpoints for
+external tools (e.g. Telegram bot) to query TUI state and screenshots.
+"""
+
+import json
+import logging
+import os
+import subprocess
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+
+from claude_monitor import __version__, API_PORT, API_PORT_FILE
+
+log = logging.getLogger(__name__)
+
+# Textual exports SVG with "Fira Code" but it may not be installed.
+# Detect the best available monospace font for PNG rendering.
+_PNG_FONT = None
+
+
+def _detect_monospace_font():
+    """Find the best installed monospace font for SVG→PNG rendering."""
+    global _PNG_FONT
+    if _PNG_FONT is not None:
+        return _PNG_FONT
+    # Preference order: Fira Code (Textual default), JetBrains Mono, Menlo, Courier New
+    preferred = ["Fira Code", "JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Menlo", "Courier New"]
+    try:
+        result = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True, timeout=5)
+        installed = set(f.strip() for f in result.stdout.split("\n") if f.strip())
+        for font in preferred:
+            if any(font in f for f in installed):
+                _PNG_FONT = font
+                log.debug(f"PNG font: {_PNG_FONT}")
+                return _PNG_FONT
+    except Exception:
+        pass
+    _PNG_FONT = "monospace"
+    return _PNG_FONT
+
+
+class MonitorHTTPHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for the monitor API.
+
+    The `app` class attribute is set by `start_api_server()` before
+    the server starts accepting requests.
+    """
+
+    app = None  # Set by start_api_server()
+    _start_time = None  # Set by start_api_server()
+
+    def log_message(self, format, *args):
+        log.debug(f"API: {format % args}")
+
+    def _send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error(self, status, message):
+        self._send_json({"error": message}, status)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        if path == "/health" or path == "":
+            self._handle_health()
+        elif path == "/screenshot":
+            params = parse_qs(parsed.query)
+            fmt = params.get("format", ["png"])[0]
+            self._handle_screenshot(fmt)
+        elif path == "/text":
+            self._handle_text()
+        else:
+            self._send_error(404, "Not found")
+
+    def _handle_health(self):
+        uptime = int(time.time() - self._start_time) if self._start_time else 0
+        self._send_json({
+            "status": "ok",
+            "version": __version__,
+            "uptime": uptime,
+        })
+
+    def _handle_screenshot(self, fmt):
+        if fmt not in ("png", "svg"):
+            self._send_error(400, "format must be 'png' or 'svg'")
+            return
+
+        if not self.app:
+            self._send_error(503, "App not available")
+            return
+
+        try:
+            svg_text = self.app.call_from_thread(self.app.export_screenshot)
+        except Exception as e:
+            log.error(f"Screenshot export failed: {e}")
+            self._send_error(503, f"Screenshot failed: {e}")
+            return
+
+        if fmt == "svg":
+            body = svg_text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            try:
+                import cairosvg
+                from PIL import Image
+                from io import BytesIO
+
+                font = _detect_monospace_font()
+                if font != "Fira Code":
+                    svg_text = svg_text.replace("Fira Code", font)
+                raw_png = cairosvg.svg2png(bytestring=svg_text.encode("utf-8"))
+                # Quantize to 256 colors (terminal UIs use few colors) + optimize
+                img = Image.open(BytesIO(raw_png))
+                buf = BytesIO()
+                img.quantize(colors=256, method=2, dither=0).save(buf, format="PNG", optimize=True)
+                png_bytes = buf.getvalue()
+            except Exception as e:
+                log.error(f"SVG to PNG conversion failed: {e}")
+                self._send_error(503, f"PNG conversion failed: {e}")
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png_bytes)))
+            self.end_headers()
+            self.wfile.write(png_bytes)
+
+    def _handle_text(self):
+        if not self.app:
+            self._send_error(503, "App not available")
+            return
+
+        try:
+            app = self.app
+            uptime = int(time.time() - self._start_time) if self._start_time else 0
+
+            sessions = []
+            for sid, panel in app.panels.items():
+                sessions.append({
+                    "id": sid,
+                    "title": panel.border_title,
+                    "state": panel._state,
+                    "mode": "manual" if app._is_pane_paused(sid) else "auto",
+                    "active_agents": len(panel.active_agents),
+                    "completed_agents": panel.total_agents_completed,
+                    "accept_count": panel.accept_count,
+                })
+
+            dashboard_data = None
+            if app.dashboard:
+                d = app.dashboard
+                total_accepted = sum(p.accept_count for p in app.panels.values()) + d.accept_count
+                total_agents_active = sum(len(p.active_agents) for p in app.panels.values()) + len(d.active_agents)
+                total_agents_done = sum(p.total_agents_completed for p in app.panels.values()) + d.total_agents_completed
+                active_sessions = sum(1 for p in app.panels.values() if p._state == "active")
+                idle_sessions = sum(1 for p in app.panels.values() if p._state == "idle")
+                dashboard_data = {
+                    "total_accepted": total_accepted,
+                    "total_agents_active": total_agents_active,
+                    "total_agents_completed": total_agents_done,
+                    "active_sessions": active_sessions,
+                    "idle_sessions": idle_sessions,
+                }
+
+            usage_data = None
+            if app._last_usage_data:
+                u = app._last_usage_data
+                usage_data = {
+                    "five_hour": {
+                        "utilization": u.five_hour.utilization,
+                        "resets_at": u.five_hour.resets_at.isoformat() if u.five_hour.resets_at else None,
+                    },
+                    "seven_day": {
+                        "utilization": u.seven_day.utilization,
+                        "resets_at": u.seven_day.resets_at.isoformat() if u.seven_day.resets_at else None,
+                    },
+                }
+
+            self._send_json({
+                "global_mode": "manual" if app._global_paused else "auto",
+                "uptime": uptime,
+                "sessions": sessions,
+                "dashboard": dashboard_data,
+                "usage": usage_data,
+            })
+        except Exception as e:
+            log.error(f"Text endpoint failed: {e}")
+            self._send_error(503, f"Failed to collect state: {e}")
+
+
+def start_api_server(app, port=API_PORT):
+    """Create and return an HTTPServer with the app reference stored on the handler."""
+    MonitorHTTPHandler.app = app
+    MonitorHTTPHandler._start_time = time.time()
+
+    server = HTTPServer(("127.0.0.1", port), MonitorHTTPHandler)
+    server.timeout = 1
+
+    os.makedirs(os.path.dirname(API_PORT_FILE), exist_ok=True)
+    with open(API_PORT_FILE, "w") as f:
+        f.write(str(port))
+
+    log.info(f"API server starting on http://127.0.0.1:{port}")
+    return server

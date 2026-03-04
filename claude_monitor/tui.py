@@ -18,35 +18,53 @@ import iterm2
 from iterm2.session import Splitter, Session
 from textual import work
 from textual.app import App, ComposeResult
+from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Footer, Header, RichLog, Sparkline, Static
+from textual.screen import ModalScreen
+from textual.widgets import Footer, RichLog, Sparkline, Static, TabbedContent, TabPane
 
-LOG_FILE = "/tmp/claude-auto-accept/tui-debug.log"
+from claude_monitor import __version__, SIGNAL_DIR, EVENTS_FILE, STATE_FILE, LOG_FILE, API_PORT_FILE, extract_iterm_session_id, fmt_duration, read_state
+from claude_monitor.api import start_api_server
+from claude_monitor.settings import Settings, SettingsScreen, load_settings
+from claude_monitor.usage import fetch_usage, format_usage_inline
+
 logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format="%(asctime)s %(message)s", force=True)
 log = logging.getLogger(__name__)
-
-
-SIGNAL_DIR = "/tmp/claude-auto-accept"
-EVENTS_FILE = os.path.join(SIGNAL_DIR, "events.jsonl")
-PAUSE_FILE = os.path.join(SIGNAL_DIR, "paused")
 
 
 # --- iTerm2 layout helpers ---
 
 def _fetch_layout_sync():
-    """Fetch iTerm2 pane layout synchronously. Returns (tree, self_session_id).
+    """Fetch iTerm2 pane layout synchronously.
 
+    Returns (tabs, self_session_id, window_groups) where:
+    - tabs: list of (tab_id, tab_name, root_splitter) tuples across all windows
+    - self_session_id: UUID of the TUI's own iTerm2 session
+    - window_groups: dict mapping window_id to list of tab_ids in that window
     Each call creates a Connection + event loop. We close the loop after
     to avoid leaking file descriptors.
     """
-    result = [None]
+    result = [None, None]
 
     async def _fetch(connection):
         app = await iterm2.async_get_app(connection)
-        window = app.current_terminal_window
-        if window and window.current_tab:
-            result[0] = window.current_tab.root
+        tabs = []
+        window_groups = {}
+        for window in app.terminal_windows:
+            win_tab_ids = []
+            for tab in window.tabs:
+                if tab.root:
+                    try:
+                        tab_name = await tab.async_get_variable("title") or "Tab"
+                    except Exception:
+                        tab_name = "Tab"
+                    tabs.append((tab.tab_id, tab_name, tab.root))
+                    win_tab_ids.append(tab.tab_id)
+            if win_tab_ids:
+                window_groups[window.window_id] = win_tab_ids
+        result[0] = tabs
+        result[1] = window_groups
 
     conn = iterm2.Connection()
     conn.run_until_complete(_fetch, retry=False)
@@ -56,9 +74,30 @@ def _fetch_layout_sync():
     # Use ITERM_SESSION_ID env var to identify the TUI's own pane.
     # Format is "w0t0p2:UUID" — the UUID matches iTerm2 API session IDs.
     raw = os.environ.get("ITERM_SESSION_ID", "")
-    self_sid = raw.split(":", 1)[1] if ":" in raw else raw
+    self_sid = extract_iterm_session_id(raw)
 
-    return result[0], self_sid
+    return result[0] or [], self_sid, result[1] or {}
+
+
+def _send_keystroke_sync(session_id: str, text: str) -> bool:
+    """Send keystrokes to a specific iTerm2 session. Returns True on success."""
+    success = [False]
+
+    async def _send(connection):
+        app = await iterm2.async_get_app(connection)
+        session = app.get_session_by_id(session_id)
+        if session:
+            await session.async_send_text(text)
+            success[0] = True
+
+    try:
+        conn = iterm2.Connection()
+        conn.run_until_complete(_send, retry=False)
+        if conn.loop:
+            conn.loop.close()
+    except Exception as e:
+        log.debug(f"_send_keystroke_sync: error: {e}")
+    return success[0]
 
 
 def _collect_session_ids(node):
@@ -73,29 +112,92 @@ def _collect_session_ids(node):
     return set()
 
 
-def _layout_fingerprint(node):
-    """Return a hashable fingerprint of the layout including frame sizes.
+def _collect_all_session_ids(tabs):
+    """Extract all session IDs from a list of (tab_id, tab_name, root) tuples."""
+    ids = set()
+    for _tab_id, _tab_name, root in tabs:
+        ids |= _collect_session_ids(root)
+    return ids
 
-    This changes when panes are added/removed OR resized.
+
+def _filter_tabs_by_scope(tabs, self_sid, scope, window_groups=None):
+    """Filter tabs based on iTerm scope setting.
+
+    scope: "current_tab", "current_window", or "all_windows"
+    Requires knowing which tab/window contains self_sid (the TUI's own pane).
+    Falls back to returning all tabs if self_sid is not found.
     """
+    if scope == "all_windows" or not self_sid:
+        return tabs
+
+    # Find the tab containing the TUI's own session
+    self_tab_id = None
+    for tab_id, tab_name, root in tabs:
+        if self_sid in _collect_session_ids(root):
+            self_tab_id = tab_id
+            break
+
+    if not self_tab_id:
+        return tabs  # can't determine our tab, show everything
+
+    if scope == "current_tab":
+        return [(tid, tn, r) for tid, tn, r in tabs if tid == self_tab_id]
+
+    if scope == "current_window" and window_groups:
+        # Find which window contains our tab
+        for _win_id, win_tab_ids in window_groups.items():
+            if self_tab_id in win_tab_ids:
+                allowed = set(win_tab_ids)
+                return [(tid, tn, r) for tid, tn, r in tabs if tid in allowed]
+
+    return tabs
+
+
+def _structure_fingerprint_node(node):
+    """Fingerprint of layout structure only (no sizes). Changes on add/remove/reorder."""
     if isinstance(node, Session):
-        w, h = _get_frame_size(node)
-        return (node.session_id, int(w), int(h))
+        return ("session", node.session_id)
     elif isinstance(node, Splitter):
-        children = tuple(_layout_fingerprint(c) for c in node.children)
+        children = tuple(_structure_fingerprint_node(c) for c in node.children)
         return ("split", node.vertical, children)
     return ()
 
 
+def _structure_fingerprint(tabs):
+    """Structural fingerprint: tabs, panes, split directions. No sizes or names."""
+    return tuple(
+        (tab_id, _structure_fingerprint_node(root))
+        for tab_id, _tab_name, root in tabs
+    )
+
+
+def _size_fingerprint_node(node):
+    """Fingerprint of frame sizes only. Changes on resize."""
+    if isinstance(node, Session):
+        w, h = _get_frame_size(node)
+        return (int(w), int(h))
+    elif isinstance(node, Splitter):
+        return tuple(_size_fingerprint_node(c) for c in node.children)
+    return ()
+
+
+def _size_fingerprint(tabs):
+    """Size fingerprint: pixel dimensions of all panes."""
+    return tuple(_size_fingerprint_node(root) for _, _, root in tabs)
+
+
 # Fetch initial layout before Textual starts
-_layout_tree = None
-_self_session_id = None
+_layout_tabs: list[tuple] = []  # [(tab_id, tab_name, root_splitter), ...]
+_self_session_id: str | None = None
 
 
 def fetch_iterm_layout():
-    global _layout_tree, _self_session_id
-    _layout_tree, _self_session_id = _fetch_layout_sync()
-    log.debug(f"fetch_iterm_layout done: tree={type(_layout_tree).__name__}, self={_self_session_id}")
+    global _layout_tabs, _self_session_id
+    tabs, self_sid, win_groups = _fetch_layout_sync()
+    settings = load_settings()
+    _layout_tabs = _filter_tabs_by_scope(tabs, self_sid, settings.iterm_scope, win_groups)
+    _self_session_id = self_sid
+    log.debug(f"fetch_iterm_layout done: tabs={len(_layout_tabs)}, self={_self_session_id}")
 
 
 # --- Textual widgets ---
@@ -107,15 +209,27 @@ class HookEvent(Message):
 
 
 class LayoutChanged(Message):
-    """Posted when iTerm2 layout has changed (panes added/removed/rearranged)."""
-    def __init__(self, tree, self_session_id: str) -> None:
+    """Posted when iTerm2 layout structure has changed (panes added/removed/rearranged)."""
+    def __init__(self, tabs: list[tuple], self_session_id: str) -> None:
         super().__init__()
-        self.tree = tree
+        self.tabs = tabs
         self.self_session_id = self_session_id
+
+
+class LayoutResized(Message):
+    """Posted when iTerm2 pane sizes changed but structure is the same."""
+    def __init__(self, tabs: list[tuple]) -> None:
+        super().__init__()
+        self.tabs = tabs
 
 
 class SessionPanel(Static):
     """A bordered panel showing events for one session."""
+
+    class PaneToggle(Message):
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
 
     DEFAULT_CSS = """
     SessionPanel {
@@ -124,8 +238,17 @@ class SessionPanel(Static):
         width: 1fr;
         padding: 0 1;
     }
+    SessionPanel.pane-paused {
+        border: solid $warning;
+    }
     SessionPanel RichLog {
         height: 1fr;
+    }
+    SessionPanel:focus {
+        border: double $accent;
+    }
+    SessionPanel.pane-paused:focus {
+        border: double $warning;
     }
     SessionPanel .panel-status {
         dock: bottom;
@@ -134,6 +257,12 @@ class SessionPanel(Static):
         color: $text-muted;
     }
     """
+
+    can_focus = True
+
+    BINDINGS = [
+        ("m", "toggle_pane_mode", "Toggle Auto/Manual"),
+    ]
 
     def __init__(self, session_id: str, title: str, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -148,7 +277,7 @@ class SessionPanel(Static):
         self._event_log: list[str] = []  # stored for replay after rebuild
 
     def compose(self) -> ComposeResult:
-        yield RichLog(markup=True, wrap=True)
+        yield RichLog(markup=True, wrap=False)
         yield Static(self._render_status(), classes="panel-status")
 
     def write(self, text: str) -> None:
@@ -166,18 +295,18 @@ class SessionPanel(Static):
     def mark_idle(self) -> None:
         self._state = "idle"
 
-    def _fmt_duration(self, seconds: float) -> str:
-        s = int(seconds)
-        if s < 60:
-            return f"{s}s"
-        if s < 3600:
-            return f"{s // 60}m{s % 60:02d}s"
-        h = s // 3600
-        m = (s % 3600) // 60
-        return f"{h}h{m:02d}m"
-
     def _render_status(self) -> str:
         SEP = " [dim]│[/] "
+
+        # Mode indicator — check if app has per-pane pause info
+        try:
+            app = self.app
+            if hasattr(app, "_is_pane_paused") and app._is_pane_paused(self.session_id):
+                mode = "[yellow]MANUAL[/]"
+            else:
+                mode = "[green]AUTO[/]"
+        except Exception:
+            mode = ""
 
         # State indicator
         if self._state == "active":
@@ -206,15 +335,28 @@ class SessionPanel(Static):
         accepted = f"{self.accept_count}"
 
         # Uptime
-        uptime = self._fmt_duration(time.time() - self._start_time)
+        uptime = fmt_duration(time.time() - self._start_time)
 
-        return f"{state}{SEP}Agents: {agents}{SEP}Done: {done}{SEP}Accepted: {accepted}{SEP}{uptime}"
+        return f"{mode}{SEP}{state}{SEP}Agents: {agents}{SEP}Done: {done}{SEP}Accepted: {accepted}{SEP}{uptime}"
 
     def _update_status(self) -> None:
         try:
             self.query_one(".panel-status", Static).update(self._render_status())
         except Exception:
             pass
+
+    def on_click(self, event) -> None:
+        """Toggle mode only when clicking the status bar at the bottom."""
+        try:
+            status = self.query_one(".panel-status", Static)
+            # Check if click landed on the status bar region
+            if event.screen_y >= status.region.y:
+                self.post_message(self.PaneToggle(self.session_id))
+        except Exception:
+            pass
+
+    def action_toggle_pane_mode(self) -> None:
+        self.post_message(self.PaneToggle(self.session_id))
 
 
 class DashboardPanel(Static):
@@ -245,6 +387,9 @@ class DashboardPanel(Static):
         super().__init__(**kwargs)
         self.border_title = "Dashboard"
         self._start_time = time.time()
+        self.active_agents: dict[str, str] = {}  # agent_id → agent_type (own session)
+        self.total_agents_completed = 0
+        self.accept_count = 0
         # Track events per 10-second bucket for sparkline
         self._event_buckets: collections.deque = collections.deque(maxlen=30)
         self._current_bucket_time = 0
@@ -255,10 +400,10 @@ class DashboardPanel(Static):
         yield Static(self._render_stats(), classes="dash-stats")
         yield Vertical(
             Static("[dim]Activity (events/10s)[/]"),
-            Sparkline(list(self._event_buckets) or [0], classes="dash-spark"),
+            Sparkline(list(self._event_buckets) or [0]),
             classes="dash-sparkline",
         )
-        yield RichLog(markup=True, wrap=True)
+        yield RichLog(markup=True, wrap=False)
 
     def record_event(self, text: str) -> None:
         """Add to combined feed and update sparkline data."""
@@ -301,11 +446,16 @@ class DashboardPanel(Static):
             total_accepted = total_agents_done = total_agents_active = 0
             active_sessions = idle_sessions = 0
 
+        # Include dashboard's own session agents in totals
+        total_accepted += self.accept_count
+        total_agents_done += self.total_agents_completed
+        total_agents_active += len(self.active_agents)
+
         sessions = f"[bold green]{active_sessions}[/] active"
         if idle_sessions:
             sessions += f" [yellow]{idle_sessions}[/] idle"
 
-        uptime = self._fmt_duration(time.time() - self._start_time)
+        uptime = fmt_duration(time.time() - self._start_time)
 
         agents_str = f"[bold magenta]{total_agents_active}[/] running" if total_agents_active else "[dim]0[/]"
 
@@ -316,19 +466,147 @@ class DashboardPanel(Static):
             f"Uptime: {uptime}"
         )
 
-    def _fmt_duration(self, seconds: float) -> str:
-        s = int(seconds)
-        if s < 60:
-            return f"{s}s"
-        if s < 3600:
-            return f"{s // 60}m{s % 60:02d}s"
-        h = s // 3600
-        m = (s % 3600) // 60
-        return f"{h}h{m:02d}m"
+
+class ChoicesScreen(ModalScreen):
+    """Review screen showing all auto-accepted permission decisions.
+
+    Opened via 'c' key. Reads events.jsonl and shows formatted PermissionRequest entries.
+    """
+
+    DEFAULT_CSS = """
+    ChoicesScreen {
+        align: center middle;
+    }
+    ChoicesScreen #choices-dialog {
+        width: 90%;
+        height: 85%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    ChoicesScreen #choices-title {
+        text-align: center;
+        text-style: bold;
+        width: 100%;
+        margin-bottom: 1;
+    }
+    ChoicesScreen RichLog {
+        height: 1fr;
+    }
+    ChoicesScreen #choices-footer {
+        dock: bottom;
+        height: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="choices-dialog"):
+            yield Static("Permission Choices Log", id="choices-title")
+            yield RichLog(markup=True, wrap=True, id="choices-log")
+            yield Static("[dim]ESC to close[/]", id="choices-footer")
+
+    def on_mount(self) -> None:
+        rl = self.query_one("#choices-log", RichLog)
+        entries = self._load_choices()
+        if not entries:
+            rl.write("[dim]No permission events recorded yet.[/]")
+            return
+        for entry in entries:
+            rl.write(entry)
+
+    def _load_choices(self) -> list[str]:
+        """Load PermissionRequest events from events.jsonl (newest first)."""
+        entries = []
+        try:
+            with open(EVENTS_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("hook_event_name") != "PermissionRequest":
+                        continue
+                    entries.append(self._format_choice(data))
+        except FileNotFoundError:
+            pass
+        return list(reversed(entries[-200:]))
+
+    def _format_choice(self, data: dict) -> str:
+        ts = datetime.fromtimestamp(data.get("_timestamp", 0))
+        t = ts.strftime("%Y-%m-%d %H:%M:%S")
+        tool = data.get("tool_name", "?")
+        tool_input = data.get("tool_input", {})
+        session = data.get("session_id", "?")[:8]
+        cwd = data.get("cwd", "")
+        project = os.path.basename(cwd) if cwd else ""
+        decision = data.get("_decision", "allowed")
+
+        # Decision badge
+        if decision == "deferred":
+            badge = "[bold yellow]DEFERRED[/]"
+        else:
+            badge = "[bold green]ALLOWED [/]"
+
+        # Tool detail
+        detail = ""
+        if tool == "Bash":
+            cmd = tool_input.get("command", "")
+            desc = tool_input.get("description", "")
+            detail = f"\n    [dim]cmd:[/] {cmd[:120]}"
+            if desc:
+                detail += f"\n    [dim]desc:[/] {desc[:80]}"
+        elif tool in ("Edit", "Write", "Read"):
+            fp = tool_input.get("file_path", "")
+            detail = f"\n    [dim]file:[/] {fp}"
+        elif tool == "WebFetch":
+            url = tool_input.get("url", "")
+            detail = f"\n    [dim]url:[/] {url[:100]}"
+        elif tool_input:
+            for k, v in list(tool_input.items())[:2]:
+                detail += f"\n    [dim]{k}:[/] {str(v)[:80]}"
+
+        # Suggestions
+        suggestions = data.get("permission_suggestions", [])
+        sug_text = ""
+        if suggestions:
+            sug_parts = []
+            for s in suggestions:
+                stype = s.get("type", "?")
+                if stype == "addRules":
+                    rules = s.get("rules", [])
+                    for r in rules:
+                        sug_parts.append(f"addRule({r.get('toolName', '?')})")
+                elif stype == "setMode":
+                    sug_parts.append(f"setMode({s.get('mode', '?')})")
+                else:
+                    sug_parts.append(stype)
+            sug_text = f"\n    [dim]suggestions:[/] {', '.join(sug_parts)}"
+
+        return (
+            f"[bold]{t}[/]  [{session}]  [bold]{project}[/]\n"
+            f"  {badge} [bold]{tool}[/]{detail}{sug_text}\n"
+        )
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
 
 
 def _safe_css_id(session_id: str) -> str:
     return "panel-" + session_id.replace("-", "").replace(":", "").replace("/", "")
+
+
+def _safe_tab_css_id(tab_id: str) -> str:
+    return "tab-" + tab_id.replace("-", "").replace(":", "").replace("/", "").replace(".", "")
 
 
 def _get_frame_size(node):
@@ -366,6 +644,9 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
             # Transfer dashboard state
             if old_dashboard:
                 panel._start_time = old_dashboard._start_time
+                panel.active_agents = dict(old_dashboard.active_agents)
+                panel.total_agents_completed = old_dashboard.total_agents_completed
+                panel.accept_count = old_dashboard.accept_count
                 panel._event_buckets = old_dashboard._event_buckets
                 panel._current_bucket_time = old_dashboard._current_bucket_time
                 panel._current_bucket_count = old_dashboard._current_bucket_count
@@ -427,6 +708,29 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
     return Static("?"), None
 
 
+class MonitorCommands(Provider):
+    """Command palette provider for Claude Monitor actions."""
+
+    _COMMANDS = [
+        ("Toggle Auto/Manual", "action_toggle_pause", "Switch between auto-accept and manual mode"),
+        ("Choices Log", "action_show_choices", "Review auto-accepted permission decisions"),
+        ("Refresh Layout", "action_refresh_layout", "Re-fetch iTerm2 pane layout"),
+        ("Settings", "action_open_settings", "Open settings screen"),
+        ("Quit", "action_quit", "Exit Claude Monitor"),
+    ]
+
+    async def discover(self) -> Hits:
+        for name, action, help_text in self._COMMANDS:
+            yield DiscoveryHit(name, getattr(self.app, action), help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for name, action, help_text in self._COMMANDS:
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(score, matcher.highlight(name), getattr(self.app, action), help=help_text)
+
+
 class AutoAcceptTUI(App):
     """TUI that mirrors iTerm2 pane layout and displays auto-accept events."""
 
@@ -435,11 +739,28 @@ class AutoAcceptTUI(App):
         height: 1fr;
         width: 1fr;
     }
+    #tab-content {
+        height: 1fr;
+        width: 1fr;
+    }
+    #tab-content TabPane {
+        padding: 0;
+    }
+    #tab-content Tab.-active {
+        background: $accent;
+        color: $text;
+        text-style: bold;
+    }
+    #tab-content Tab {
+        text-style: none;
+    }
+    SessionPanel.worktree {
+        border: solid $secondary;
+    }
     #status-bar {
-        dock: bottom;
+        dock: top;
         height: 1;
         text-style: bold;
-        padding: 0 1;
     }
     #status-bar.running {
         background: $success;
@@ -453,52 +774,141 @@ class AutoAcceptTUI(App):
         background: $accent;
         color: $text;
     }
+    #status-left {
+        width: 1fr;
+        padding: 0 1;
+    }
+    #status-right {
+        width: auto;
+        padding: 0 1;
+    }
     """
 
     TITLE = "Claude Monitor (Auto)"
 
+    COMMANDS = {MonitorCommands}
+
     BINDINGS = [
-        ("p", "toggle_pause", "Auto/Manual"),
+        ("a", "toggle_pause", "Auto/Manual"),
+        ("shift+tab", "toggle_pause", "Auto/Manual"),
+        ("c", "show_choices", "Choices"),
         ("r", "refresh_layout", "Refresh"),
+        ("s", "open_settings", "Settings"),
         ("q", "quit", "Quit"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
+        self.settings = load_settings()
         self.panels: dict[str, SessionPanel] = {}
         self.dashboard: DashboardPanel | None = None
         self._iterm_to_panel: dict[str, str] = {}
         self._stop_event = threading.Event()
+        self._rebuilding = False
         self._current_layout_ids: set[str] = set()
-        self._current_layout_fp = None  # fingerprint including frame sizes
+        self._current_structure_fp = None
+        self._current_size_fp = None
+        self._usage_polling = False
+        self._last_usage_data = None
+        self._api_server = None
+        self._global_paused: bool = False
+        self._paused_sessions: set[str] = set()
 
     @property
     def paused(self) -> bool:
-        return os.path.exists(PAUSE_FILE)
+        return self._global_paused
+
+    def _is_pane_paused(self, iterm_sid: str) -> bool:
+        return self._global_paused or iterm_sid in self._paused_sessions
+
+    def _save_state(self) -> None:
+        with open(STATE_FILE, "w") as f:
+            json.dump({"global_paused": self._global_paused, "paused_sessions": list(self._paused_sessions)}, f)
+
+    def _load_state(self) -> None:
+        state = read_state()
+        self._global_paused = state.get("global_paused", False)
+        self._paused_sessions = set(state.get("paused_sessions", []))
+
+    def _update_all_panel_modes(self) -> None:
+        for panel in self.panels.values():
+            if self._is_pane_paused(panel.session_id):
+                panel.add_class("pane-paused")
+            else:
+                panel.remove_class("pane-paused")
 
     def compose(self) -> ComposeResult:
-        yield Header()
-
-        root = Vertical(id="layout-root")
-        if _layout_tree:
-            log.debug("compose(): building widget tree from layout")
-            layout, dash = _build_widget_tree(_layout_tree, _self_session_id, self.panels)
-            self.dashboard = dash
-            self._current_layout_ids = _collect_session_ids(_layout_tree)
-            self._current_layout_fp = _layout_fingerprint(_layout_tree)
-            log.debug(f"compose(): panels={list(self.panels.keys())}, dashboard={dash is not None}")
-            root.compose_add_child(layout)
-        else:
-            log.debug("compose(): NO layout tree, using fallback")
-
-        yield root
-
-        yield Static("AUTO — accepting all permission prompts", id="status-bar", classes="running")
+        with Horizontal(id="status-bar", classes="running"):
+            yield Static("AUTO", id="status-left")
+            yield Static("", id="status-right")
+        yield Vertical(id="layout-root")
         yield Footer()
 
-    def on_mount(self) -> None:
-        log.debug(f"on_mount(): panels={list(self.panels.keys())}")
-        # Replay event logs into RichLogs (they aren't mounted during __init__)
+    async def on_mount(self) -> None:
+        self._apply_settings(self.settings)
+        # Build and mount initial layout from pre-fetched tabs
+        if _layout_tabs:
+            root = self.query_one("#layout-root")
+            await self._mount_tabs(root, _layout_tabs, _self_session_id)
+            self._current_layout_ids = _collect_all_session_ids(_layout_tabs)
+            self._current_structure_fp = _structure_fingerprint(_layout_tabs)
+            self._current_size_fp = _size_fingerprint(_layout_tabs)
+            log.debug(f"on_mount(): panels={list(self.panels.keys())}, dashboard={self.dashboard is not None}")
+        os.makedirs(SIGNAL_DIR, exist_ok=True)
+        # Load state and prune stale session entries
+        self._load_state()
+        current_sids = set(self.panels.keys())
+        stale = self._paused_sessions - current_sids
+        if stale:
+            self._paused_sessions -= stale
+        # Apply default mode from settings
+        if self.settings.default_mode == "manual":
+            self._global_paused = True
+        elif self.settings.default_mode == "auto":
+            self._global_paused = False
+        # last_used: leave global pause state as-is
+        self._save_state()
+        self._update_all_panel_modes()
+        # Clean up legacy files
+        for legacy in ("paused", "paused-sessions.json"):
+            p = os.path.join(SIGNAL_DIR, legacy)
+            if os.path.exists(p):
+                os.remove(p)
+        self._update_status_bar()
+        self.watch_events()
+        self.watch_layout()
+        if self.settings.account_usage:
+            self._usage_polling = True
+            self.poll_usage()
+        self.set_interval(1.0, self._tick_status)
+        self.serve_api()
+
+    async def _mount_tabs(self, root, tabs, self_session_id, old_panels=None, old_dashboard=None):
+        """Mount tab layout into a container. Handles single-tab and multi-tab cases."""
+        if len(tabs) == 1:
+            # Single tab — render directly without tab wrapper
+            _tab_id, _tab_name, tree = tabs[0]
+            layout, dash = _build_widget_tree(
+                tree, self_session_id, self.panels,
+                old_panels=old_panels, old_dashboard=old_dashboard,
+            )
+            self.dashboard = dash
+            await root.mount(layout)
+        else:
+            # Multiple tabs — wrap in TabbedContent
+            tc = TabbedContent(id="tab-content")
+            await root.mount(tc)
+            for tab_id, tab_name, tree in tabs:
+                layout, dash = _build_widget_tree(
+                    tree, self_session_id, self.panels,
+                    old_panels=old_panels, old_dashboard=old_dashboard,
+                )
+                if dash:
+                    self.dashboard = dash
+                pane = TabPane(tab_name, layout, id=_safe_tab_css_id(tab_id))
+                await tc.add_pane(pane)
+
+        # Replay event logs into the newly mounted RichLog widgets
         for panel in self.panels.values():
             if panel._event_log:
                 try:
@@ -514,20 +924,14 @@ class AutoAcceptTUI(App):
                     rl.write(line)
             except Exception:
                 pass
-        os.makedirs(SIGNAL_DIR, exist_ok=True)
-        if os.path.exists(PAUSE_FILE):
-            os.remove(PAUSE_FILE)
-        self._update_title()
-        self.watch_events()
-        self.watch_layout()
-        self.set_interval(1.0, self._tick_status)
 
     def _tick_status(self) -> None:
-        """Refresh all panel status bars and dashboard every second."""
+        """Refresh all panel status bars, dashboard, and top bar every second."""
         for panel in self.panels.values():
             panel._update_status()
         if self.dashboard:
             self.dashboard.refresh_dashboard(self.panels)
+        self._update_status_bar()
 
     # --- Layout polling ---
 
@@ -540,12 +944,18 @@ class AutoAcceptTUI(App):
             if self._stop_event.is_set():
                 break
             try:
-                tree, self_sid = _fetch_layout_sync()
-                if tree:
-                    new_fp = _layout_fingerprint(tree)
-                    if new_fp != self._current_layout_fp:
-                        log.debug(f"watch_layout: layout changed (sessions or sizes)")
-                        self.post_message(LayoutChanged(tree, self_sid))
+                tabs, self_sid, win_groups = _fetch_layout_sync()
+                tabs = _filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
+                if tabs:
+                    new_struct = _structure_fingerprint(tabs)
+                    if new_struct != self._current_structure_fp:
+                        log.debug("watch_layout: structure changed")
+                        self.post_message(LayoutChanged(tabs, self_sid))
+                    else:
+                        new_size = _size_fingerprint(tabs)
+                        if new_size != self._current_size_fp:
+                            log.debug("watch_layout: sizes changed")
+                            self.post_message(LayoutResized(tabs))
             except Exception as e:
                 log.debug(f"watch_layout: error: {e}")
         log.debug("watch_layout: stopped")
@@ -553,53 +963,97 @@ class AutoAcceptTUI(App):
     async def on_layout_changed(self, msg: LayoutChanged) -> None:
         """Rebuild the widget tree when iTerm2 layout changes."""
         log.debug("on_layout_changed: rebuilding layout")
-
-        # Save references to old state
-        old_panels = dict(self.panels)
-        old_dashboard = self.dashboard
-
-        # Clear and rebuild
-        new_panels: dict[str, SessionPanel] = {}
-        layout, dash = _build_widget_tree(
-            msg.tree, msg.self_session_id, new_panels,
-            old_panels=old_panels, old_dashboard=old_dashboard,
-        )
-
-        # Swap out the layout root contents
-        root = self.query_one("#layout-root")
-        await root.remove_children()
-        await root.mount(layout)
-
-        # Update references
-        self.panels = new_panels
-        self.dashboard = dash
-        self._current_layout_ids = _collect_session_ids(msg.tree)
-        self._current_layout_fp = _layout_fingerprint(msg.tree)
-
-        # Preserve iterm→panel mappings for sessions that still exist
-        self._iterm_to_panel = {
-            k: v for k, v in self._iterm_to_panel.items()
-            if v in self.panels
-        }
-
-        # Replay event logs into the new RichLog widgets
-        for panel in self.panels.values():
-            if panel._event_log:
-                try:
-                    rl = panel.query_one(RichLog)
-                    for line in panel._event_log:
-                        rl.write(line)
-                except Exception:
-                    pass
-        if self.dashboard and self.dashboard._event_log:
+        self._rebuilding = True
+        try:
+            # Save the currently active tab and focused panel before rebuild
+            active_tab_id = None
             try:
-                rl = self.dashboard.query_one(RichLog)
-                for line in self.dashboard._event_log:
-                    rl.write(line)
+                tc = self.query_one("#tab-content", TabbedContent)
+                active_tab_id = tc.active
             except Exception:
                 pass
+            focused_session_id = None
+            focused = self.focused
+            if focused:
+                for panel in self.panels.values():
+                    if panel is focused or focused in panel.ancestors_with_self:
+                        focused_session_id = panel.session_id
+                        break
 
-        log.debug(f"on_layout_changed: done. panels={list(self.panels.keys())}, dashboard={dash is not None}")
+            # Save references to old state
+            old_panels = dict(self.panels)
+            old_dashboard = self.dashboard
+
+            # Clear and rebuild
+            self.panels = {}
+            self.dashboard = None
+
+            root = self.query_one("#layout-root")
+            await root.remove_children()
+            await self._mount_tabs(root, msg.tabs, msg.self_session_id,
+                                   old_panels=old_panels, old_dashboard=old_dashboard)
+
+            # Restore active tab and focused panel after rebuild
+            if active_tab_id:
+                try:
+                    tc = self.query_one("#tab-content", TabbedContent)
+                    tc.active = active_tab_id
+                except Exception:
+                    pass
+            if focused_session_id and focused_session_id in self.panels:
+                try:
+                    self.panels[focused_session_id].focus()
+                except Exception:
+                    pass
+
+            self._current_layout_ids = _collect_all_session_ids(msg.tabs)
+            self._current_structure_fp = _structure_fingerprint(msg.tabs)
+            self._current_size_fp = _size_fingerprint(msg.tabs)
+
+            # Preserve iterm→panel mappings for sessions that still exist
+            self._iterm_to_panel = {
+                k: v for k, v in self._iterm_to_panel.items()
+                if v in self.panels
+            }
+        finally:
+            self._rebuilding = False
+
+        self._update_all_panel_modes()
+        log.debug(f"on_layout_changed: done. panels={list(self.panels.keys())}, dashboard={self.dashboard is not None}")
+
+    def on_layout_resized(self, msg: LayoutResized) -> None:
+        """Update widget sizes without rebuilding when only pane sizes changed."""
+        self._current_size_fp = _size_fingerprint(msg.tabs)
+        for _tab_id, _tab_name, root in msg.tabs:
+            self._apply_sizes(root)
+
+    def _apply_sizes(self, node, parent_vertical=None):
+        """Walk iTerm2 tree and update CSS sizes on matching existing widgets."""
+        if isinstance(node, Session):
+            return
+        if not isinstance(node, Splitter):
+            return
+        child_sizes = [_get_frame_size(c) for c in node.children]
+        if node.vertical:
+            total = sum(w for w, _ in child_sizes) or 1
+            fractions = [w / total for w, _ in child_sizes]
+        else:
+            total = sum(h for _, h in child_sizes) or 1
+            fractions = [h / total for _, h in child_sizes]
+        for i, child in enumerate(node.children):
+            pct = round(fractions[i] * 100)
+            if isinstance(child, Session):
+                css_id = _safe_css_id(child.session_id)
+                try:
+                    widget = self.query_one(f"#{css_id}")
+                    if node.vertical:
+                        widget.styles.width = f"{pct}%"
+                    else:
+                        widget.styles.height = f"{pct}%"
+                except Exception:
+                    pass
+            else:
+                self._apply_sizes(child, node.vertical)
 
     # --- Hook event handling ---
 
@@ -607,8 +1061,7 @@ class AutoAcceptTUI(App):
         """Find the panel for a hook event, mapping via iTerm2 session ID."""
         claude_sid = data.get("session_id", "")
         raw_iterm = data.get("_iterm_session_id") or ""
-        # Handle both "UUID" and "w0t0p2:UUID" formats
-        iterm_sid = raw_iterm.split(":", 1)[1] if ":" in raw_iterm else raw_iterm
+        iterm_sid = extract_iterm_session_id(raw_iterm)
 
         # Already mapped this claude session
         if claude_sid in self._iterm_to_panel:
@@ -622,9 +1075,24 @@ class AutoAcceptTUI(App):
         # No match — create a fallback panel
         cwd = data.get("cwd", "")
         short_id = claude_sid[:8] if len(claude_sid) > 8 else claude_sid
-        title = f"{os.path.basename(cwd) or 'session'} [{short_id}]"
+
+        # Detect worktree sessions by cwd path
+        worktree_name = None
+        for marker in ("/.worktrees/", "/.claude/worktrees/"):
+            if marker in cwd:
+                parts = cwd.split(marker)
+                worktree_name = parts[1].split("/")[0]
+                break
+
+        if worktree_name:
+            title = f"WT:{worktree_name} [{short_id}]"
+        else:
+            title = f"{os.path.basename(cwd) or 'session'} [{short_id}]"
+
         css_id = _safe_css_id(claude_sid)
         panel = SessionPanel(claude_sid, title, id=css_id)
+        if worktree_name:
+            panel.add_class("worktree")
         self.panels[claude_sid] = panel
         self._iterm_to_panel[claude_sid] = claude_sid
         # Mount into layout root
@@ -634,120 +1102,276 @@ class AutoAcceptTUI(App):
             self.mount(panel, before=self.query_one("#status-bar"))
         return panel
 
+    def _is_dashboard_event(self, data: dict) -> bool:
+        """Check if an event belongs to the TUI's own (dashboard) session."""
+        raw_iterm = data.get("_iterm_session_id") or ""
+        iterm_sid = extract_iterm_session_id(raw_iterm)
+        return bool(iterm_sid and iterm_sid == _self_session_id)
+
     def on_hook_event(self, msg: HookEvent) -> None:
+        if self._rebuilding:
+            return
         data = msg.data
         event_name = data.get("hook_event_name", "")
+        event_ts = datetime.fromtimestamp(data.get("_timestamp", time.time()))
+        t = self._format_ts(event_ts)
+
+        # Route events from the TUI's own session to the dashboard
+        if self._is_dashboard_event(data) and self.dashboard:
+            self._handle_dashboard_event(data, event_name, t)
+            return
+
         panel = self._resolve_panel(data)
         if not panel:
             return
 
         panel.touch()
-        event_ts = datetime.fromtimestamp(data.get("_timestamp", time.time()))
-        t = event_ts.strftime("%H:%M:%S")
+        label, detail = self._format_event(data, event_name, panel)
+        if label:
+            panel.write(f"[{t}] {label} {detail}")
+        panel._update_status()
 
+        # Feed to dashboard combined feed
+        if self.dashboard:
+            dash_label, dash_detail = self._format_event(data, event_name)
+            if dash_label:
+                sid_short = panel.session_id[:8]
+                self.dashboard.record_event(f"[{t}] [{sid_short}] {dash_label} {dash_detail}")
+
+    def _handle_dashboard_event(self, data: dict, event_name: str, t: str) -> None:
+        """Handle hook events from the TUI's own session on the dashboard."""
+        dash = self.dashboard
+        sid_short = _self_session_id[:8] if _self_session_id else "self"
+
+        # Update dashboard agent/accept counters
+        if event_name == "SubagentStart":
+            agent_id = data.get("agent_id", "?")
+            dash.active_agents[agent_id] = data.get("agent_type", "?")
+        elif event_name == "SubagentStop":
+            dash.active_agents.pop(data.get("agent_id", "?"), None)
+            dash.total_agents_completed += 1
+        elif event_name == "PermissionRequest" and not self._is_pane_paused(_self_session_id or ""):
+            dash.accept_count += 1
+
+        label, detail = self._format_event(data, event_name)
+        if label:
+            dash.record_event(f"[{t}] [{sid_short}] {label} {detail}")
+
+    def _format_ts(self, ts: datetime) -> str:
+        """Format a timestamp according to the timestamp_style setting."""
+        style = self.settings.timestamp_style
+        if style == "12hr":
+            return ts.strftime("%-I:%M:%S%p").lower()
+        if style == "date_time":
+            return ts.strftime("%Y-%m-%d %H:%M:%S")
+        # 24hr and auto
+        return ts.strftime("%H:%M:%S")
+
+    @staticmethod
+    def _oneline(text: str, max_len: int = 60) -> str:
+        """Collapse multi-line text into one line, replacing newlines with ↵."""
+        return " ↵ ".join(line.strip() for line in text.splitlines() if line.strip())[:max_len]
+
+    def _format_event(self, data: dict, event_name: str, panel=None):
+        """Format a hook event. Returns (label, detail) or (None, None).
+
+        If panel is provided, applies side effects (counters, idle state, auto-approve).
+        """
         if event_name == "PermissionRequest":
             tool = data.get("tool_name", "?")
             tool_input = data.get("tool_input", {})
             detail = ""
             if tool == "Bash":
-                detail = f" `{tool_input.get('command', '')[:60]}`"
+                detail = f" `{self._oneline(tool_input.get('command', ''))}`"
             elif tool in ("Edit", "Write"):
                 detail = f" `{tool_input.get('file_path', '')}`"
             elif tool == "WebFetch":
                 detail = f" `{tool_input.get('url', '')[:60]}`"
-
-            if self.paused:
-                panel.write(f"[{t}] [bold yellow]PAUSED[/] {tool}{detail}")
-            else:
+            raw_iterm = data.get("_iterm_session_id") or ""
+            iterm_sid = extract_iterm_session_id(raw_iterm)
+            if iterm_sid and self._is_pane_paused(iterm_sid):
+                return f"[bold yellow]{'PAUSED':<8}[/]", f"{tool}{detail}"
+            if panel:
                 panel.accept_count += 1
-                panel.write(f"[{t}] [bold green]ALLOWED[/] {tool}{detail}")
+            return f"[bold green]{'ALLOWED':<8}[/]", f"{tool}{detail}"
 
         elif event_name == "Notification":
             ntype = data.get("notification_type", "")
             message = data.get("message", "")
             if ntype == "idle_prompt":
-                panel.mark_idle()
-                panel.write(f"[{t}] [dim]IDLE[/] {message}")
-            else:
-                panel.write(f"[{t}] [bold cyan]NOTIFY[/] {message}")
+                if panel:
+                    panel.mark_idle()
+                return f"[dim]{'IDLE':<8}[/]", self._oneline(message, 80)
+            elif ntype == "permission_prompt":
+                # Auto-approve by sending Enter to the pane (handles team scenarios
+                # where the hook fires in a subagent but the prompt shows on the leader)
+                raw_iterm = data.get("_iterm_session_id") or ""
+                iterm_sid = extract_iterm_session_id(raw_iterm)
+                if panel and iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
+                    panel.accept_count += 1
+                    self._send_approve(iterm_sid)
+                    return f"[bold green]{'APPROVED':<8}[/]", message
+            return f"[bold cyan]{'NOTIFY':<8}[/]", self._oneline(message, 80)
 
         elif event_name == "SubagentStart":
             agent_id = data.get("agent_id", "?")
             agent_type = data.get("agent_type", "?")
-            panel.active_agents[agent_id] = agent_type
-            panel.write(f"[{t}] [bold magenta]AGENT+[/] {agent_type} [{agent_id[:8]}]")
+            if panel:
+                panel.active_agents[agent_id] = agent_type
+            return f"[bold magenta]{'AGENT+':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
 
         elif event_name == "SubagentStop":
             agent_id = data.get("agent_id", "?")
             agent_type = data.get("agent_type", "?")
-            panel.active_agents.pop(agent_id, None)
-            panel.total_agents_completed += 1
-            panel.write(f"[{t}] [magenta]AGENT-[/] {agent_type} [{agent_id[:8]}]")
+            if panel:
+                panel.active_agents.pop(agent_id, None)
+                panel.total_agents_completed += 1
+            return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
 
-        panel._update_status()
+        return None, None
 
-        # Feed to dashboard combined feed
-        if self.dashboard:
-            sid_short = panel.session_id[:8]
-            if event_name == "PermissionRequest":
-                tool = data.get("tool_name", "?")
-                label = "[yellow]PAUSED[/]" if self.paused else "[green]ALLOWED[/]"
-                self.dashboard.record_event(f"[{t}] [{sid_short}] {label} {tool}")
-            elif event_name == "Notification":
-                ntype = data.get("notification_type", "")
-                label = "[dim]IDLE[/]" if ntype == "idle_prompt" else "[cyan]NOTIFY[/]"
-                self.dashboard.record_event(f"[{t}] [{sid_short}] {label} {data.get('message', '')[:60]}")
-            elif event_name == "SubagentStart":
-                self.dashboard.record_event(f"[{t}] [{sid_short}] [magenta]AGENT+[/] {data.get('agent_type', '?')}")
-            elif event_name == "SubagentStop":
-                self.dashboard.record_event(f"[{t}] [{sid_short}] [magenta]AGENT-[/] {data.get('agent_type', '?')}")
+    # --- Auto-approve via iTerm2 keystroke ---
+
+    @work(thread=True, exit_on_error=False)
+    def _send_approve(self, session_id: str) -> None:
+        """Send Enter to an iTerm2 session to approve a permission prompt.
+
+        Uses \\r (carriage return) because Claude Code reads raw terminal input
+        where Enter generates CR, not LF.
+        """
+        ok = _send_keystroke_sync(session_id, "\r")
+        log.debug(f"_send_approve: session={session_id[:8]} ok={ok}")
 
     # --- Keybindings ---
 
     def action_refresh_layout(self) -> None:
         """Manually re-fetch iTerm2 layout and rebuild."""
-        status = self.query_one("#status-bar", Static)
-        status.update("REFRESHING layout...")
-        status.set_classes("refreshing")
+        bar = self.query_one("#status-bar", Horizontal)
+        self.query_one("#status-left", Static).update("REFRESHING layout...")
+        bar.set_classes("refreshing")
         self._do_refresh()
 
     @work(thread=True)
     def _do_refresh(self) -> None:
         """Fetch layout in a thread (can't run iterm2 sync from Textual's event loop)."""
+        error = False
         try:
-            tree, self_sid = _fetch_layout_sync()
-            if tree:
-                self.post_message(LayoutChanged(tree, self_sid))
+            tabs, self_sid, win_groups = _fetch_layout_sync()
+            tabs = _filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
+            if tabs:
+                self.post_message(LayoutChanged(tabs, self_sid))
+            else:
+                error = True
         except Exception as e:
             log.debug(f"_do_refresh: error: {e}")
+            error = True
 
         def _restore():
-            try:
-                status = self.query_one("#status-bar", Static)
-                status.update("AUTO — accepting all permission prompts" if not self.paused
-                              else "MANUAL — permission prompts shown to user")
-                status.set_classes("running" if not self.paused else "paused")
-            except Exception:
-                pass
+            if error:
+                try:
+                    self.query_one("#status-left", Static).update("REFRESH FAILED \u2014 iTerm2 not reachable")
+                    self.query_one("#status-bar", Horizontal).set_classes("paused")
+                except Exception:
+                    pass
+            else:
+                self._update_status_bar()
 
         self.call_from_thread(_restore)
 
-    def _update_title(self) -> None:
-        self.title = "Claude Monitor (Manual)" if self.paused else "Claude Monitor (Auto)"
+    def on_session_panel_pane_toggle(self, msg: SessionPanel.PaneToggle) -> None:
+        iterm_sid = msg.session_id
+        if self._global_paused:
+            # Exiting global manual: pause ALL except clicked
+            self._global_paused = False
+            self._paused_sessions = {
+                p.session_id for p in self.panels.values()
+                if p.session_id != iterm_sid
+            }
+        elif iterm_sid in self._paused_sessions:
+            self._paused_sessions.discard(iterm_sid)
+        else:
+            self._paused_sessions.add(iterm_sid)
+        self._save_state()
+        self._update_all_panel_modes()
+        self._update_status_bar()
 
     def action_toggle_pause(self) -> None:
-        if self.paused:
-            os.remove(PAUSE_FILE)
-            status = self.query_one("#status-bar", Static)
-            status.update("AUTO — accepting all permission prompts")
-            status.set_classes("running")
+        if self._global_paused or self._paused_sessions:
+            # Any paused state → all auto
+            self._global_paused = False
+            self._paused_sessions.clear()
         else:
-            with open(PAUSE_FILE, "w") as f:
-                f.write("1")
-            status = self.query_one("#status-bar", Static)
-            status.update("MANUAL — permission prompts shown to user")
-            status.set_classes("paused")
-        self._update_title()
+            # All auto → all manual
+            self._global_paused = True
+        self._save_state()
+        self._update_all_panel_modes()
+        self._update_status_bar()
+
+    def action_show_choices(self) -> None:
+        """Open the permission choices review screen."""
+        self.push_screen(ChoicesScreen())
+
+    def action_open_settings(self) -> None:
+        """Open the settings modal."""
+        self.push_screen(SettingsScreen(self.settings), self._on_settings_closed)
+
+    def _on_settings_closed(self, result: Settings | None) -> None:
+        """Called when settings modal is dismissed."""
+        if result is None:
+            return
+        old_scope = self.settings.iterm_scope
+        self.settings = result
+        self._apply_settings(result)
+        if result.iterm_scope != old_scope:
+            self._current_structure_fp = None  # force rebuild on next poll
+            self._do_refresh()
+        log.debug(f"Settings updated: {result}")
+
+    def _apply_settings(self, settings: Settings) -> None:
+        """Apply settings to the running app."""
+        self.theme = settings.theme
+        # Debug logging level
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG if settings.debug else logging.WARNING)
+        # Start usage polling if newly enabled
+        if settings.account_usage and not self._usage_polling:
+            self._usage_polling = True
+            self.poll_usage()
+        # If usage disabled, clear usage from status bar
+        if not settings.account_usage and self._last_usage_data:
+            self._last_usage_data = None
+            self._update_status_bar()
+
+    def _update_status_bar(self) -> None:
+        """Update the status bar to reflect current pause state, usage, version, and clock."""
+        try:
+            bar = self.query_one("#status-bar", Horizontal)
+            left = self.query_one("#status-left", Static)
+            right = self.query_one("#status-right", Static)
+            SEP = "  [dim]\u2502[/]  "
+
+            n_paused = sum(1 for p in self.panels.values() if self._is_pane_paused(p.session_id))
+            if self.paused:
+                mode_text = "[bold]MANUAL[/]"
+                bar.set_classes("paused")
+            elif n_paused == 0:
+                mode_text = "[bold] AUTO [/]"
+                bar.set_classes("running")
+            else:
+                n_total = len(self.panels)
+                mode_text = f"[bold]MIXED [/] [dim]{n_total - n_paused}a {n_paused}m[/]"
+                bar.set_classes("paused")
+
+            left_parts = [mode_text]
+            if self._last_usage_data:
+                bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
+                left_parts.append(format_usage_inline(self._last_usage_data, bar_width))
+            left.update(SEP.join(left_parts))
+
+            clock = datetime.now().strftime("%-b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
+            right.update(f"[dim]v{__version__}[/]{SEP}{clock}")
+        except Exception:
+            pass
 
     def action_quit(self) -> None:
         self._stop_event.set()
@@ -762,8 +1386,8 @@ class AutoAcceptTUI(App):
     @work(thread=True, exit_on_error=False)
     def watch_events(self) -> None:
         os.makedirs(SIGNAL_DIR, exist_ok=True)
-        if not os.path.exists(EVENTS_FILE):
-            open(EVENTS_FILE, "w").close()
+        from pathlib import Path
+        Path(EVENTS_FILE).touch(exist_ok=True)
 
         with open(EVENTS_FILE, "r") as f:
             f.seek(0, 2)
@@ -780,6 +1404,43 @@ class AutoAcceptTUI(App):
                 else:
                     self._stop_event.wait(0.2)
         log.debug("watch_events: stopped")
+
+    # --- Usage polling ---
+
+    @work(thread=True, exit_on_error=False)
+    def poll_usage(self) -> None:
+        """Poll usage every 30 seconds (API is called at most every 5 minutes)."""
+        log.debug("poll_usage: started")
+        while not self._stop_event.is_set():
+            if not self.settings.account_usage:
+                self._usage_polling = False
+                break
+            self._last_usage_data = fetch_usage()
+
+            self.call_from_thread(self._update_status_bar)
+            self._stop_event.wait(30)
+        log.debug("poll_usage: stopped")
+
+    # --- API server ---
+
+    @work(thread=True, exit_on_error=False)
+    def serve_api(self) -> None:
+        """Run the HTTP API server in a background thread."""
+        try:
+            self._api_server = start_api_server(self)
+            log.debug("serve_api: started")
+            while not self._stop_event.is_set():
+                self._api_server.handle_request()
+        except OSError as e:
+            log.error(f"serve_api: failed to start: {e}")
+        finally:
+            if self._api_server:
+                self._api_server.server_close()
+            try:
+                os.remove(API_PORT_FILE)
+            except OSError:
+                pass
+            log.debug("serve_api: stopped")
 
 
 def main():

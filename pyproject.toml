@@ -1,9 +1,10 @@
 [project]
 name = "claude-monitor"
-version = "0.1.0"
+version = "1.0.1"
 description = "Monitor and auto-accept Claude Code permission prompts"
 requires-python = ">=3.12"
 dependencies = [
+    "cairosvg",
     "iterm2>=2.14",
     "textual>=1.0",
 ]
