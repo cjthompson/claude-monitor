@@ -22,12 +22,14 @@ from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, RichLog, Sparkline, Static, TabbedContent, TabPane
+from textual.scrollbar import ScrollBarRender
+from textual.widgets import Footer, OptionList, RichLog, Sparkline, Static, TabbedContent, TabPane
+from textual.widgets.option_list import Option
 
 from claude_monitor import __version__, SIGNAL_DIR, EVENTS_FILE, STATE_FILE, LOG_FILE, API_PORT_FILE, extract_iterm_session_id, fmt_duration, read_state
 from claude_monitor.api import start_api_server
 from claude_monitor.settings import Settings, SettingsScreen, load_settings
-from claude_monitor.usage import fetch_usage, format_usage_inline
+from claude_monitor.usage import fetch_usage, format_usage_inline, invalidate_usage_cache
 
 logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format="%(asctime)s %(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ def _fetch_layout_sync():
                     try:
                         tab_name = await tab.async_get_variable("title") or "Tab"
                     except Exception:
+                        log.debug("_fetch_layout_sync: failed to get tab title, defaulting to 'Tab'")
                         tab_name = "Tab"
                     tabs.append((tab.tab_id, tab_name, tab.root))
                     win_tab_ids.append(tab.tab_id)
@@ -235,6 +238,7 @@ class SessionPanel(Static):
     }
     SessionPanel RichLog {
         height: 1fr;
+        background: $background;
     }
     SessionPanel:focus {
         border: double $accent;
@@ -247,6 +251,20 @@ class SessionPanel(Static):
         height: 1;
         background: $surface;
         color: $text-muted;
+    }
+    SessionPanel .ctx-btn {
+        dock: top;
+        width: 3;
+        height: 1;
+        offset: -1 0;
+        align-horizontal: right;
+        background: transparent;
+        color: $accent-darken-1;
+        text-style: none;
+    }
+    SessionPanel .ctx-btn:hover {
+        color: $accent;
+        background: $surface;
     }
     """
 
@@ -269,15 +287,21 @@ class SessionPanel(Static):
         self._event_log: list[str] = []  # stored for replay after rebuild
 
     def compose(self) -> ComposeResult:
+        yield Static("▾", classes="ctx-btn", id="ctx-btn")
         yield RichLog(markup=True, wrap=False)
         yield Static(self._render_status(), classes="panel-status")
+
+    def on_mount(self) -> None:
+        rl = self.query_one(RichLog)
+        rl.horizontal_scrollbar.renderer = HorizontalScrollBarRender
+        rl.vertical_scrollbar.renderer = VerticalScrollBarRender
 
     def write(self, text: str) -> None:
         self._event_log.append(text)
         try:
             self.query_one(RichLog).write(text)
         except Exception:
-            pass
+            log.debug(f"SessionPanel.write: RichLog query failed for session {self.session_id}")
 
     def touch(self) -> None:
         """Mark this panel as having received activity."""
@@ -295,60 +319,232 @@ class SessionPanel(Static):
             app = self.app
             if hasattr(app, "_is_pane_paused") and app._is_pane_paused(self.session_id):
                 mode = "[yellow]MANUAL[/]"
+                mode_plain = "MANUAL"
             else:
                 mode = "[green]AUTO[/]"
+                mode_plain = "AUTO"
         except Exception:
+            log.debug(f"SessionPanel._render_status: failed to check pause state for {self.session_id}")
             mode = ""
+            mode_plain = ""
 
         # State indicator
         if self._state == "active":
             state = "[bold green]▶ active[/]"
+            state_short = "[bold green]▶[/]"
+            state_plain = "▶ active"
         elif self._state == "idle":
             state = "[yellow]⏸ idle[/]"
+            state_short = "[yellow]⏸[/]"
+            state_plain = "⏸ idle"
         else:
             state = "[dim]◦ waiting[/]"
+            state_short = "[dim]◦[/]"
+            state_plain = "◦ waiting"
 
         # Agents
         n = len(self.active_agents)
-        if n:
+        has_agents = n > 0
+        if has_agents:
             blocks = "█" * min(n, 8)
             types = {}
             for atype in self.active_agents.values():
                 types[atype] = types.get(atype, 0) + 1
             detail = " ".join(f"{t}:{c}" for t, c in sorted(types.items()))
-            agents = f"[bold magenta]{blocks}[/] {n} ({detail})"
+            agents_full = f"[bold magenta]{blocks}[/] {n} ({detail})"
+            agents_full_plain = f"{blocks} {n} ({detail})"
+            agents_count = f"[bold magenta]{blocks}[/] {n}"
+            agents_count_plain = f"{blocks} {n}"
         else:
-            agents = "[dim]── none[/]"
+            agents_full = "[dim]── none[/]"
+            agents_full_plain = "── none"
+            agents_count = agents_full
+            agents_count_plain = agents_full_plain
 
-        # Completed agents
-        done = f"{self.total_agents_completed}"
-
-        # Accepted
-        accepted = f"{self.accept_count}"
+        # Task counts (Done/Accepted)
+        done = self.total_agents_completed
+        accepted = self.accept_count
 
         # Uptime
         uptime = fmt_duration(time.time() - self._start_time)
 
-        return f"{mode}{SEP}{state}{SEP}Agents: {agents}{SEP}Done: {done}{SEP}Accepted: {accepted}{SEP}{uptime}"
+        # Available width for choosing tier
+        try:
+            w = self.size.width
+        except Exception:
+            w = 120  # fallback to widest
+
+        # SEP is ~3 visible chars (" │ ")
+        S = 3
+
+        # Build tiers from widest to narrowest
+        # Tier 1 (>=110): AUTO │ ▶ active │ Agents: ██ 2 (gp:1 Ex:1) │ Done: 5 │ Accepted: 23 │ 14m32s
+        if has_agents:
+            t1 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}{SEP}Done: {done}{SEP}Accepted: {accepted}{SEP}{uptime}"
+            t1_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain) + S + len(f"Done: {done}") + S + len(f"Accepted: {accepted}") + S + len(uptime)
+        else:
+            t1 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}{SEP}{uptime}"
+            t1_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain) + S + len(uptime)
+
+        if w >= t1_len:
+            return t1
+
+        # Tier 2 (>=85): AUTO │ ▶ active │ Agents: ██ 2 (gp:1 Ex:1) │ Tasks: 5/23
+        if has_agents:
+            t2 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}{SEP}Tasks: {done}/{accepted}"
+            t2_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain) + S + len(f"Tasks: {done}/{accepted}")
+        else:
+            t2 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}"
+            t2_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain)
+
+        if w >= t2_len:
+            return t2
+
+        # Tier 3 (>=60): AUTO │ ▶ active │ Agents: ██ 2 | Tasks: 5/23
+        if has_agents:
+            t3 = f"{mode}{SEP}{state}{SEP}Agents: {agents_count} | Tasks: {done}/{accepted}"
+            t3_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_count_plain) + len(f" | Tasks: {done}/{accepted}")
+        else:
+            t3 = f"{mode}{SEP}{state}{SEP}Agents: {agents_count}"
+            t3_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_count_plain)
+
+        if w >= t3_len:
+            return t3
+
+        # Tier 4 (>=48): AUTO │ ▶ active │ SA: 2 | T: 5/23
+        if has_agents:
+            t4 = f"{mode}{SEP}{state}{SEP}SA: {n} | T: {done}/{accepted}"
+            t4_len = len(mode_plain) + S + len(state_plain) + S + len(f"SA: {n} | T: {done}/{accepted}")
+        else:
+            t4 = f"{mode}{SEP}{state}{SEP}SA: {n}"
+            t4_len = len(mode_plain) + S + len(state_plain) + S + len(f"SA: {n}")
+
+        if w >= t4_len:
+            return t4
+
+        # Tier 5 (>=38): AUTO │ ▶ | SA: 2 | T: 5/23
+        if has_agents:
+            t5 = f"{mode}{SEP}{state_short} | SA: {n} | T: {done}/{accepted}"
+            t5_len = len(mode_plain) + S + 1 + len(f" | SA: {n} | T: {done}/{accepted}")
+        else:
+            t5 = f"{mode}{SEP}{state_short} | SA: {n}"
+            t5_len = len(mode_plain) + S + 1 + len(f" | SA: {n}")
+
+        if w >= t5_len:
+            return t5
+
+        # Tier 6 (>=25): AUTO │ ▶ | T:5/23
+        if has_agents:
+            t6 = f"{mode}{SEP}{state_short} | T:{done}/{accepted}"
+            t6_len = len(mode_plain) + S + 1 + len(f" | T:{done}/{accepted}")
+        else:
+            t6 = f"{mode}{SEP}{state_short}"
+            t6_len = len(mode_plain) + S + 1
+
+        if w >= t6_len:
+            return t6
+
+        # Tier 7 (>=12): AUTO │ ▶
+        t7 = f"{mode}{SEP}{state_short}"
+        t7_len = len(mode_plain) + S + 1
+
+        if w >= t7_len:
+            return t7
+
+        # Tier 8 (<12): AUTO
+        return mode
 
     def _update_status(self) -> None:
         try:
             self.query_one(".panel-status", Static).update(self._render_status())
         except Exception:
-            pass
+            log.debug(f"SessionPanel._update_status: panel-status query failed for {self.session_id}")
 
     def on_click(self, event) -> None:
-        """Toggle mode only when clicking the status bar at the bottom."""
+        """Status bar click toggles mode; ▾ button opens context menu."""
+        if event.control and getattr(event.control, "id", None) == "ctx-btn":
+            event.stop()
+            self.app.push_screen(PaneContextMenu(self.session_id))
+            return
         try:
             status = self.query_one(".panel-status", Static)
-            # Check if click landed on the status bar region
             if event.screen_y >= status.region.y:
                 self.post_message(self.PaneToggle(self.session_id))
         except Exception:
-            pass
+            log.debug(f"SessionPanel.on_click: panel-status query failed for {self.session_id}")
 
     def action_toggle_pane_mode(self) -> None:
         self.post_message(self.PaneToggle(self.session_id))
+
+
+class PaneContextMenu(ModalScreen):
+    """Context menu for a SessionPanel, shown on body click."""
+
+    DEFAULT_CSS = """
+    PaneContextMenu {
+        align: center middle;
+    }
+    PaneContextMenu #ctx-menu {
+        width: 40;
+        max-height: 12;
+        background: $surface;
+        border: solid $accent;
+        padding: 0;
+    }
+    PaneContextMenu OptionList {
+        height: auto;
+        max-height: 10;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, session_id: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._ctx_session_id = session_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="ctx-menu"):
+            yield OptionList(
+                Option("Toggle Auto/Manual", id="toggle_mode"),
+                Option("View Choices Log", id="choices"),
+                Option("View Questions Log", id="questions"),
+                Option("Copy Session ID", id="copy_sid"),
+                Option("Open Settings", id="settings"),
+                id="ctx-options",
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option.id
+        self.app.pop_screen()
+        if option_id == "toggle_mode":
+            self.app.on_session_panel_pane_toggle(
+                SessionPanel.PaneToggle(self._ctx_session_id)
+            )
+        elif option_id == "choices":
+            self.app.action_show_choices()
+        elif option_id == "questions":
+            self.app.action_show_questions()
+        elif option_id == "copy_sid":
+            self.app.copy_to_clipboard(self._ctx_session_id)
+            self.app.notify(f"Session ID copied: {self._ctx_session_id[:12]}...")
+        elif option_id == "settings":
+            self.app.action_open_settings()
+
+    def on_click(self, event) -> None:
+        """Dismiss if clicking outside the menu."""
+        try:
+            menu = self.query_one("#ctx-menu", Vertical)
+            region = menu.region
+            if not region.contains(event.screen_x, event.screen_y):
+                self.app.pop_screen()
+        except Exception:
+            self.app.pop_screen()
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
 
 
 class DashboardPanel(Static):
@@ -372,6 +568,7 @@ class DashboardPanel(Static):
     }
     DashboardPanel RichLog {
         height: 1fr;
+        background: $background;
     }
     """
 
@@ -397,13 +594,18 @@ class DashboardPanel(Static):
         )
         yield RichLog(markup=True, wrap=False)
 
+    def on_mount(self) -> None:
+        rl = self.query_one(RichLog)
+        rl.horizontal_scrollbar.renderer = HorizontalScrollBarRender
+        rl.vertical_scrollbar.renderer = VerticalScrollBarRender
+
     def record_event(self, text: str) -> None:
         """Add to combined feed and update sparkline data."""
         self._event_log.append(text)
         try:
             self.query_one(RichLog).write(text)
         except Exception:
-            pass
+            log.debug("Dashboard.record_event: RichLog query failed")
         # Sparkline bucketing
         bucket = int(time.time()) // 10
         if bucket != self._current_bucket_time:
@@ -418,12 +620,12 @@ class DashboardPanel(Static):
         try:
             self.query_one(".dash-stats", Static).update(self._render_stats(panels))
         except Exception:
-            pass
+            log.debug("Dashboard.refresh_dashboard: dash-stats query failed")
         try:
             data = list(self._event_buckets) + [self._current_bucket_count]
             self.query_one(Sparkline).data = data
         except Exception:
-            pass
+            log.debug("Dashboard.refresh_dashboard: Sparkline query failed")
 
     def _render_stats(self, panels: dict | None = None) -> str:
         SEP = " [dim]│[/] "
@@ -512,6 +714,8 @@ class ChoicesScreen(ModalScreen):
             return
         for entry in entries:
             rl.write(entry)
+        rl.scroll_end(animate=False)
+        self.query_one("#choices-log", RichLog).horizontal_scrollbar.renderer = HorizontalScrollBarRender
 
     def _load_choices(self) -> list[str]:
         """Load PermissionRequest events from events.jsonl (newest first)."""
@@ -525,13 +729,14 @@ class ChoicesScreen(ModalScreen):
                     try:
                         data = json.loads(line)
                     except json.JSONDecodeError:
+                        log.debug(f"PermissionSearchProvider: failed to parse JSON line: {line[:100]}")
                         continue
                     if data.get("hook_event_name") != "PermissionRequest":
                         continue
                     entries.append(self._format_choice(data))
         except FileNotFoundError:
-            pass
-        return list(reversed(entries[-200:]))
+            log.debug("PermissionSearchProvider: events file not found")
+        return entries[-200:]
 
     def _format_choice(self, data: dict) -> str:
         ts = datetime.fromtimestamp(data.get("_timestamp", 0))
@@ -593,6 +798,187 @@ class ChoicesScreen(ModalScreen):
         self.app.pop_screen()
 
 
+class QuestionsScreen(ModalScreen):
+    """Review screen showing AskUserQuestion events only.
+
+    Opened via 'u' key. Reads events.jsonl and shows formatted AskUserQuestion entries.
+    """
+
+    DEFAULT_CSS = """
+    QuestionsScreen {
+        align: center middle;
+    }
+    QuestionsScreen #questions-dialog {
+        width: 90%;
+        height: 85%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    QuestionsScreen #questions-title {
+        text-align: center;
+        text-style: bold;
+        width: 100%;
+        margin-bottom: 1;
+    }
+    QuestionsScreen RichLog {
+        height: 1fr;
+    }
+    QuestionsScreen #questions-footer {
+        dock: bottom;
+        height: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="questions-dialog"):
+            yield Static("AskUserQuestion Log", id="questions-title")
+            yield RichLog(markup=True, wrap=True, id="questions-log")
+            yield Static("[dim]ESC to close[/]", id="questions-footer")
+
+    def on_mount(self) -> None:
+        rl = self.query_one("#questions-log", RichLog)
+        entries = self._load_questions()
+        if not entries:
+            rl.write("[dim]No AskUserQuestion events recorded yet.[/]")
+            return
+        for entry in entries:
+            rl.write(entry)
+        rl.scroll_end(animate=False)
+        self.query_one("#questions-log", RichLog).horizontal_scrollbar.renderer = HorizontalScrollBarRender
+
+    def _load_questions(self) -> list[str]:
+        """Load AskUserQuestion events from events.jsonl (newest first)."""
+        entries = []
+        try:
+            with open(EVENTS_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("hook_event_name") != "PermissionRequest":
+                        continue
+                    if data.get("tool_name") != "AskUserQuestion":
+                        continue
+                    entries.append(self._format_question(data))
+        except FileNotFoundError:
+            log.debug("QuestionsScreen: events file not found")
+        return entries[-200:]
+
+    def _format_question(self, data: dict) -> str:
+        ts = datetime.fromtimestamp(data.get("_timestamp", 0))
+        t = ts.strftime("%Y-%m-%d %H:%M:%S")
+        session = data.get("session_id", "?")[:8]
+        cwd = data.get("cwd", "")
+        project = os.path.basename(cwd) if cwd else ""
+        decision = data.get("_decision", "allowed")
+
+        # Decision badge
+        if decision == "deferred":
+            badge = "[bold yellow]DEFERRED[/]"
+        else:
+            badge = "[bold green]ALLOWED [/]"
+
+        detail = _format_ask_user_question_detail(data)
+        detail_block = f"\n{detail}" if detail else ""
+
+        return (
+            f"[bold]{t}[/]  [{session}]  [bold]{project}[/]\n"
+            f"  {badge} [bold]AskUserQuestion[/]{detail_block}\n"
+        )
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
+def _format_ask_user_question_inline(tool_input: dict) -> str:
+    """Format AskUserQuestion tool_input as a readable inline string for the event log.
+
+    Handles two formats:
+    - Simple: tool_input has 'question' (str) directly
+    - Structured: tool_input has 'questions' (list of dicts with 'question' and 'options')
+      and 'answers' (dict mapping question text to selected answer)
+    """
+    parts = []
+    questions = tool_input.get("questions", [])
+    answers = tool_input.get("answers", {})
+
+    if questions:
+        for q in questions:
+            q_text = q.get("question", "")
+            options = q.get("options", [])
+            selected = answers.get(q_text, "")
+            option_labels = [o.get("label", "") for o in options if o.get("label")]
+            if q_text:
+                line = f" \"{q_text}\""
+                if option_labels:
+                    choices_str = " / ".join(option_labels)
+                    line += f" [{choices_str}]"
+                if selected:
+                    line += f" -> [bold]{selected}[/]"
+                parts.append(line)
+    else:
+        # Simple format with just 'question' key
+        question = tool_input.get("question", "")
+        if question:
+            parts.append(f" \"{question[:200]}\"")
+        elif tool_input:
+            # Fallback: show first couple keys
+            for k, v in list(tool_input.items())[:2]:
+                parts.append(f" {k}={str(v)[:80]}")
+
+    return "".join(parts) if parts else ""
+
+
+def _format_ask_user_question_detail(data: dict) -> str:
+    """Format AskUserQuestion event as a multi-line detail string for the QuestionsScreen."""
+    tool_input = data.get("tool_input", {})
+    questions = tool_input.get("questions", [])
+    answers = tool_input.get("answers", {})
+    lines = []
+
+    if questions:
+        for i, q in enumerate(questions):
+            q_text = q.get("question", "")
+            options = q.get("options", [])
+            selected = answers.get(q_text, "")
+            if q_text:
+                lines.append(f"    [dim]Q:[/] {q_text}")
+            for o in options:
+                label = o.get("label", "")
+                desc = o.get("description", "")
+                if label:
+                    if selected and label == selected:
+                        marker = "[bold green]>>[/]"
+                        lines.append(f"      {marker} [bold]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                    else:
+                        lines.append(f"         {label}" + (f"  [dim]{desc}[/]" if desc else ""))
+            if selected:
+                lines.append(f"    [dim]Answer:[/] [bold]{selected}[/]")
+            if i < len(questions) - 1:
+                lines.append("")
+    else:
+        question = tool_input.get("question", "")
+        if question:
+            lines.append(f"    [dim]Q:[/] {question[:300]}")
+        elif tool_input:
+            for k, v in list(tool_input.items())[:3]:
+                lines.append(f"    [dim]{k}:[/] {str(v)[:200]}")
+
+    return "\n".join(lines)
+
+
 def _safe_css_id(session_id: str) -> str:
     return "panel-" + session_id.replace("-", "").replace(":", "").replace("/", "")
 
@@ -607,6 +993,7 @@ def _get_frame_size(node):
         try:
             return node.frame.size.width, node.frame.size.height
         except Exception:
+            log.debug(f"_get_node_size: failed to get frame size for session {node.session_id}")
             return 0, 0
     elif isinstance(node, Splitter):
         # Sum children along the split axis, max along the other
@@ -706,6 +1093,7 @@ class MonitorCommands(Provider):
     _COMMANDS = [
         ("Toggle Auto/Manual", "action_toggle_pause", "Switch between auto-accept and manual mode"),
         ("Choices Log", "action_show_choices", "Review auto-accepted permission decisions"),
+        ("Questions Log", "action_show_questions", "Review AskUserQuestion events"),
         ("Refresh Layout", "action_refresh_layout", "Re-fetch iTerm2 pane layout"),
         ("Settings", "action_open_settings", "Open settings screen"),
         ("Quit", "action_quit", "Exit Claude Monitor"),
@@ -721,6 +1109,78 @@ class MonitorCommands(Provider):
             score = matcher.match(name)
             if score > 0:
                 yield Hit(score, matcher.highlight(name), getattr(self.app, action), help=help_text)
+
+
+class HalfBlockScrollBarRender(ScrollBarRender):
+    """Base renderer that draws the thumb using the half-block glyph in bar color (no reverse)."""
+
+    @classmethod
+    def render_bar(cls, size=25, virtual_size=50, window_size=20, position=0,
+                   thickness=1, vertical=True,
+                   back_color=None, bar_color=None) -> "Segments":
+        from rich.color import Color
+        from rich.segment import Segment, Segments
+        from rich.style import Style
+        from math import ceil
+        if back_color is None:
+            back_color = Color.parse("#000000")
+        if bar_color is None:
+            bar_color = Color.parse("bright_magenta")
+        bars = cls.VERTICAL_BARS if vertical else cls.HORIZONTAL_BARS
+        len_bars = len(bars)
+        width_thickness = thickness if vertical else 1
+        blank = cls.BLANK_GLYPH * width_thickness
+        foreground_meta = {"@mouse.down": "grab"}
+        if window_size and size and virtual_size and size != virtual_size:
+            bar_ratio = virtual_size / size
+            thumb_size = max(1, window_size / bar_ratio)
+            position_ratio = position / (virtual_size - window_size)
+            position = (size - thumb_size) * position_ratio
+            start = int(position * len_bars)
+            end = start + ceil(thumb_size * len_bars)
+            start_index, start_bar = divmod(max(0, start), len_bars)
+            end_index, end_bar = divmod(max(0, end), len_bars)
+            upper = {"@mouse.down": "scroll_up"}
+            lower = {"@mouse.down": "scroll_down"}
+            upper_back_segment = Segment(blank, Style(bgcolor=back_color, meta=upper))
+            lower_back_segment = Segment(blank, Style(bgcolor=back_color, meta=lower))
+            segments = [upper_back_segment] * int(size)
+            segments[end_index:] = [lower_back_segment] * (size - end_index)
+            # Thumb: use bar_color as foreground, back_color as background (no reverse)
+            segments[start_index:end_index] = [
+                Segment(blank, Style(color=bar_color, bgcolor=back_color, meta=foreground_meta))
+            ] * (end_index - start_index)
+            # Fractional end caps
+            if start_index < len(segments):
+                bar_character = bars[len_bars - 1 - start_bar]
+                if bar_character != " ":
+                    segments[start_index] = Segment(
+                        bar_character * width_thickness,
+                        Style(color=bar_color, bgcolor=back_color, meta=foreground_meta),
+                    )
+            if end_index < len(segments):
+                bar_character = bars[len_bars - 1 - end_bar]
+                if bar_character != " ":
+                    segments[end_index] = Segment(
+                        bar_character * width_thickness,
+                        Style(color=bar_color, bgcolor=back_color, meta=foreground_meta),
+                    )
+        else:
+            segments = [Segment(blank, Style(bgcolor=back_color))] * int(size)
+        if vertical:
+            return Segments(segments, new_lines=True)
+        else:
+            return Segments((segments + [Segment.line()]) * thickness, new_lines=False)
+
+
+class HorizontalScrollBarRender(HalfBlockScrollBarRender):
+    BLANK_GLYPH = "▄"
+    HORIZONTAL_BARS = [" ", " ", " ", " ", " ", " ", " ", " "]  # disable fractional end caps
+
+
+class VerticalScrollBarRender(HalfBlockScrollBarRender):
+    BLANK_GLYPH = "▐"
+    VERTICAL_BARS = ["▐", "▐", "▐", "▐", "▐", "▐", "▐", " "]  # disable fractional end caps
 
 
 class AutoAcceptTUI(App):
@@ -749,18 +1209,25 @@ class AutoAcceptTUI(App):
     SessionPanel.worktree {
         border: solid $secondary;
     }
+    RichLog {
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-background: $background;
+        scrollbar-background-hover: $background;
+        scrollbar-background-active: $background;
+    }
     #status-bar {
         dock: top;
         height: 1;
         text-style: bold;
     }
     #status-bar.running {
-        background: $success;
-        color: $text;
+        background: #10643c;
+        color: #f0fff5;
     }
     #status-bar.paused {
-        background: $warning;
-        color: $text;
+        background: #6e280f;
+        color: #ffe1c8;
     }
     #status-bar.refreshing {
         background: $accent;
@@ -784,6 +1251,7 @@ class AutoAcceptTUI(App):
         ("a", "toggle_pause", "Auto/Manual"),
         ("shift+tab", "toggle_pause", "Auto/Manual"),
         ("c", "show_choices", "Choices"),
+        ("u", "show_questions", "Questions"),
         ("r", "refresh_layout", "Refresh"),
         ("s", "open_settings", "Settings"),
         ("q", "quit", "Quit"),
@@ -812,9 +1280,70 @@ class AutoAcceptTUI(App):
     def _is_pane_paused(self, iterm_sid: str) -> bool:
         return self._global_paused or iterm_sid in self._paused_sessions
 
+    def get_state_snapshot(self) -> dict:
+        """Return a serializable dict of the full TUI state for the API.
+
+        This is the single public interface used by the HTTP API /text endpoint,
+        avoiding direct access to private panel/app attributes.
+        """
+        sessions = []
+        for sid, panel in self.panels.items():
+            sessions.append({
+                "id": sid,
+                "title": panel.border_title,
+                "state": panel._state,
+                "mode": "manual" if self._is_pane_paused(sid) else "auto",
+                "active_agents": len(panel.active_agents),
+                "completed_agents": panel.total_agents_completed,
+                "accept_count": panel.accept_count,
+            })
+
+        dashboard_data = None
+        if self.dashboard:
+            d = self.dashboard
+            total_accepted = sum(p.accept_count for p in self.panels.values()) + d.accept_count
+            total_agents_active = sum(len(p.active_agents) for p in self.panels.values()) + len(d.active_agents)
+            total_agents_done = sum(p.total_agents_completed for p in self.panels.values()) + d.total_agents_completed
+            active_sessions = sum(1 for p in self.panels.values() if p._state == "active")
+            idle_sessions = sum(1 for p in self.panels.values() if p._state == "idle")
+            dashboard_data = {
+                "total_accepted": total_accepted,
+                "total_agents_active": total_agents_active,
+                "total_agents_completed": total_agents_done,
+                "active_sessions": active_sessions,
+                "idle_sessions": idle_sessions,
+            }
+
+        usage_data = None
+        if self._last_usage_data:
+            u = self._last_usage_data
+            usage_data = {
+                "five_hour": {
+                    "utilization": u.five_hour.utilization,
+                    "resets_at": u.five_hour.resets_at.isoformat() if u.five_hour.resets_at else None,
+                },
+                "seven_day": {
+                    "utilization": u.seven_day.utilization,
+                    "resets_at": u.seven_day.resets_at.isoformat() if u.seven_day.resets_at else None,
+                },
+            }
+
+        return {
+            "global_mode": "manual" if self._global_paused else "auto",
+            "sessions": sessions,
+            "dashboard": dashboard_data,
+            "usage": usage_data,
+        }
+
     def _save_state(self) -> None:
+        state = {
+            "global_paused": self._global_paused,
+            "paused_sessions": list(self._paused_sessions),
+            "excluded_tools": self.settings.excluded_tools or [],
+            "ask_user_timeout": self.settings.ask_user_timeout,
+        }
         with open(STATE_FILE, "w") as f:
-            json.dump({"global_paused": self._global_paused, "paused_sessions": list(self._paused_sessions)}, f)
+            json.dump(state, f)
 
     def _load_state(self) -> None:
         state = read_state()
@@ -906,14 +1435,14 @@ class AutoAcceptTUI(App):
                     for line in panel._event_log:
                         rl.write(line)
                 except Exception:
-                    pass
+                    log.warning(f"_build_widget_tree: failed to replay event log for panel {panel.session_id}")
         if self.dashboard and self.dashboard._event_log:
             try:
                 rl = self.dashboard.query_one(RichLog)
                 for line in self.dashboard._event_log:
                     rl.write(line)
             except Exception:
-                pass
+                log.warning("_build_widget_tree: failed to replay event log for dashboard")
 
     def _tick_status(self) -> None:
         """Refresh all panel status bars, dashboard, and top bar every second."""
@@ -961,7 +1490,7 @@ class AutoAcceptTUI(App):
                 tc = self.query_one("#tab-content", TabbedContent)
                 active_tab_id = tc.active
             except Exception:
-                pass
+                log.debug("on_layout_changed: failed to get active tab before rebuild")
             focused_session_id = None
             focused = self.focused
             if focused:
@@ -989,12 +1518,12 @@ class AutoAcceptTUI(App):
                     tc = self.query_one("#tab-content", TabbedContent)
                     tc.active = active_tab_id
                 except Exception:
-                    pass
+                    log.warning(f"on_layout_changed: failed to restore active tab {active_tab_id}")
             if focused_session_id and focused_session_id in self.panels:
                 try:
                     self.panels[focused_session_id].focus()
                 except Exception:
-                    pass
+                    log.debug(f"on_layout_changed: failed to restore focus to panel {focused_session_id}")
 
             self._current_structure_fp = _structure_fingerprint(msg.tabs)
             self._current_size_fp = _size_fingerprint(msg.tabs)
@@ -1040,7 +1569,7 @@ class AutoAcceptTUI(App):
                     else:
                         widget.styles.height = f"{pct}%"
                 except Exception:
-                    pass
+                    log.debug(f"_apply_sizes: widget query failed for #{css_id}")
             else:
                 self._apply_sizes(child, node.vertical)
 
@@ -1092,6 +1621,7 @@ class AutoAcceptTUI(App):
         try:
             self.query_one("#layout-root").mount(panel)
         except Exception:
+            log.warning(f"_create_fallback_panel: layout-root mount failed for {claude_sid}, falling back to status-bar mount")
             self.mount(panel, before=self.query_one("#status-bar"))
         return panel
 
@@ -1118,33 +1648,24 @@ class AutoAcceptTUI(App):
             return
 
         panel.touch()
-        label, detail = self._format_event(data, event_name, panel)
+        self._apply_event(panel, data, event_name)
+        label, detail = self._format_event(data, event_name)
         if label:
             panel.write(f"[{t}] {label} {detail}")
         panel._update_status()
 
         # Feed to dashboard combined feed
         if self.dashboard:
-            dash_label, dash_detail = self._format_event(data, event_name)
-            if dash_label:
+            if label:
                 sid_short = panel.session_id[:8]
-                self.dashboard.record_event(f"[{t}] [{sid_short}] {dash_label} {dash_detail}")
+                self.dashboard.record_event(f"[{t}] [{sid_short}] {label} {detail}")
 
     def _handle_dashboard_event(self, data: dict, event_name: str, t: str) -> None:
         """Handle hook events from the TUI's own session on the dashboard."""
         dash = self.dashboard
         sid_short = _self_session_id[:8] if _self_session_id else "self"
 
-        # Update dashboard agent/accept counters
-        if event_name == "SubagentStart":
-            agent_id = data.get("agent_id", "?")
-            dash.active_agents[agent_id] = data.get("agent_type", "?")
-        elif event_name == "SubagentStop":
-            dash.active_agents.pop(data.get("agent_id", "?"), None)
-            dash.total_agents_completed += 1
-        elif event_name == "PermissionRequest" and not self._is_pane_paused(_self_session_id or ""):
-            dash.accept_count += 1
-
+        self._apply_event(dash, data, event_name)
         label, detail = self._format_event(data, event_name)
         if label:
             dash.record_event(f"[{t}] [{sid_short}] {label} {detail}")
@@ -1164,16 +1685,49 @@ class AutoAcceptTUI(App):
         """Collapse multi-line text into one line, replacing newlines with ↵."""
         return " ↵ ".join(line.strip() for line in text.splitlines() if line.strip())[:max_len]
 
-    def _format_event(self, data: dict, event_name: str, panel=None):
-        """Format a hook event. Returns (label, detail) or (None, None).
+    def _apply_event(self, panel, data: dict, event_name: str) -> None:
+        """Apply side effects of a hook event to a panel (or dashboard).
 
-        If panel is provided, applies side effects (counters, idle state, auto-approve).
+        Mutates panel state: accept_count, active_agents, total_agents_completed,
+        idle state, and triggers auto-approve keystrokes.  Must be called before
+        _format_event so that labels reflect the updated state.
+        """
+        if event_name == "PermissionRequest":
+            iterm_sid = self._iterm_sid_from_event(data)
+            if not (iterm_sid and self._is_pane_paused(iterm_sid)):
+                panel.accept_count += 1
+
+        elif event_name == "Notification":
+            ntype = data.get("notification_type", "")
+            if ntype == "idle_prompt":
+                if hasattr(panel, "mark_idle"):
+                    panel.mark_idle()
+            elif ntype == "permission_prompt":
+                iterm_sid = self._iterm_sid_from_event(data)
+                if iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
+                    panel.accept_count += 1
+                    self._send_approve(iterm_sid)
+
+        elif event_name == "SubagentStart":
+            agent_id = data.get("agent_id", "?")
+            panel.active_agents[agent_id] = data.get("agent_type", "?")
+
+        elif event_name == "SubagentStop":
+            panel.active_agents.pop(data.get("agent_id", "?"), None)
+            panel.total_agents_completed += 1
+
+    def _format_event(self, data: dict, event_name: str):
+        """Format a hook event into display text.  Pure formatting — no side effects.
+
+        Returns (label, detail) or (None, None).
         """
         if event_name == "PermissionRequest":
             tool = data.get("tool_name", "?")
             tool_input = data.get("tool_input", {})
             detail = ""
-            if tool == "Bash":
+            if tool == "AskUserQuestion":
+                detail = _format_ask_user_question_inline(tool_input)
+            elif tool == "Bash":
                 detail = f" `{self._oneline(tool_input.get('command', ''))}`"
             elif tool in ("Edit", "Write"):
                 detail = f" `{tool_input.get('file_path', '')}`"
@@ -1182,40 +1736,27 @@ class AutoAcceptTUI(App):
             iterm_sid = self._iterm_sid_from_event(data)
             if iterm_sid and self._is_pane_paused(iterm_sid):
                 return f"[bold yellow]{'PAUSED':<8}[/]", f"{tool}{detail}"
-            if panel:
-                panel.accept_count += 1
             return f"[bold green]{'ALLOWED':<8}[/]", f"{tool}{detail}"
 
         elif event_name == "Notification":
             ntype = data.get("notification_type", "")
             message = data.get("message", "")
             if ntype == "idle_prompt":
-                if panel:
-                    panel.mark_idle()
                 return f"[dim]{'IDLE':<8}[/]", self._oneline(message, 80)
             elif ntype == "permission_prompt":
-                # Auto-approve by sending Enter to the pane (handles team scenarios
-                # where the hook fires in a subagent but the prompt shows on the leader)
                 iterm_sid = self._iterm_sid_from_event(data)
-                if panel and iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
-                    panel.accept_count += 1
-                    self._send_approve(iterm_sid)
+                if iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
                     return f"[bold green]{'APPROVED':<8}[/]", message
             return f"[bold cyan]{'NOTIFY':<8}[/]", self._oneline(message, 80)
 
         elif event_name == "SubagentStart":
             agent_id = data.get("agent_id", "?")
             agent_type = data.get("agent_type", "?")
-            if panel:
-                panel.active_agents[agent_id] = agent_type
             return f"[bold magenta]{'AGENT+':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
 
         elif event_name == "SubagentStop":
             agent_id = data.get("agent_id", "?")
             agent_type = data.get("agent_type", "?")
-            if panel:
-                panel.active_agents.pop(agent_id, None)
-                panel.total_agents_completed += 1
             return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
 
         return None, None
@@ -1239,6 +1780,7 @@ class AutoAcceptTUI(App):
         bar = self.query_one("#status-bar", Horizontal)
         self.query_one("#status-left", Static).update("REFRESHING layout...")
         bar.set_classes("refreshing")
+        invalidate_usage_cache()
         self._do_refresh()
 
     @work(thread=True)
@@ -1262,7 +1804,7 @@ class AutoAcceptTUI(App):
                     self.query_one("#status-left", Static).update("REFRESH FAILED \u2014 iTerm2 not reachable")
                     self.query_one("#status-bar", Horizontal).set_classes("paused")
                 except Exception:
-                    pass
+                    log.warning("_do_refresh: failed to update status bar with refresh failure")
             else:
                 self._update_status_bar()
 
@@ -1301,6 +1843,10 @@ class AutoAcceptTUI(App):
         """Open the permission choices review screen."""
         self.push_screen(ChoicesScreen())
 
+    def action_show_questions(self) -> None:
+        """Open the AskUserQuestion review screen."""
+        self.push_screen(QuestionsScreen())
+
     def action_open_settings(self) -> None:
         """Open the settings modal."""
         self.push_screen(SettingsScreen(self.settings), self._on_settings_closed)
@@ -1331,6 +1877,8 @@ class AutoAcceptTUI(App):
         if not settings.account_usage and self._last_usage_data:
             self._last_usage_data = None
             self._update_status_bar()
+        # Persist excluded_tools and ask_user_timeout to state.json for the hook
+        self._save_state()
 
     def _update_status_bar(self) -> None:
         """Update the status bar to reflect current pause state, usage, version, and clock."""
@@ -1344,24 +1892,27 @@ class AutoAcceptTUI(App):
             if self.paused:
                 mode_text = "[bold]MANUAL[/]"
                 bar.set_classes("paused")
+                usage_mode = "paused"
             elif n_paused == 0:
                 mode_text = "[bold] AUTO [/]"
                 bar.set_classes("running")
+                usage_mode = "running"
             else:
                 n_total = len(self.panels)
                 mode_text = f"[bold]MIXED [/] [dim]{n_total - n_paused}a {n_paused}m[/]"
                 bar.set_classes("paused")
+                usage_mode = "paused"
 
             left_parts = [mode_text]
             if self._last_usage_data:
                 bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
-                left_parts.append(format_usage_inline(self._last_usage_data, bar_width))
+                left_parts.append(format_usage_inline(self._last_usage_data, bar_width, usage_mode))
             left.update(SEP.join(left_parts))
 
             clock = datetime.now().strftime("%-b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
             right.update(f"[dim]v{__version__}[/]{SEP}{clock}")
         except Exception:
-            pass
+            log.debug("_update_status_bar: failed to update status bar widgets")
 
     def action_quit(self) -> None:
         self._stop_event.set()
@@ -1390,7 +1941,7 @@ class AutoAcceptTUI(App):
                             data = json.loads(line)
                             self.post_message(HookEvent(data))
                         except json.JSONDecodeError:
-                            pass
+                            log.debug(f"_tail_events: failed to parse JSON line: {line[:100]}")
                 else:
                     self._stop_event.wait(0.2)
         log.debug("watch_events: stopped")
@@ -1399,7 +1950,7 @@ class AutoAcceptTUI(App):
 
     @work(thread=True, exit_on_error=False)
     def poll_usage(self) -> None:
-        """Poll usage every 30 seconds (API is called at most every 5 minutes)."""
+        """Poll usage every 5 minutes (matches API cache TTL)."""
         log.debug("poll_usage: started")
         while not self._stop_event.is_set():
             if not self.settings.account_usage:
@@ -1408,7 +1959,7 @@ class AutoAcceptTUI(App):
             self._last_usage_data = fetch_usage()
 
             self.call_from_thread(self._update_status_bar)
-            self._stop_event.wait(30)
+            self._stop_event.wait(300)
         log.debug("poll_usage: stopped")
 
     # --- API server ---
@@ -1429,7 +1980,7 @@ class AutoAcceptTUI(App):
             try:
                 os.remove(API_PORT_FILE)
             except OSError:
-                pass
+                log.debug("serve_api: failed to remove API port file")
             log.debug("serve_api: stopped")
 
 

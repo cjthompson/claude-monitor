@@ -33,6 +33,19 @@ def main():
             iterm_sid = data["_iterm_session_id"]
             if iterm_sid:
                 paused = iterm_sid in state.get("paused_sessions", [])
+        # Check if this tool is in the excluded list
+        if not paused:
+            tool_name = data.get("tool_name", "")
+            excluded_tools = state.get("excluded_tools", [])
+            if tool_name and tool_name in excluded_tools:
+                paused = True
+        # Check AskUserQuestion timeout: if timeout > 0, defer to let user respond
+        if not paused:
+            tool_name = data.get("tool_name", "")
+            if tool_name == "AskUserQuestion":
+                ask_timeout = state.get("ask_user_timeout", 0)
+                if ask_timeout > 0:
+                    paused = True
         data["_decision"] = "deferred" if paused else "allowed"
 
     # Log the event

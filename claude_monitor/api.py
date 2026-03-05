@@ -144,58 +144,10 @@ class MonitorHTTPHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            app = self.app
             uptime = int(time.time() - self._start_time) if self._start_time else 0
-
-            sessions = []
-            for sid, panel in app.panels.items():
-                sessions.append({
-                    "id": sid,
-                    "title": panel.border_title,
-                    "state": panel._state,
-                    "mode": "manual" if app._is_pane_paused(sid) else "auto",
-                    "active_agents": len(panel.active_agents),
-                    "completed_agents": panel.total_agents_completed,
-                    "accept_count": panel.accept_count,
-                })
-
-            dashboard_data = None
-            if app.dashboard:
-                d = app.dashboard
-                total_accepted = sum(p.accept_count for p in app.panels.values()) + d.accept_count
-                total_agents_active = sum(len(p.active_agents) for p in app.panels.values()) + len(d.active_agents)
-                total_agents_done = sum(p.total_agents_completed for p in app.panels.values()) + d.total_agents_completed
-                active_sessions = sum(1 for p in app.panels.values() if p._state == "active")
-                idle_sessions = sum(1 for p in app.panels.values() if p._state == "idle")
-                dashboard_data = {
-                    "total_accepted": total_accepted,
-                    "total_agents_active": total_agents_active,
-                    "total_agents_completed": total_agents_done,
-                    "active_sessions": active_sessions,
-                    "idle_sessions": idle_sessions,
-                }
-
-            usage_data = None
-            if app._last_usage_data:
-                u = app._last_usage_data
-                usage_data = {
-                    "five_hour": {
-                        "utilization": u.five_hour.utilization,
-                        "resets_at": u.five_hour.resets_at.isoformat() if u.five_hour.resets_at else None,
-                    },
-                    "seven_day": {
-                        "utilization": u.seven_day.utilization,
-                        "resets_at": u.seven_day.resets_at.isoformat() if u.seven_day.resets_at else None,
-                    },
-                }
-
-            self._send_json({
-                "global_mode": "manual" if app._global_paused else "auto",
-                "uptime": uptime,
-                "sessions": sessions,
-                "dashboard": dashboard_data,
-                "usage": usage_data,
-            })
+            snapshot = self.app.call_from_thread(self.app.get_state_snapshot)
+            snapshot["uptime"] = uptime
+            self._send_json(snapshot)
         except Exception as e:
             log.error(f"Text endpoint failed: {e}")
             self._send_error(503, f"Failed to collect state: {e}")

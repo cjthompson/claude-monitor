@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, RadioButton, RadioSet, Select, Static, Switch
+from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Select, Static, Switch
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,12 @@ class Settings:
     iterm_scope: str = "current_tab"  # current_tab / current_window / all_windows
     timestamp_style: str = "24hr"  # 12hr / 24hr / date_time / auto
     account_usage: bool = False
+    excluded_tools: list[str] | None = None  # tool names to skip auto-accepting
+    ask_user_timeout: int = 0  # seconds to wait before auto-accepting AskUserQuestion (0 = auto-accept immediately)
+
+    def __post_init__(self):
+        if self.excluded_tools is None:
+            self.excluded_tools = []
 
 
 def load_settings() -> Settings:
@@ -108,7 +114,7 @@ class SettingsScreen(ModalScreen[Settings | None]):
     }
     SettingsScreen #settings-dialog {
         width: 64;
-        max-height: 42;
+        max-height: 50;
         background: $surface;
         border: thick $primary;
         padding: 1 2;
@@ -145,6 +151,14 @@ class SettingsScreen(ModalScreen[Settings | None]):
     }
     SettingsScreen Select {
         width: 1fr;
+    }
+    SettingsScreen Input {
+        width: 1fr;
+    }
+    SettingsScreen .setting-hint {
+        color: $text-muted;
+        width: 100%;
+        margin: -1 0 1 21;
     }
     SettingsScreen #button-row {
         height: 3;
@@ -210,6 +224,29 @@ class SettingsScreen(ModalScreen[Settings | None]):
                 yield Label("Account usage", classes="setting-label")
                 yield Switch(value=s.account_usage, id="usage-switch")
 
+            # Excluded tools
+            with Horizontal(classes="setting-row"):
+                yield Label("Excluded tools", classes="setting-label")
+                yield Input(
+                    value=", ".join(s.excluded_tools or []),
+                    placeholder="e.g. AskUserQuestion, Bash",
+                    id="excluded-tools-input",
+                    classes="setting-control",
+                )
+            yield Static("Comma-separated tool names to skip auto-accepting", classes="setting-hint")
+
+            # AskUserQuestion timeout
+            with Horizontal(classes="setting-row"):
+                yield Label("Ask user timeout", classes="setting-label")
+                yield Input(
+                    value=str(s.ask_user_timeout),
+                    placeholder="0",
+                    id="ask-timeout-input",
+                    classes="setting-control",
+                    type="integer",
+                )
+            yield Static("Seconds to wait for user reply (0 = auto-accept immediately)", classes="setting-hint")
+
             # Buttons
             with Horizontal(id="button-row"):
                 yield Button("Save", variant="primary", id="save-btn")
@@ -231,6 +268,16 @@ class SettingsScreen(ModalScreen[Settings | None]):
         return options[idx][1]
 
     def _collect_settings(self) -> Settings:
+        # Parse excluded tools from comma-separated input
+        raw_excluded = self.query_one("#excluded-tools-input", Input).value
+        excluded_tools = [t.strip() for t in raw_excluded.split(",") if t.strip()] if raw_excluded.strip() else []
+
+        # Parse ask user timeout
+        try:
+            ask_timeout = max(0, int(self.query_one("#ask-timeout-input", Input).value))
+        except (ValueError, TypeError):
+            ask_timeout = 0
+
         return Settings(
             default_mode=self._get_radio_value("mode-radio", MODE_OPTIONS),
             theme=self._get_theme_value(),
@@ -238,6 +285,8 @@ class SettingsScreen(ModalScreen[Settings | None]):
             iterm_scope=self._get_radio_value("scope-radio", SCOPE_OPTIONS),
             timestamp_style=self._get_radio_value("timestamp-radio", TIMESTAMP_OPTIONS),
             account_usage=self.query_one("#usage-switch", Switch).value,
+            excluded_tools=excluded_tools,
+            ask_user_timeout=ask_timeout,
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

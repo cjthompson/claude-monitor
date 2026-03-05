@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 USAGE_MAX_AGE = 300  # 5 minutes
+USAGE_CACHE_FILE = "/tmp/claude-auto-accept/usage-cache.json"
 
 # In-memory caches
 _token_cache: dict = {}  # {"token": str, "expires_at": float}
@@ -60,29 +61,28 @@ def _extract_oauth_token() -> tuple[str, float] | None:
     """Extract OAuth token from macOS Keychain.
 
     Returns (token, expires_at_epoch) or None if unavailable.
-    Uses xxd to decode the hex-encoded keychain data, then regex to
-    extract fields (the raw data is not valid JSON).
+    Parses the JSON keychain data to extract fields.
     """
     try:
         result = subprocess.run(
-            'security find-generic-password -s "Claude Code-credentials" -w | xxd -r -p',
-            shell=True, capture_output=True, timeout=5,
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, timeout=5,
         )
         if result.returncode != 0 or not result.stdout:
             log.debug("No credentials found in Keychain")
             return None
 
-        raw = result.stdout.decode("utf-8", errors="replace")
-
-        token_match = re.search(r'sk-ant-oat[^"]+', raw)
-        if not token_match:
+        raw = result.stdout.decode("utf-8", errors="replace").strip()
+        data = json.loads(raw)
+        oauth = data.get("claudeAiOauth", {})
+        token = oauth.get("accessToken")
+        if not token:
             log.debug("No OAuth token found in credentials")
             return None
-        token = token_match.group()
 
-        expires_match = re.search(r'"expiresAt"\s*:\s*(\d+)', raw)
-        if expires_match:
-            expires_at = int(expires_match.group(1)) / 1000
+        expires_at = oauth.get("expiresAt")
+        if expires_at:
+            expires_at = expires_at / 1000
         else:
             expires_at = time.time() + 3600
 
@@ -107,15 +107,78 @@ def _get_token() -> str | None:
     return token
 
 
+def _load_disk_cache() -> dict:
+    """Load usage cache from disk. Returns empty dict if missing/corrupt."""
+    try:
+        with open(USAGE_CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_disk_cache(data: UsageData, fetched_at: float) -> None:
+    """Persist usage cache to disk."""
+    try:
+        payload = {
+            "fetched_at": fetched_at,
+            "five_hour": {
+                "utilization": data.five_hour.utilization,
+                "resets_at": data.five_hour.resets_at.isoformat() if data.five_hour.resets_at else None,
+            },
+            "seven_day": {
+                "utilization": data.seven_day.utilization,
+                "resets_at": data.seven_day.resets_at.isoformat() if data.seven_day.resets_at else None,
+            },
+        }
+        with open(USAGE_CACHE_FILE, "w") as f:
+            json.dump(payload, f)
+    except OSError as e:
+        log.debug(f"Failed to save usage cache: {e}")
+
+
+def _usage_from_disk(entry: dict) -> tuple[UsageData, float] | None:
+    """Deserialize UsageData from a disk cache entry."""
+    try:
+        fetched_at = float(entry["fetched_at"])
+        five_hour = _parse_window(entry["five_hour"])
+        seven_day = _parse_window(entry["seven_day"])
+        return UsageData(five_hour=five_hour, seven_day=seven_day), fetched_at
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def invalidate_usage_cache() -> None:
+    """Clear in-memory and disk usage cache so the next fetch hits the API."""
+    global _usage_cache
+    _usage_cache = {}
+    try:
+        os.remove(USAGE_CACHE_FILE)
+    except FileNotFoundError:
+        pass
+
+
 def fetch_usage() -> UsageData | None:
     """Fetch usage data from the Anthropic API.
 
-    Returns cached data if less than 5 minutes old.
+    Returns cached data if less than 5 minutes old (memory or disk).
     """
     global _usage_cache
     now = time.time()
     if _usage_cache and (now - _usage_cache.get("fetched_at", 0)) < USAGE_MAX_AGE:
         return _usage_cache.get("data")
+
+    # Check disk cache before hitting the API
+    if not _usage_cache:
+        disk = _load_disk_cache()
+        if disk:
+            result = _usage_from_disk(disk)
+            if result:
+                data, fetched_at = result
+                if (now - fetched_at) < USAGE_MAX_AGE:
+                    _usage_cache = {"data": data, "fetched_at": fetched_at}
+                    return data
+                # Disk cache expired but use it as fallback if API fails
+                _usage_cache = {"data": data, "fetched_at": 0}
 
     token = _get_token()
     if not token:
@@ -125,7 +188,7 @@ def fetch_usage() -> UsageData | None:
         req = Request(USAGE_API_URL)
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("anthropic-beta", "oauth-2025-04-20")
-        req.add_header("User-Agent", "claude-monitor")
+        req.add_header("User-Agent", "claude-code/statusline")
 
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
@@ -135,28 +198,69 @@ def fetch_usage() -> UsageData | None:
             seven_day=_parse_window(data.get("seven_day", {})),
         )
         _usage_cache = {"data": usage, "fetched_at": now}
+        _save_disk_cache(usage, now)
         return usage
     except (URLError, json.JSONDecodeError, OSError) as e:
         log.debug(f"Usage API fetch failed: {e}")
-        return _usage_cache.get("data")
+        # Back off for USAGE_MAX_AGE so we don't hammer the API on repeated failures
+        existing_data = _usage_cache.get("data")
+        _usage_cache = {"data": existing_data, "fetched_at": now}
+        # Also update disk cache fetched_at so restarts don't immediately retry
+        try:
+            disk = _load_disk_cache()
+            if disk:
+                disk["fetched_at"] = now
+                with open(USAGE_CACHE_FILE, "w") as f:
+                    json.dump(disk, f)
+        except OSError:
+            pass
+        return existing_data
 
 
-def _color_for_pct(pct: float) -> str:
-    if pct < 40:
-        return "green"
-    if pct < 60:
-        return "yellow"
-    if pct < 80:
-        return "dark_orange"
-    return "red"
+_THEME = {
+    "running": {
+        "fill": "#50c878",    # bright emerald bar fill
+        "empty": "#284130",   # dark green-gray empty
+        "pct": "#c8f0d5",     # light mint percentage text
+    },
+    "paused": {
+        "fill": "#dc7832",    # rust-orange bar fill
+        "empty": "#482d1e",   # dark brown empty
+        "pct": "#ebc8af",     # warm cream percentage text
+    },
+}
 
 
-def _bar(pct: float, width: int) -> str:
-    filled = round(pct / 100 * width)
-    filled = max(0, min(width, filled))
-    empty = width - filled
-    color = _color_for_pct(pct)
-    return f"[{color}]{'█' * filled}[/][dim]{'░' * empty}[/]"
+def _bar(pct: float, width: int, mode: str = "running") -> str:
+    """Render a progress bar using background colors and fractional blocks.
+
+    Full cells use fill-colored background with spaces. The fractional
+    boundary cell uses fg=fill on bg=empty so the partial block blends.
+    Empty cells use empty-colored background with spaces.
+    """
+    BLOCKS = " ▏▎▍▌▋▊▉█"  # index 0=empty, 8=full
+    t = _THEME.get(mode, _THEME["running"])
+    fill_color = t["fill"]
+    empty_bg = t["empty"]
+
+    fill_eighths = pct / 100 * width * 8
+    fill_eighths = max(0, min(width * 8, fill_eighths))
+
+    full_chars = int(fill_eighths // 8)
+    remainder = int(fill_eighths % 8)
+
+    parts = []
+    if full_chars > 0:
+        parts.append(f"[on {fill_color}]{' ' * full_chars}[/]")
+    if remainder > 0 and full_chars < width:
+        parts.append(f"[{fill_color} on {empty_bg}]{BLOCKS[remainder]}[/]")
+        empty = width - full_chars - 1
+    else:
+        empty = width - full_chars
+    if empty > 0:
+        parts.append(f"[on {empty_bg}]{' ' * empty}[/]")
+
+    return "".join(parts)
 
 
 def _format_countdown(resets_at: datetime | None) -> str:
@@ -187,29 +291,22 @@ def _strip_markup(s: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", s)
 
 
-def _quota(w: WindowUsage, label: str, bar_width: int | None, reset: str) -> str:
+def _quota(w: WindowUsage, label: str, bar_width: int | None, reset: str, mode: str = "running") -> str:
     """Format a single quota window."""
-    color = _color_for_pct(w.utilization)
-    s = f"[bold]{label}[/] [{color}]{w.utilization:.0f}%[/]"
+    pct_color = _THEME.get(mode, _THEME["running"])["pct"]
+    s = f"[bold]{label}[/] [{pct_color}]{w.utilization:.0f}%[/]"
     if bar_width:
-        s += f" {_bar(w.utilization, bar_width)}"
+        s += f" {_bar(w.utilization, bar_width, mode)}"
     if reset:
         s += f" [dim]{reset}[/]"
     return s
 
 
-def format_usage_inline(data: UsageData, max_width: int = 999) -> str:
+def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "running") -> str:
     """Format usage data for the status bar, adapting to available width.
 
-    Uses progressive degradation tiers:
-    1. Full bars + countdown + local time + cache age
-    2. Full bars + countdown + local time
-    3. 5h: local time only, 7d: full
-    4. Drop 7d reset
-    5. Drop 7d bar
-    6. Drop 5h bar
-    7. Drop 7d entirely
-    8. Drop 5h reset
+    Args:
+        mode: "running" (auto/emerald) or "paused" (manual/rust) for theming.
     """
     SEP = " [dim]│[/] "
     h5 = data.five_hour
@@ -222,40 +319,35 @@ def format_usage_inline(data: UsageData, max_width: int = 999) -> str:
     h5_full_reset = f"{h5_countdown} ({h5_local})" if h5_countdown and h5_local else h5_countdown or h5_local
 
     tiers = [
-        # Tier 1: full bars + full resets + cache age
         lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_full_reset),
-            _quota(d7, "7d", 12, d7_full),
+            _quota(h5, "5h", 12, h5_full_reset, mode),
+            _quota(d7, "7d", 12, d7_full, mode),
         ])),
-        # Tier 2: 5h local time only, 7d full
         lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_local),
-            _quota(d7, "7d", 12, d7_full),
+            _quota(h5, "5h", 12, h5_local, mode),
+            _quota(d7, "7d", 12, d7_full, mode),
         ])),
-        # Tier 3: drop 7d reset
         lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_local),
-            _quota(d7, "7d", 12, ""),
+            _quota(h5, "5h", 12, h5_local, mode),
+            _quota(d7, "7d", 12, "", mode),
         ])),
-        # Tier 4: drop 7d bar
         lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 8, h5_local),
-            _quota(d7, "7d", None, ""),
+            _quota(h5, "5h", 8, h5_local, mode),
+            _quota(d7, "7d", None, "", mode),
         ])),
-        # Tier 5: drop 5h bar too
         lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", None, h5_local),
-            _quota(d7, "7d", None, ""),
+            _quota(h5, "5h", None, h5_local, mode),
+            _quota(d7, "7d", None, "", mode),
         ])),
-        # Tier 6: drop 7d entirely
-        lambda: _quota(h5, "5h", 8, h5_local),
-        # Tier 7: just percentages
-        lambda: _quota(h5, "5h", None, ""),
+        lambda: _quota(h5, "5h", 8, h5_local, mode),
+        lambda: _quota(h5, "5h", None, "", mode),
     ]
+
+    PILL_PAD = 2  # 1 space each side
 
     for tier in tiers:
         result = tier()
-        if len(_strip_markup(result)) <= max_width:
-            return result
+        if len(_strip_markup(result)) + PILL_PAD <= max_width:
+            return f" {result} "
 
-    return tiers[-1]()
+    return f" {tiers[-1]()} "
