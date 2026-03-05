@@ -10,7 +10,7 @@ import os
 from dataclasses import asdict, dataclass
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Select, Static, Switch
 
@@ -114,10 +114,16 @@ class SettingsScreen(ModalScreen[Settings | None]):
     }
     SettingsScreen #settings-dialog {
         width: 64;
-        max-height: 50;
+        height: auto;
+        max-height: 90vh;
         background: $surface;
         border: thick $primary;
-        padding: 1 2;
+        padding: 0;
+    }
+    SettingsScreen #settings-scroll {
+        height: auto;
+        max-height: 1fr;
+        padding: 1 2 0 2;
     }
     SettingsScreen #settings-title {
         text-align: center;
@@ -162,6 +168,7 @@ class SettingsScreen(ModalScreen[Settings | None]):
     }
     SettingsScreen #button-row {
         height: 3;
+        padding: 0 2;
         margin-top: 1;
         align: center middle;
     }
@@ -181,73 +188,74 @@ class SettingsScreen(ModalScreen[Settings | None]):
     def compose(self) -> ComposeResult:
         s = self._settings
         with Vertical(id="settings-dialog"):
-            yield Static("Settings", id="settings-title")
+            with ScrollableContainer(id="settings-scroll"):
+                yield Static("Settings", id="settings-title")
 
-            # Default mode
-            with Horizontal(classes="setting-row"):
-                yield Label("Default mode", classes="setting-label")
-                with RadioSet(id="mode-radio", classes="setting-control"):
-                    for label, value in MODE_OPTIONS:
-                        yield RadioButton(label, value=value == s.default_mode)
+                # Default mode
+                with Horizontal(classes="setting-row"):
+                    yield Label("Default mode", classes="setting-label")
+                    with RadioSet(id="mode-radio", classes="setting-control"):
+                        for label, value in MODE_OPTIONS:
+                            yield RadioButton(label, value=value == s.default_mode)
 
-            # Theme
-            with Horizontal(classes="setting-row"):
-                yield Label("Theme", classes="setting-label")
-                yield Select(
-                    [(t, t) for t in THEMES],
-                    value=s.theme,
-                    id="theme-select",
-                    classes="setting-control",
-                )
+                # Theme
+                with Horizontal(classes="setting-row"):
+                    yield Label("Theme", classes="setting-label")
+                    yield Select(
+                        [(t, t) for t in THEMES],
+                        value=s.theme,
+                        id="theme-select",
+                        classes="setting-control",
+                    )
 
-            # iTerm scope
-            with Horizontal(classes="setting-row"):
-                yield Label("iTerm scope", classes="setting-label")
-                with RadioSet(id="scope-radio", classes="setting-control"):
-                    for label, value in SCOPE_OPTIONS:
-                        yield RadioButton(label, value=value == s.iterm_scope)
+                # iTerm scope
+                with Horizontal(classes="setting-row"):
+                    yield Label("iTerm scope", classes="setting-label")
+                    with RadioSet(id="scope-radio", classes="setting-control"):
+                        for label, value in SCOPE_OPTIONS:
+                            yield RadioButton(label, value=value == s.iterm_scope)
 
-            # Timestamp style
-            with Horizontal(classes="setting-row"):
-                yield Label("Timestamp", classes="setting-label")
-                with RadioSet(id="timestamp-radio", classes="setting-control"):
-                    for label, value in TIMESTAMP_OPTIONS:
-                        yield RadioButton(label, value=value == s.timestamp_style)
+                # Timestamp style
+                with Horizontal(classes="setting-row"):
+                    yield Label("Timestamp", classes="setting-label")
+                    with RadioSet(id="timestamp-radio", classes="setting-control"):
+                        for label, value in TIMESTAMP_OPTIONS:
+                            yield RadioButton(label, value=value == s.timestamp_style)
 
-            # Debug toggle
-            with Horizontal(classes="switch-row"):
-                yield Label("Debug logging", classes="setting-label")
-                yield Switch(value=s.debug, id="debug-switch")
+                # Debug toggle
+                with Horizontal(classes="switch-row"):
+                    yield Label("Debug logging", classes="setting-label")
+                    yield Switch(value=s.debug, id="debug-switch")
 
-            # Account usage toggle
-            with Horizontal(classes="switch-row"):
-                yield Label("Account usage", classes="setting-label")
-                yield Switch(value=s.account_usage, id="usage-switch")
+                # Account usage toggle
+                with Horizontal(classes="switch-row"):
+                    yield Label("Account usage", classes="setting-label")
+                    yield Switch(value=s.account_usage, id="usage-switch")
 
-            # Excluded tools
-            with Horizontal(classes="setting-row"):
-                yield Label("Excluded tools", classes="setting-label")
-                yield Input(
-                    value=", ".join(s.excluded_tools or []),
-                    placeholder="e.g. AskUserQuestion, Bash",
-                    id="excluded-tools-input",
-                    classes="setting-control",
-                )
-            yield Static("Comma-separated tool names to skip auto-accepting", classes="setting-hint")
+                # Excluded tools
+                with Horizontal(classes="setting-row"):
+                    yield Label("Excluded tools", classes="setting-label")
+                    yield Input(
+                        value=", ".join(s.excluded_tools or []),
+                        placeholder="e.g. AskUserQuestion, Bash",
+                        id="excluded-tools-input",
+                        classes="setting-control",
+                    )
+                yield Static("Comma-separated tool names to skip auto-accepting", classes="setting-hint")
 
-            # AskUserQuestion timeout
-            with Horizontal(classes="setting-row"):
-                yield Label("Ask user timeout", classes="setting-label")
-                yield Input(
-                    value=str(s.ask_user_timeout),
-                    placeholder="0",
-                    id="ask-timeout-input",
-                    classes="setting-control",
-                    type="integer",
-                )
-            yield Static("Seconds to wait for user reply (0 = auto-accept immediately)", classes="setting-hint")
+                # AskUserQuestion timeout
+                with Horizontal(classes="setting-row"):
+                    yield Label("Ask user timeout", classes="setting-label")
+                    yield Input(
+                        value=str(s.ask_user_timeout),
+                        placeholder="0",
+                        id="ask-timeout-input",
+                        classes="setting-control",
+                        type="integer",
+                    )
+                yield Static("Seconds to wait for user reply (0 = auto-accept immediately)", classes="setting-hint")
 
-            # Buttons
+            # Buttons always visible outside scroll area
             with Horizontal(id="button-row"):
                 yield Button("Save", variant="primary", id="save-btn")
                 yield Button("Cancel", variant="default", id="cancel-btn")

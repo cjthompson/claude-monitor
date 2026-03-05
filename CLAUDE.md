@@ -88,7 +88,7 @@ Config lives at `~/.config/claude-monitor/config.json` (user preferences like th
 - **Per-pane pause**: Each pane can be individually toggled between auto/manual mode. Click the status bar or focus a panel and press `m`. Global toggle (`a` key): from mixed/manual state → all auto; from all-auto → all manual. State persisted in `state.json` and pruned of stale sessions on startup.
 - **Settings**: `s` key opens modal. Persists to `~/.config/claude-monitor/config.json`. Controls mode, theme, debug, iTerm scope, timestamps, usage bar.
 - **Command palette**: `ctrl+p` opens palette with all commands. Custom `MonitorCommands` provider.
-- **Usage bar**: Fetches from `api.anthropic.com/api/oauth/usage` every 5 min. OAuth token extracted from macOS Keychain (`Claude Code-credentials`) via `security` + `xxd`, cached until expiry. Status bar updates every 30s. Width-responsive rendering.
+- **Usage bar**: Fetches from `api.anthropic.com/api/oauth/usage` every 5 min. OAuth token extracted from macOS Keychain (`Claude Code-credentials`) via `security` (JSON parse, not xxd), cached until expiry. Disk cache at `/tmp/claude-auto-accept/usage-cache.json` survives restarts. Poll interval matches cache TTL (300s). Width-responsive rendering.
 - **Status bar**: Native Textual `Horizontal` layout with left (`1fr`) and right (`auto`) `Static` widgets. Left shows mode + usage; right shows version + clock.
 - **Multi-line commands**: Newlines in tool commands are collapsed to `↵` for single-line display in event logs.
 - **Footer**: Standard Textual `Footer` widget at the bottom showing keybindings.
