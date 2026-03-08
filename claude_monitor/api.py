@@ -123,9 +123,11 @@ class MonitorHTTPHandler(BaseHTTPRequestHandler):
                     svg_text = svg_text.replace("Fira Code", font)
                 raw_png = cairosvg.svg2png(bytestring=svg_text.encode("utf-8"))
                 # Quantize to 256 colors (terminal UIs use few colors) + optimize
+                # Convert back to RGB so the PNG is universally readable
                 img = Image.open(BytesIO(raw_png))
+                quantized = img.quantize(colors=256, method=2, dither=0).convert("RGB")
                 buf = BytesIO()
-                img.quantize(colors=256, method=2, dither=0).save(buf, format="PNG", optimize=True)
+                quantized.save(buf, format="PNG", optimize=True)
                 png_bytes = buf.getvalue()
             except Exception as e:
                 log.error(f"SVG to PNG conversion failed: {e}")

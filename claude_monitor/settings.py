@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from textual.app import ComposeResult
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Select, Static, Switch
+from textual.widgets import Button, Input, Label, Select, Static, Switch, TextArea
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,9 @@ class Settings:
     timestamp_style: str = "24hr"  # 12hr / 24hr / date_time / auto
     account_usage: bool = False
     excluded_tools: list[str] | None = None  # tool names to skip auto-accepting
-    ask_user_timeout: int = 0  # seconds to wait before auto-accepting AskUserQuestion (0 = auto-accept immediately)
+    ask_user_timeout: int = 0  # seconds to wait before auto-accepting AskUserQuestion (0 = instant)
+    sparkline_bucket_secs: int = 5  # seconds per sparkline bucket (events/Ns)
+    oauth_json: str = ""  # JSON with access_token (required), refresh_token, expires_at (optional)
 
     def __post_init__(self):
         if self.excluded_tools is None:
@@ -73,14 +75,19 @@ def load_settings() -> Settings:
 
 
 def save_settings(settings: Settings) -> None:
-    """Write settings to config file atomically."""
+    """Write settings to config file atomically.
+
+    oauth_json is excluded — it's sensitive and kept in memory only.
+    """
     import tempfile
     os.makedirs(CONFIG_DIR, exist_ok=True)
     try:
+        data = asdict(settings)
+        data.pop("oauth_json", None)
         fd, tmp_path = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump(asdict(settings), f, indent=2)
+                json.dump(data, f, indent=2)
             os.replace(tmp_path, CONFIG_FILE)
         except Exception:
             os.unlink(tmp_path)
@@ -105,6 +112,26 @@ TIMESTAMP_OPTIONS = [
 ]
 
 
+_MASKED_PLACEHOLDER = "••••••••"
+
+
+def _mask_oauth_json(raw: str) -> str:
+    """Mask token values in OAuth JSON for display. Shows first 8 chars + masked remainder."""
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+        for key in ("access_token", "refresh_token"):
+            val = data.get(key, "")
+            if val and len(val) > 8:
+                data[key] = val[:8] + _MASKED_PLACEHOLDER
+            elif val:
+                data[key] = _MASKED_PLACEHOLDER
+        return json.dumps(data, indent=2, ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+
+
 class SettingsScreen(ModalScreen[Settings | None]):
     """Modal settings dialog."""
 
@@ -114,15 +141,12 @@ class SettingsScreen(ModalScreen[Settings | None]):
     }
     SettingsScreen #settings-dialog {
         width: 64;
-        height: auto;
-        max-height: 90vh;
+        max-height: 80vh;
         background: $surface;
         border: thick $primary;
         padding: 0;
     }
     SettingsScreen #settings-scroll {
-        height: auto;
-        max-height: 1fr;
         padding: 1 2 0 2;
     }
     SettingsScreen #settings-title {
@@ -137,8 +161,9 @@ class SettingsScreen(ModalScreen[Settings | None]):
     }
     SettingsScreen .setting-label {
         width: 20;
-        height: 1;
+        height: 3;
         padding: 0 1 0 0;
+        content-align-vertical: middle;
     }
     SettingsScreen .setting-control {
         width: 1fr;
@@ -147,19 +172,36 @@ class SettingsScreen(ModalScreen[Settings | None]):
         height: 3;
         margin-bottom: 1;
     }
-    SettingsScreen .switch-row .setting-label {
-        height: 3;
-        content-align-vertical: middle;
-    }
-    SettingsScreen RadioSet {
-        height: auto;
-        width: 1fr;
-    }
     SettingsScreen Select {
         width: 1fr;
     }
     SettingsScreen Input {
         width: 1fr;
+    }
+    SettingsScreen TextArea {
+        width: 1fr;
+        height: 6;
+    }
+    SettingsScreen .textarea-row {
+        height: auto;
+        max-height: 8;
+        margin-bottom: 1;
+    }
+    SettingsScreen .textarea-row .setting-label {
+        height: 6;
+    }
+    SettingsScreen .textarea-row Vertical {
+        width: 20;
+        height: auto;
+    }
+    SettingsScreen #oauth-clear-btn {
+        width: auto;
+        height: 1;
+        margin: 0;
+        padding: 0;
+    }
+    SettingsScreen #oauth-clear-btn:hover {
+        color: $error;
     }
     SettingsScreen .setting-hint {
         color: $text-muted;
@@ -184,6 +226,7 @@ class SettingsScreen(ModalScreen[Settings | None]):
     def __init__(self, current: Settings) -> None:
         super().__init__()
         self._settings = current
+        self._masked_oauth = _mask_oauth_json(current.oauth_json)
 
     def compose(self) -> ComposeResult:
         s = self._settings
@@ -194,9 +237,10 @@ class SettingsScreen(ModalScreen[Settings | None]):
                 # Default mode
                 with Horizontal(classes="setting-row"):
                     yield Label("Default mode", classes="setting-label")
-                    with RadioSet(id="mode-radio", classes="setting-control"):
-                        for label, value in MODE_OPTIONS:
-                            yield RadioButton(label, value=value == s.default_mode)
+                    yield Select(
+                        MODE_OPTIONS, value=s.default_mode,
+                        id="mode-select", classes="setting-control",
+                    )
 
                 # Theme
                 with Horizontal(classes="setting-row"):
@@ -211,16 +255,18 @@ class SettingsScreen(ModalScreen[Settings | None]):
                 # iTerm scope
                 with Horizontal(classes="setting-row"):
                     yield Label("iTerm scope", classes="setting-label")
-                    with RadioSet(id="scope-radio", classes="setting-control"):
-                        for label, value in SCOPE_OPTIONS:
-                            yield RadioButton(label, value=value == s.iterm_scope)
+                    yield Select(
+                        SCOPE_OPTIONS, value=s.iterm_scope,
+                        id="scope-select", classes="setting-control",
+                    )
 
                 # Timestamp style
                 with Horizontal(classes="setting-row"):
                     yield Label("Timestamp", classes="setting-label")
-                    with RadioSet(id="timestamp-radio", classes="setting-control"):
-                        for label, value in TIMESTAMP_OPTIONS:
-                            yield RadioButton(label, value=value == s.timestamp_style)
+                    yield Select(
+                        TIMESTAMP_OPTIONS, value=s.timestamp_style,
+                        id="timestamp-select", classes="setting-control",
+                    )
 
                 # Debug toggle
                 with Horizontal(classes="switch-row"):
@@ -231,6 +277,19 @@ class SettingsScreen(ModalScreen[Settings | None]):
                 with Horizontal(classes="switch-row"):
                     yield Label("Account usage", classes="setting-label")
                     yield Switch(value=s.account_usage, id="usage-switch")
+
+                # OAuth JSON
+                with Horizontal(classes="textarea-row"):
+                    with Vertical():
+                        yield Label("OAuth token", classes="setting-label")
+                        yield Static("[dim]\\[clear][/]", id="oauth-clear-btn")
+                    yield TextArea(
+                        self._masked_oauth,
+                        id="oauth-json-input",
+                        classes="setting-control",
+                        language="json",
+                    )
+                yield Static('JSON: access_token (required), refresh_token, expires_at (optional). Not saved to disk.', classes="setting-hint")
 
                 # Excluded tools
                 with Horizontal(classes="setting-row"):
@@ -253,56 +312,86 @@ class SettingsScreen(ModalScreen[Settings | None]):
                         classes="setting-control",
                         type="integer",
                     )
-                yield Static("Seconds to wait for user reply (0 = auto-accept immediately)", classes="setting-hint")
+                yield Static("Seconds to wait before auto-accepting AskUserQuestion (0 = instant, max 300)", classes="setting-hint")
 
             # Buttons always visible outside scroll area
             with Horizontal(id="button-row"):
-                yield Button("Save", variant="primary", id="save-btn")
+                yield Button("Save", variant="primary", id="save-btn", disabled=True)
                 yield Button("Cancel", variant="default", id="cancel-btn")
 
-    def _get_theme_value(self) -> str:
-        """Get theme value, guarding against Select.BLANK."""
-        raw = self.query_one("#theme-select", Select).value
-        if raw is Select.BLANK:
-            return self._settings.theme
-        return str(raw)
+    def _has_changes(self) -> bool:
+        """Check if current form values differ from the original settings."""
+        try:
+            return asdict(self._collect_settings()) != asdict(self._settings)
+        except Exception:
+            return False
 
-    def _get_radio_value(self, radio_id: str, options: list[tuple[str, str]]) -> str:
-        """Get the value for the selected radio button in a RadioSet."""
-        radio_set = self.query_one(f"#{radio_id}", RadioSet)
-        idx = radio_set.pressed_index
-        if idx < 0 or idx >= len(options):
-            return options[0][1]
-        return options[idx][1]
+    def _refresh_save_button(self) -> None:
+        try:
+            self.query_one("#save-btn", Button).disabled = not self._has_changes()
+        except Exception:
+            pass
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        self._refresh_save_button()
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        self._refresh_save_button()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._refresh_save_button()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        self._refresh_save_button()
+
+    def _get_select_value(self, select_id: str, fallback: str) -> str:
+        """Get value from a Select widget, returning fallback if BLANK."""
+        raw = self.query_one(f"#{select_id}", Select).value
+        if raw is Select.BLANK:
+            return fallback
+        return str(raw)
 
     def _collect_settings(self) -> Settings:
         # Parse excluded tools from comma-separated input
         raw_excluded = self.query_one("#excluded-tools-input", Input).value
         excluded_tools = [t.strip() for t in raw_excluded.split(",") if t.strip()] if raw_excluded.strip() else []
 
-        # Parse ask user timeout
+        # Parse ask user timeout (max 300s = 5 min, must fit within hook timeout)
         try:
-            ask_timeout = max(0, int(self.query_one("#ask-timeout-input", Input).value))
+            ask_timeout = min(300, max(0, int(self.query_one("#ask-timeout-input", Input).value)))
         except (ValueError, TypeError):
             ask_timeout = 0
 
+        oauth_text = self.query_one("#oauth-json-input", TextArea).text.strip()
+        # If the user didn't edit the masked display, keep the original token
+        if oauth_text == self._masked_oauth.strip():
+            oauth_json = self._settings.oauth_json
+        else:
+            oauth_json = oauth_text
+
         return Settings(
-            default_mode=self._get_radio_value("mode-radio", MODE_OPTIONS),
-            theme=self._get_theme_value(),
+            default_mode=self._get_select_value("mode-select", self._settings.default_mode),
+            theme=self._get_select_value("theme-select", self._settings.theme),
             debug=self.query_one("#debug-switch", Switch).value,
-            iterm_scope=self._get_radio_value("scope-radio", SCOPE_OPTIONS),
-            timestamp_style=self._get_radio_value("timestamp-radio", TIMESTAMP_OPTIONS),
+            iterm_scope=self._get_select_value("scope-select", self._settings.iterm_scope),
+            timestamp_style=self._get_select_value("timestamp-select", self._settings.timestamp_style),
             account_usage=self.query_one("#usage-switch", Switch).value,
             excluded_tools=excluded_tools,
             ask_user_timeout=ask_timeout,
+            oauth_json=oauth_json,
         )
+
+    def on_click(self, event) -> None:
+        if hasattr(event, 'widget') and getattr(event.widget, 'id', None) == "oauth-clear-btn":
+            self.query_one("#oauth-json-input", TextArea).clear()
+            self._refresh_save_button()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-btn":
             settings = self._collect_settings()
             save_settings(settings)
             self.dismiss(settings)
-        else:
+        elif event.button.id == "cancel-btn":
             self.dismiss(None)
 
     def action_cancel(self) -> None:

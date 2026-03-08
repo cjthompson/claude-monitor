@@ -20,7 +20,7 @@ HOOK_COMMAND = str(VENV_DIR / "bin" / "claude-monitor-hook")
 
 HOOKS_CONFIG = {
     "PermissionRequest": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 300}]}
     ],
     "Notification": [
         {
@@ -43,14 +43,28 @@ def run(cmd, **kwargs):
 
 
 def setup_venv():
+    venv_python = VENV_DIR / "bin" / "python"
+    # Recreate venv if missing or broken (e.g. Python was upgraded)
     if VENV_DIR.exists():
-        print(f"venv already exists at {VENV_DIR}")
+        try:
+            subprocess.check_call(
+                [str(venv_python), "-c", "import pip"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            print(f"venv already exists at {VENV_DIR}")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"venv at {VENV_DIR} is broken, recreating ...")
+            import shutil
+
+            shutil.rmtree(VENV_DIR)
+            run([sys.executable, "-m", "venv", str(VENV_DIR)])
     else:
         print(f"Creating venv at {VENV_DIR} ...")
         run([sys.executable, "-m", "venv", str(VENV_DIR)])
 
     print("Installing claude-monitor in editable mode ...")
-    run([str(VENV_DIR / "bin" / "pip"), "install", "-e", str(REPO_DIR)])
+    run([str(venv_python), "-m", "pip", "install", "-e", str(REPO_DIR)])
 
 
 def symlink_to_path():

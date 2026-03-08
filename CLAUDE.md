@@ -2,7 +2,18 @@
 
 A Textual TUI that monitors and auto-accepts Claude Code permission prompts across iTerm2 panes.
 
-## Versioning
+## MANDATORY: Version bump + restart after every code change
+
+**After ANY code change to this project, you MUST do both of these steps. No exceptions.**
+
+1. **Bump the version** in `claude_monitor/__init__.py` (`__version__`):
+   - Increment the beta number (e.g. `-beta.10` → `-beta.11`)
+   - If there's no beta suffix yet, add `-beta.1` to the patch version
+2. **Restart the TUI** by sending `q` to its iTerm2 pane (see below)
+
+These steps are **required** — the TUI must be restarted to pick up code changes (it's a running process). Do not skip or defer these steps. Do them immediately after the code change, before reporting results to the user.
+
+### Version scheme
 
 Version is in `claude_monitor/__init__.py` (`__version__`) and displayed in the TUI status bar.
 
@@ -11,7 +22,7 @@ Version is in `claude_monitor/__init__.py` (`__version__`) and displayed in the 
 - **End of session**: Remove the `-beta.x` suffix, leaving just `x.x.x` (e.g. `1.0.1-beta.5` → `1.0.1`).
 - Keep `pyproject.toml` version in sync when removing the beta suffix.
 
-## Restarting the TUI
+### How to restart the TUI
 
 Use the iTerm2 Python API to send `q` to the TUI's pane (use `run.sh` wrapper for auto-restart).
 

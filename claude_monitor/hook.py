@@ -39,14 +39,17 @@ def main():
             excluded_tools = state.get("excluded_tools", [])
             if tool_name and tool_name in excluded_tools:
                 paused = True
-        # Check AskUserQuestion timeout: if timeout > 0, defer to let user respond
+                data["_excluded_tool"] = True
+        # Check AskUserQuestion timeout: sleep to give user time to respond manually
+        ask_timeout = 0
         if not paused:
             tool_name = data.get("tool_name", "")
             if tool_name == "AskUserQuestion":
                 ask_timeout = state.get("ask_user_timeout", 0)
-                if ask_timeout > 0:
-                    paused = True
         data["_decision"] = "deferred" if paused else "allowed"
+        if ask_timeout > 0:
+            data["_decision"] = "timeout"
+            data["_ask_timeout"] = ask_timeout
 
     # Log the event
     with open(EVENTS_FILE, "a") as f:
@@ -55,6 +58,22 @@ def main():
     # Only auto-allow for PermissionRequest when not paused
     if event_name != "PermissionRequest" or paused:
         return
+
+    # AskUserQuestion with timeout: sleep then auto-allow
+    if ask_timeout > 0:
+        time.sleep(ask_timeout)
+        # Log timeout completion so TUI can show it
+        completion = {
+            "_timestamp": time.time(),
+            "_iterm_session_id": data.get("_iterm_session_id"),
+            "hook_event_name": "Notification",
+            "notification_type": "ask_timeout_complete",
+            "message": f"AskUserQuestion auto-accepted after {ask_timeout}s",
+            "tool_name": "AskUserQuestion",
+            "_timeout_origin": data["_timestamp"],
+        }
+        with open(EVENTS_FILE, "a") as f:
+            f.write(json.dumps(completion) + "\n")
 
     # Auto-allow
     json.dump(

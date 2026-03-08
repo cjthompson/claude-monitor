@@ -10,9 +10,10 @@ import collections
 import json
 import logging
 import os
+import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import iterm2
 from iterm2.session import Splitter, Session
@@ -28,29 +29,78 @@ from textual.widgets.option_list import Option
 
 from claude_monitor import __version__, SIGNAL_DIR, EVENTS_FILE, STATE_FILE, LOG_FILE, API_PORT_FILE, extract_iterm_session_id, fmt_duration, read_state
 from claude_monitor.api import start_api_server
-from claude_monitor.settings import Settings, SettingsScreen, load_settings
-from claude_monitor.usage import fetch_usage, format_usage_inline, invalidate_usage_cache
+from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
+from claude_monitor.usage import fetch_usage, format_usage_inline, invalidate_usage_cache, set_oauth_json, set_on_token_refreshed
 
+os.makedirs(SIGNAL_DIR, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format="%(asctime)s %(message)s", force=True)
 log = logging.getLogger(__name__)
+# Suppress noisy third-party loggers that flood the debug log with
+# websocket protocol frames and asyncio selector events on every poll.
+for _noisy in ("websockets", "asyncio", "iterm2.connection"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+# --- Persistent iTerm2 websocket connection ---
+#
+# A single websocket stays open for the lifetime of the app.  All iTerm2
+# operations (layout fetch, tab title set, keystroke send) are scheduled
+# on its event loop via asyncio.run_coroutine_threadsafe().
+
+import asyncio as _asyncio
+
+_iterm2_loop: _asyncio.AbstractEventLoop | None = None
+_iterm2_app: iterm2.App | None = None
+_iterm2_ready = threading.Event()
+
+
+def _start_iterm2_connection():
+    """Launch a daemon thread that holds a persistent iTerm2 websocket."""
+    def _run():
+        global _iterm2_loop, _iterm2_app
+        conn = iterm2.Connection()
+
+        async def _init(connection):
+            global _iterm2_loop, _iterm2_app
+            _iterm2_loop = _asyncio.get_event_loop()
+            _iterm2_app = await iterm2.async_get_app(connection)
+            log.debug("iterm2: persistent connection established")
+            _iterm2_ready.set()
+
+        try:
+            conn.run_forever(_init, retry=True)
+        except Exception as e:
+            log.debug(f"iterm2: persistent connection died: {e}")
+
+    threading.Thread(target=_run, daemon=True, name="iterm2-ws").start()
+
+
+def _iterm2_call(coro_func, timeout=10):
+    """Schedule an async callable on the persistent iTerm2 connection.
+
+    coro_func receives the iterm2.App and returns a result.
+    Blocks the calling thread until the result is ready.
+    """
+    if not _iterm2_ready.wait(timeout=5):
+        log.debug("iterm2: connection not ready")
+        return None
+    future = _asyncio.run_coroutine_threadsafe(coro_func(_iterm2_app), _iterm2_loop)
+    try:
+        return future.result(timeout=timeout)
+    except Exception as e:
+        log.debug(f"iterm2: call failed: {e}")
+        return None
 
 
 # --- iTerm2 layout helpers ---
 
-def _fetch_layout_sync():
-    """Fetch iTerm2 pane layout synchronously.
+def _fetch_layout_sync(tab_titles: dict[str, str] | None = None):
+    """Fetch iTerm2 pane layout, optionally setting tab titles.
 
-    Returns (tabs, self_session_id, window_groups) where:
-    - tabs: list of (tab_id, tab_name, root_splitter) tuples across all windows
-    - self_session_id: UUID of the TUI's own iTerm2 session
-    - window_groups: dict mapping window_id to list of tab_ids in that window
-    Each call creates a Connection + event loop. We close the loop after
-    to avoid leaking file descriptors.
+    Returns (tabs, self_session_id, window_groups).
+    Uses the persistent websocket connection.
     """
-    result = [None, None]
-
-    async def _fetch(connection):
-        app = await iterm2.async_get_app(connection)
+    async def _do(app):
         tabs = []
         window_groups = {}
         for window in app.terminal_windows:
@@ -64,43 +114,51 @@ def _fetch_layout_sync():
                         tab_name = "Tab"
                     tabs.append((tab.tab_id, tab_name, tab.root))
                     win_tab_ids.append(tab.tab_id)
+                if tab_titles and tab.tab_id in tab_titles:
+                    try:
+                        await tab.async_set_title(tab_titles[tab.tab_id])
+                    except Exception:
+                        log.debug(f"_fetch_layout_sync: failed to set title for tab {tab.tab_id}")
             if win_tab_ids:
                 window_groups[window.window_id] = win_tab_ids
-        result[0] = tabs
-        result[1] = window_groups
+        return tabs, window_groups
 
-    conn = iterm2.Connection()
-    conn.run_until_complete(_fetch, retry=False)
-    if conn.loop:
-        conn.loop.close()
-
-    # Use ITERM_SESSION_ID env var to identify the TUI's own pane.
-    # Format is "w0t0p2:UUID" — the UUID matches iTerm2 API session IDs.
     raw = os.environ.get("ITERM_SESSION_ID", "")
     self_sid = extract_iterm_session_id(raw)
 
-    return result[0] or [], self_sid, result[1] or {}
+    result = _iterm2_call(_do)
+    if result:
+        return result[0], self_sid, result[1]
+    return [], self_sid, {}
 
 
 def _send_keystroke_sync(session_id: str, text: str) -> bool:
     """Send keystrokes to a specific iTerm2 session. Returns True on success."""
-    success = [False]
-
-    async def _send(connection):
-        app = await iterm2.async_get_app(connection)
+    async def _do(app):
         session = app.get_session_by_id(session_id)
         if session:
             await session.async_send_text(text)
-            success[0] = True
+            return True
+        return False
 
-    try:
-        conn = iterm2.Connection()
-        conn.run_until_complete(_send, retry=False)
-        if conn.loop:
-            conn.loop.close()
-    except Exception as e:
-        log.debug(f"_send_keystroke_sync: error: {e}")
-    return success[0]
+    return _iterm2_call(_do) or False
+
+
+def _set_tab_titles_sync(tab_titles: dict[str, str]) -> None:
+    """Set iTerm2 tab titles using the persistent connection."""
+    if not tab_titles:
+        return
+
+    async def _do(app):
+        for window in app.terminal_windows:
+            for tab in window.tabs:
+                if tab.tab_id in tab_titles:
+                    try:
+                        await tab.async_set_title(tab_titles[tab.tab_id])
+                    except Exception:
+                        log.debug(f"_set_tab_titles_sync: failed to set title for tab {tab.tab_id}")
+
+    _iterm2_call(_do)
 
 
 def _collect_session_ids(node):
@@ -188,6 +246,9 @@ _self_session_id: str | None = None
 
 def fetch_iterm_layout():
     global _layout_tabs, _self_session_id
+    _start_iterm2_connection()
+    if not _iterm2_ready.wait(timeout=5):
+        raise ConnectionRefusedError("Could not connect to iTerm2")
     tabs, self_sid, win_groups = _fetch_layout_sync()
     settings = load_settings()
     _layout_tabs = _filter_tabs_by_scope(tabs, self_sid, settings.iterm_scope, win_groups)
@@ -252,19 +313,27 @@ class SessionPanel(Static):
         background: $surface;
         color: $text-muted;
     }
-    SessionPanel .ctx-btn {
-        dock: top;
-        width: 3;
+    SessionPanel .countdown-bar {
+        dock: bottom;
         height: 1;
-        offset: -1 0;
-        align-horizontal: right;
-        background: transparent;
-        color: $accent-darken-1;
-        text-style: none;
+        background: $warning-darken-3;
+        color: $warning;
+        text-style: bold;
+        display: none;
     }
-    SessionPanel .ctx-btn:hover {
-        color: $accent;
-        background: $surface;
+    SessionPanel .countdown-bar.active {
+        display: block;
+    }
+    SessionPanel .timeout-overlay {
+        display: none;
+        height: 1;
+        color: #00e5ff;
+        text-style: bold;
+        text-align: center;
+        content-align: center middle;
+    }
+    SessionPanel .timeout-overlay.active {
+        display: block;
     }
     """
 
@@ -278,6 +347,7 @@ class SessionPanel(Static):
         super().__init__(**kwargs)
         self.session_id = session_id
         self.border_title = title
+        self.border_subtitle = ""
         self.active_agents: dict[str, str] = {}  # agent_id → agent_type
         self.accept_count = 0
         self.total_agents_completed = 0
@@ -285,11 +355,18 @@ class SessionPanel(Static):
         self._last_event_time: float | None = None
         self._state = "waiting"  # waiting, active, idle
         self._event_log: list[str] = []  # stored for replay after rebuild
+        self._pending_timeout: float | None = None  # epoch when timeout expires
+        self._timeout_origin: float | None = None  # origin timestamp of the timeout event
 
     def compose(self) -> ComposeResult:
-        yield Static("▾", classes="ctx-btn", id="ctx-btn")
         yield RichLog(markup=True, wrap=False)
+        yield Static("", classes="timeout-overlay")
+        yield Static("", classes="countdown-bar")
         yield Static(self._render_status(), classes="panel-status")
+
+    @property
+    def state(self) -> str:
+        return self._state
 
     def on_mount(self) -> None:
         rl = self.query_one(RichLog)
@@ -317,7 +394,7 @@ class SessionPanel(Static):
         # Mode indicator — check if app has per-pane pause info
         try:
             app = self.app
-            if hasattr(app, "_is_pane_paused") and app._is_pane_paused(self.session_id):
+            if hasattr(app, "is_pane_paused") and app.is_pane_paused(self.session_id):
                 mode = "[yellow]MANUAL[/]"
                 mode_plain = "MANUAL"
             else:
@@ -372,6 +449,7 @@ class SessionPanel(Static):
         try:
             w = self.size.width
         except Exception:
+            log.debug(f"SessionPanel._render_status: failed to get widget width for {self.session_id}, defaulting to 120")
             w = 120  # fallback to widest
 
         # SEP is ~3 visible chars (" │ ")
@@ -459,12 +537,35 @@ class SessionPanel(Static):
             self.query_one(".panel-status", Static).update(self._render_status())
         except Exception:
             log.debug(f"SessionPanel._update_status: panel-status query failed for {self.session_id}")
+        # Update countdown overlay and bar
+        try:
+            bar = self.query_one(".countdown-bar", Static)
+            overlay = self.query_one(".timeout-overlay", Static)
+            if self._pending_timeout is not None:
+                remaining = max(0, int(self._pending_timeout - time.time()))
+                if remaining > 0:
+                    bar.update(f" ⏱ AskUserQuestion auto-accept in {remaining}s")
+                    bar.add_class("active")
+                    overlay.update(f"[on #006080] ⏱ AskUserQuestion — auto-accept in {remaining}s [/]")
+                    overlay.add_class("active")
+                else:
+                    self._pending_timeout = None
+                    bar.update("")
+                    bar.remove_class("active")
+                    overlay.update("")
+                    overlay.remove_class("active")
+            else:
+                bar.remove_class("active")
+                overlay.remove_class("active")
+        except Exception:
+            log.debug(f"SessionPanel._update_status: countdown/overlay query failed for {self.session_id}")
 
     def on_click(self, event) -> None:
-        """Status bar click toggles mode; ▾ button opens context menu."""
-        if event.control and getattr(event.control, "id", None) == "ctx-btn":
+        """Title bar click opens context menu; status bar click toggles mode."""
+        # Click on top border row (where the title is) opens context menu
+        if event.screen_y == self.region.y:
             event.stop()
-            self.app.push_screen(PaneContextMenu(self.session_id))
+            self.app.push_screen(PaneContextMenu(self.session_id, click_x=event.screen_x, click_y=event.screen_y))
             return
         try:
             status = self.query_one(".panel-status", Static)
@@ -482,13 +583,13 @@ class PaneContextMenu(ModalScreen):
 
     DEFAULT_CSS = """
     PaneContextMenu {
-        align: center middle;
+        layout: horizontal;
     }
     PaneContextMenu #ctx-menu {
         width: 40;
-        max-height: 12;
+        height: auto;
         background: $surface;
-        border: solid $accent;
+        border: solid $secondary;
         padding: 0;
     }
     PaneContextMenu OptionList {
@@ -501,9 +602,11 @@ class PaneContextMenu(ModalScreen):
         ("escape", "dismiss", "Close"),
     ]
 
-    def __init__(self, session_id: str, **kwargs) -> None:
+    def __init__(self, session_id: str, click_x: int = 0, click_y: int = 0, **kwargs) -> None:
         super().__init__(**kwargs)
         self._ctx_session_id = session_id
+        self._click_x = click_x
+        self._click_y = click_y
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ctx-menu"):
@@ -515,6 +618,10 @@ class PaneContextMenu(ModalScreen):
                 Option("Open Settings", id="settings"),
                 id="ctx-options",
             )
+
+    def on_mount(self) -> None:
+        menu = self.query_one("#ctx-menu", Vertical)
+        menu.styles.margin = (self._click_y, 0, 0, self._click_x)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id
@@ -558,13 +665,19 @@ class DashboardPanel(Static):
         padding: 0 1;
     }
     DashboardPanel .dash-stats {
-        height: 3;
+        height: 1;
     }
     DashboardPanel .dash-sparkline {
-        height: 3;
+        height: 2;
+        width: 100%;
     }
-    DashboardPanel .dash-sparkline Sparkline {
-        height: 1;
+    DashboardPanel .dash-sparkline-label {
+        width: 24;
+        height: 2;
+    }
+    DashboardPanel .dash-sparkline FixedWidthSparkline {
+        height: 2;
+        width: 1fr;
     }
     DashboardPanel RichLog {
         height: 1fr;
@@ -579,17 +692,22 @@ class DashboardPanel(Static):
         self.active_agents: dict[str, str] = {}  # agent_id → agent_type (own session)
         self.total_agents_completed = 0
         self.accept_count = 0
-        # Track events per 10-second bucket for sparkline
-        self._event_buckets: collections.deque = collections.deque(maxlen=30)
-        self._current_bucket_time = 0
+        # Track events per N-second bucket for sparkline
+        self._event_buckets: collections.deque = collections.deque(maxlen=300)
+        self._bucket_secs = 5  # overridden from settings after mount
+        self._bucket_counter = 0  # counts ticks (1s each) within a bucket
         self._current_bucket_count = 0
         self._event_log: list[str] = []  # stored for replay after rebuild
 
     def compose(self) -> ComposeResult:
         yield Static(self._render_stats(), classes="dash-stats")
-        yield Vertical(
-            Static("[dim]Activity (events/10s)[/]"),
-            Sparkline(list(self._event_buckets) or [0]),
+        yield Horizontal(
+            Vertical(
+                Static(f"[dim]Activity (events/{self._bucket_secs}s)[/]"),
+                Static(self._render_scale_label(), classes="dash-scale-label"),
+                classes="dash-sparkline-label",
+            ),
+            FixedWidthSparkline(self._scaled_data()),
             classes="dash-sparkline",
         )
         yield RichLog(markup=True, wrap=False)
@@ -606,26 +724,49 @@ class DashboardPanel(Static):
             self.query_one(RichLog).write(text)
         except Exception:
             log.debug("Dashboard.record_event: RichLog query failed")
-        # Sparkline bucketing
-        bucket = int(time.time()) // 10
-        if bucket != self._current_bucket_time:
-            if self._current_bucket_time:
-                self._event_buckets.append(self._current_bucket_count)
-            self._current_bucket_time = bucket
-            self._current_bucket_count = 0
         self._current_bucket_count += 1
 
     def refresh_dashboard(self, panels: dict) -> None:
-        """Called every tick to update stats and sparkline."""
+        """Called every tick (1s) to update stats and sparkline."""
+        self._bucket_counter += 1
+        if self._bucket_counter >= self._bucket_secs:
+            self._event_buckets.append(self._current_bucket_count)
+            self._current_bucket_count = 0
+            self._bucket_counter = 0
         try:
             self.query_one(".dash-stats", Static).update(self._render_stats(panels))
         except Exception:
             log.debug("Dashboard.refresh_dashboard: dash-stats query failed")
         try:
-            data = list(self._event_buckets) + [self._current_bucket_count]
-            self.query_one(Sparkline).data = data
+            self.query_one(FixedWidthSparkline).data = self._scaled_data()
+            self.query_one(".dash-scale-label", Static).update(self._render_scale_label())
         except Exception:
             log.debug("Dashboard.refresh_dashboard: Sparkline query failed")
+
+    _MIN_Y_SCALE = 4  # minimum y-axis max so low counts don't fill the bar
+
+    def _visible_data(self) -> list[int]:
+        """Return the sparkline data that's actually visible (last `width` buckets)."""
+        raw = list(self._event_buckets) + [self._current_bucket_count]
+        try:
+            width = self.query_one(FixedWidthSparkline).size.width
+        except Exception:
+            log.debug("Dashboard._visible_data: failed to get sparkline width, using raw data length")
+            width = len(raw)
+        return raw[-width:] if len(raw) > width else raw
+
+    def _scaled_data(self) -> list[float]:
+        """Return sparkline data normalized to 0.0–1.0 against visible peak."""
+        raw = self._visible_data()
+        if not raw:
+            return [0.0]
+        peak = max(max(raw), self._MIN_Y_SCALE)
+        return [v / peak for v in raw]
+
+    def _render_scale_label(self) -> str:
+        raw = self._visible_data()
+        peak = max(max(raw), self._MIN_Y_SCALE) if raw else self._MIN_Y_SCALE
+        return f"[dim]now {self._current_bucket_count} · peak {peak}[/]"
 
     def _render_stats(self, panels: dict | None = None) -> str:
         SEP = " [dim]│[/] "
@@ -634,8 +775,8 @@ class DashboardPanel(Static):
             total_accepted = sum(p.accept_count for p in panels.values())
             total_agents_done = sum(p.total_agents_completed for p in panels.values())
             total_agents_active = sum(len(p.active_agents) for p in panels.values())
-            active_sessions = sum(1 for p in panels.values() if p._state == "active")
-            idle_sessions = sum(1 for p in panels.values() if p._state == "idle")
+            active_sessions = sum(1 for p in panels.values() if p.state == "active")
+            idle_sessions = sum(1 for p in panels.values() if p.state == "idle")
         else:
             total_accepted = total_agents_done = total_agents_active = 0
             active_sessions = idle_sessions = 0
@@ -747,9 +888,12 @@ class ChoicesScreen(ModalScreen):
         cwd = data.get("cwd", "")
         project = os.path.basename(cwd) if cwd else ""
         decision = data.get("_decision", "allowed")
+        excluded = data.get("_excluded_tool", False)
 
         # Decision badge
-        if decision == "deferred":
+        if excluded:
+            badge = "[bold red]MANUAL  [/]"
+        elif decision == "deferred":
             badge = "[bold yellow]DEFERRED[/]"
         else:
             badge = "[bold green]ALLOWED [/]"
@@ -855,8 +999,10 @@ class QuestionsScreen(ModalScreen):
         self.query_one("#questions-log", RichLog).horizontal_scrollbar.renderer = HorizontalScrollBarRender
 
     def _load_questions(self) -> list[str]:
-        """Load AskUserQuestion events from events.jsonl (newest first)."""
-        entries = []
+        """Load AskUserQuestion events from events.jsonl, merging answers from PostToolUse."""
+        perm_events: list[dict] = []
+        # Map session_id -> list of PostToolUse answers (in order) for merging
+        post_answers: dict[str, list[dict]] = {}
         try:
             with open(EVENTS_FILE) as f:
                 for line in f:
@@ -867,14 +1013,29 @@ class QuestionsScreen(ModalScreen):
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if data.get("hook_event_name") != "PermissionRequest":
-                        continue
                     if data.get("tool_name") != "AskUserQuestion":
                         continue
-                    entries.append(self._format_question(data))
+                    evt = data.get("hook_event_name", "")
+                    if evt == "PermissionRequest":
+                        perm_events.append(data)
+                    elif evt == "PostToolUse":
+                        sid = data.get("session_id", "")
+                        post_answers.setdefault(sid, []).append(data)
         except FileNotFoundError:
             log.debug("QuestionsScreen: events file not found")
-        return entries[-200:]
+
+        # Merge answers: match each PermissionRequest with the next PostToolUse from same session
+        post_idx: dict[str, int] = {}
+        for perm in perm_events:
+            sid = perm.get("session_id", "")
+            idx = post_idx.get(sid, 0)
+            posts = post_answers.get(sid, [])
+            if idx < len(posts):
+                answers = posts[idx].get("tool_input", {}).get("answers", {})
+                perm["_answers"] = answers
+                post_idx[sid] = idx + 1
+
+        return [self._format_question(d) for d in perm_events[-200:]]
 
     def _format_question(self, data: dict) -> str:
         ts = datetime.fromtimestamp(data.get("_timestamp", 0))
@@ -883,10 +1044,16 @@ class QuestionsScreen(ModalScreen):
         cwd = data.get("cwd", "")
         project = os.path.basename(cwd) if cwd else ""
         decision = data.get("_decision", "allowed")
+        excluded = data.get("_excluded_tool", False)
 
         # Decision badge
-        if decision == "deferred":
+        if excluded:
+            badge = "[bold red]MANUAL  [/]"
+        elif decision == "deferred":
             badge = "[bold yellow]DEFERRED[/]"
+        elif decision == "timeout":
+            timeout_s = data.get("_ask_timeout", "?")
+            badge = f"[bold cyan]TIMEOUT [/]"
         else:
             badge = "[bold green]ALLOWED [/]"
 
@@ -945,7 +1112,10 @@ def _format_ask_user_question_detail(data: dict) -> str:
     """Format AskUserQuestion event as a multi-line detail string for the QuestionsScreen."""
     tool_input = data.get("tool_input", {})
     questions = tool_input.get("questions", [])
-    answers = tool_input.get("answers", {})
+    # Prefer merged answers from PostToolUse, fall back to tool_input answers
+    answers = data.get("_answers", tool_input.get("answers", {}))
+    decision = data.get("_decision", "allowed")
+    is_auto = decision == "timeout"
     lines = []
 
     if questions:
@@ -960,12 +1130,17 @@ def _format_ask_user_question_detail(data: dict) -> str:
                 desc = o.get("description", "")
                 if label:
                     if selected and label == selected:
-                        marker = "[bold green]>>[/]"
-                        lines.append(f"      {marker} [bold]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                        if is_auto:
+                            marker = "[bold cyan]>>[/]"
+                            lines.append(f"      {marker} [bold cyan]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                        else:
+                            marker = "[bold green]>>[/]"
+                            lines.append(f"      {marker} [bold green]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
                     else:
                         lines.append(f"         {label}" + (f"  [dim]{desc}[/]" if desc else ""))
             if selected:
-                lines.append(f"    [dim]Answer:[/] [bold]{selected}[/]")
+                mode = "[cyan]auto[/]" if is_auto else "[green]manual[/]"
+                lines.append(f"    [dim]Answer:[/] [bold]{selected}[/]  ({mode})")
             if i < len(questions) - 1:
                 lines.append("")
     else:
@@ -1007,7 +1182,7 @@ def _get_frame_size(node):
     return 0, 0
 
 
-def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashboard=None, depth=0):
+def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashboard=None, depth=0, settings=None):
     """Convert iTerm2 Splitter tree to Textual widget tree.
 
     If old_panels/old_dashboard are provided, state is transferred to new widgets.
@@ -1020,6 +1195,8 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
         css_id = _safe_css_id(node.session_id)
         if is_self:
             panel = DashboardPanel(id=css_id)
+            if settings:
+                panel._bucket_secs = settings.sparkline_bucket_secs
             # Transfer dashboard state
             if old_dashboard:
                 panel._start_time = old_dashboard._start_time
@@ -1027,7 +1204,7 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
                 panel.total_agents_completed = old_dashboard.total_agents_completed
                 panel.accept_count = old_dashboard.accept_count
                 panel._event_buckets = old_dashboard._event_buckets
-                panel._current_bucket_time = old_dashboard._current_bucket_time
+                panel._bucket_counter = old_dashboard._bucket_counter
                 panel._current_bucket_count = old_dashboard._current_bucket_count
                 panel._event_log = list(old_dashboard._event_log)
             log.debug(f"{indent}Session {node.session_id[:8]} (SELF/TUI) -> DashboardPanel id={css_id}")
@@ -1044,7 +1221,7 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
                 panel.total_agents_completed = old.total_agents_completed
                 panel._start_time = old._start_time
                 panel._last_event_time = old._last_event_time
-                panel._state = old._state
+                panel._state = old.state
                 panel._event_log = list(old._event_log)
             panels[node.session_id] = panel
             log.debug(f"{indent}Session {node.session_id[:8]} {name!r} -> SessionPanel id={css_id}")
@@ -1067,7 +1244,7 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
         dashboard_ref = None
         children = []
         for i, child in enumerate(node.children):
-            widget, dash = _build_widget_tree(child, self_session_id, panels, old_panels, old_dashboard, depth + 1)
+            widget, dash = _build_widget_tree(child, self_session_id, panels, old_panels, old_dashboard, depth + 1, settings=settings)
             # Set proportional size
             pct = round(fractions[i] * 100)
             if node.vertical:
@@ -1109,6 +1286,86 @@ class MonitorCommands(Provider):
             score = matcher.match(name)
             if score > 0:
                 yield Hit(score, matcher.highlight(name), getattr(self.app, action), help=help_text)
+
+
+class FixedWidthSparkline(Sparkline):
+    """Sparkline where each data point = exactly 1 column, right-aligned.
+
+    Pads with zeros on the left so 1 data point = 1 column with no
+    horizontal scaling. Data should be pre-normalized to 0.0–1.0.
+    """
+
+    def render(self):
+        from fractions import Fraction
+        from rich.color import Color
+        from rich.segment import Segment
+        from rich.style import Style
+        from rich.color_triplet import ColorTriplet
+
+        width = self.size.width
+        height = self.size.height
+        data = list(self.data or [])
+        if len(data) > width:
+            data = data[-width:]
+        if len(data) < width:
+            data = [0.0] * (width - len(data)) + data
+        if len(data) < 2:
+            data = [0.0, 0.0]
+
+        _, base = self.background_colors
+        min_color = base + (
+            self.get_component_styles("sparkline--min-color").color
+            if self.min_color is None
+            else self.min_color
+        )
+        max_color = base + (
+            self.get_component_styles("sparkline--max-color").color
+            if self.max_color is None
+            else self.max_color
+        )
+
+        # Render directly: data is pre-normalized 0.0-1.0, no re-scaling.
+        BARS = "▁▂▃▄▅▆▇█"
+        bar_segs_per_row = len(BARS)
+        total_bar_segs = bar_segs_per_row * height - 1
+
+        mc = min_color.rich_color
+        xc = max_color.rich_color
+
+        def _blend(ratio: float) -> Style:
+            r1, g1, b1 = mc.triplet or ColorTriplet(0, 0, 0)
+            r2, g2, b2 = xc.triplet or ColorTriplet(255, 255, 255)
+            r = int(r1 + (r2 - r1) * ratio)
+            g = int(g1 + (g2 - g1) * ratio)
+            b = int(b1 + (b2 - b1) * ratio)
+            return Style.from_color(Color.from_rgb(r, g, b))
+
+        lines: list[list[Segment]] = []
+        for row in reversed(range(height)):
+            row_low = row * bar_segs_per_row
+            row_high = (row + 1) * bar_segs_per_row
+            segs: list[Segment] = []
+            for val in data:
+                bar_idx = int(val * total_bar_segs)
+                bar_idx = min(bar_idx, total_bar_segs)
+                if bar_idx < row_low:
+                    segs.append(Segment(" "))
+                elif bar_idx >= row_high:
+                    segs.append(Segment("█", _blend(val)))
+                else:
+                    ch = BARS[bar_idx % bar_segs_per_row]
+                    segs.append(Segment(ch, _blend(val)))
+            lines.append(segs)
+
+        from rich.console import RenderableType, ConsoleOptions, RenderResult as RR, Console
+        class _Renderable:
+            def __rich_console__(self_r, console: Console, options: ConsoleOptions) -> RR:
+                for i, line in enumerate(lines):
+                    yield from line
+                    if i < len(lines) - 1:
+                        yield Segment.line()
+
+        return _Renderable()
 
 
 class HalfBlockScrollBarRender(ScrollBarRender):
@@ -1269,15 +1526,20 @@ class AutoAcceptTUI(App):
         self._current_size_fp = None
         self._usage_polling = False
         self._last_usage_data = None
+        self._usage_next_fetch: float = 0  # epoch time of next usage poll
         self._api_server = None
         self._global_paused: bool = False
         self._paused_sessions: set[str] = set()
+        self._tab_original_names: dict[str, str] = {}  # tab_id → original tab name
+        self._tab_session_ids: dict[str, set[str]] = {}  # tab_id → set of session_ids in that tab
+        self._tab_title_lock = threading.Lock()  # prevents concurrent _set_tab_titles_sync calls
+        self._tab_title_pending = False  # coalesces rapid update_tab_titles calls
 
     @property
     def paused(self) -> bool:
         return self._global_paused
 
-    def _is_pane_paused(self, iterm_sid: str) -> bool:
+    def is_pane_paused(self, iterm_sid: str) -> bool:
         return self._global_paused or iterm_sid in self._paused_sessions
 
     def get_state_snapshot(self) -> dict:
@@ -1291,8 +1553,8 @@ class AutoAcceptTUI(App):
             sessions.append({
                 "id": sid,
                 "title": panel.border_title,
-                "state": panel._state,
-                "mode": "manual" if self._is_pane_paused(sid) else "auto",
+                "state": panel.state,
+                "mode": "manual" if self.is_pane_paused(sid) else "auto",
                 "active_agents": len(panel.active_agents),
                 "completed_agents": panel.total_agents_completed,
                 "accept_count": panel.accept_count,
@@ -1304,8 +1566,8 @@ class AutoAcceptTUI(App):
             total_accepted = sum(p.accept_count for p in self.panels.values()) + d.accept_count
             total_agents_active = sum(len(p.active_agents) for p in self.panels.values()) + len(d.active_agents)
             total_agents_done = sum(p.total_agents_completed for p in self.panels.values()) + d.total_agents_completed
-            active_sessions = sum(1 for p in self.panels.values() if p._state == "active")
-            idle_sessions = sum(1 for p in self.panels.values() if p._state == "idle")
+            active_sessions = sum(1 for p in self.panels.values() if p.state == "active")
+            idle_sessions = sum(1 for p in self.panels.values() if p.state == "idle")
             dashboard_data = {
                 "total_accepted": total_accepted,
                 "total_agents_active": total_agents_active,
@@ -1352,7 +1614,7 @@ class AutoAcceptTUI(App):
 
     def _update_all_panel_modes(self) -> None:
         for panel in self.panels.values():
-            if self._is_pane_paused(panel.session_id):
+            if self.is_pane_paused(panel.session_id):
                 panel.add_class("pane-paused")
             else:
                 panel.remove_class("pane-paused")
@@ -1404,12 +1666,21 @@ class AutoAcceptTUI(App):
 
     async def _mount_tabs(self, root, tabs, self_session_id, old_panels=None, old_dashboard=None):
         """Mount tab layout into a container. Handles single-tab and multi-tab cases."""
+        # Record original tab names and which sessions belong to each tab
+        for tab_id, tab_name, tree in tabs:
+            if tab_id not in self._tab_original_names:
+                # Strip any stacked " [N]" or " [N/N]" suffixes we may have set previously
+                clean_name = re.sub(r'( \[\d+(/\d+)?\])+$', '', tab_name)
+                self._tab_original_names[tab_id] = clean_name
+            self._tab_session_ids[tab_id] = _collect_session_ids(tree)
+
         if len(tabs) == 1:
             # Single tab — render directly without tab wrapper
             _tab_id, _tab_name, tree = tabs[0]
             layout, dash = _build_widget_tree(
                 tree, self_session_id, self.panels,
                 old_panels=old_panels, old_dashboard=old_dashboard,
+                settings=self.settings,
             )
             self.dashboard = dash
             await root.mount(layout)
@@ -1421,11 +1692,14 @@ class AutoAcceptTUI(App):
                 layout, dash = _build_widget_tree(
                     tree, self_session_id, self.panels,
                     old_panels=old_panels, old_dashboard=old_dashboard,
+                    settings=self.settings,
                 )
                 if dash:
                     self.dashboard = dash
                 pane = TabPane(tab_name, layout, id=_safe_tab_css_id(tab_id))
                 await tc.add_pane(pane)
+
+        self.update_tab_titles()
 
         # Replay event logs into the newly mounted RichLog widgets
         for panel in self.panels.values():
@@ -1463,7 +1737,10 @@ class AutoAcceptTUI(App):
             if self._stop_event.is_set():
                 break
             try:
-                tabs, self_sid, win_groups = _fetch_layout_sync()
+                # Compute tab titles and pass them to the layout fetch so both
+                # operations share a single websocket connection.
+                pending_titles = self._compute_tab_titles() if self._tab_original_names and not self._rebuilding else None
+                tabs, self_sid, win_groups = _fetch_layout_sync(tab_titles=pending_titles)
                 tabs = _filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
                 if tabs:
                     new_struct = _structure_fingerprint(tabs)
@@ -1537,6 +1814,7 @@ class AutoAcceptTUI(App):
             self._rebuilding = False
 
         self._update_all_panel_modes()
+        self.update_tab_titles()
         log.debug(f"on_layout_changed: done. panels={list(self.panels.keys())}, dashboard={self.dashboard is not None}")
 
     def on_layout_resized(self, msg: LayoutResized) -> None:
@@ -1649,6 +1927,10 @@ class AutoAcceptTUI(App):
 
         panel.touch()
         self._apply_event(panel, data, event_name)
+        # Track active timeout for status bar countdown
+        if data.get("_decision") == "timeout" and data.get("_ask_timeout"):
+            panel._pending_timeout = data["_timestamp"] + data["_ask_timeout"]
+            panel._timeout_origin = data["_timestamp"]
         label, detail = self._format_event(data, event_name)
         if label:
             panel.write(f"[{t}] {label} {detail}")
@@ -1659,6 +1941,8 @@ class AutoAcceptTUI(App):
             if label:
                 sid_short = panel.session_id[:8]
                 self.dashboard.record_event(f"[{t}] [{sid_short}] {label} {detail}")
+
+        self.update_tab_titles()
 
     def _handle_dashboard_event(self, data: dict, event_name: str, t: str) -> None:
         """Handle hook events from the TUI's own session on the dashboard."""
@@ -1694,7 +1978,7 @@ class AutoAcceptTUI(App):
         """
         if event_name == "PermissionRequest":
             iterm_sid = self._iterm_sid_from_event(data)
-            if not (iterm_sid and self._is_pane_paused(iterm_sid)):
+            if not (iterm_sid and self.is_pane_paused(iterm_sid)):
                 panel.accept_count += 1
 
         elif event_name == "Notification":
@@ -1702,11 +1986,23 @@ class AutoAcceptTUI(App):
             if ntype == "idle_prompt":
                 if hasattr(panel, "mark_idle"):
                     panel.mark_idle()
+                    self.update_tab_titles()
             elif ntype == "permission_prompt":
                 iterm_sid = self._iterm_sid_from_event(data)
-                if iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
-                    panel.accept_count += 1
-                    self._send_approve(iterm_sid)
+                if iterm_sid and iterm_sid != _self_session_id and not self.is_pane_paused(iterm_sid):
+                    # Skip auto-approve if panel has a pending AskUserQuestion timeout
+                    pending = getattr(panel, "_pending_timeout", None)
+                    if pending and pending > time.time():
+                        log.debug(f"Skipping auto-approve: AskUserQuestion timeout pending for {iterm_sid}")
+                    else:
+                        panel.accept_count += 1
+                        self._send_approve(iterm_sid)
+
+        elif event_name == "PostToolUse":
+            # Clear pending timeout when AskUserQuestion completes (user answered manually)
+            if data.get("tool_name") == "AskUserQuestion":
+                panel._pending_timeout = None
+                panel._timeout_origin = None
 
         elif event_name == "SubagentStart":
             agent_id = data.get("agent_id", "?")
@@ -1733,19 +2029,54 @@ class AutoAcceptTUI(App):
                 detail = f" `{tool_input.get('file_path', '')}`"
             elif tool == "WebFetch":
                 detail = f" `{tool_input.get('url', '')[:60]}`"
+            # Check event-level flags first, then live pane state
+            if data.get("_excluded_tool"):
+                return f"[bold red]{'MANUAL':<8}[/]", f"{tool}{detail}"
+            decision = data.get("_decision", "allowed")
+            if decision == "deferred":
+                return f"[bold yellow]{'DEFERRED':<8}[/]", f"{tool}{detail}"
+            if decision == "timeout":
+                timeout_s = data.get("_ask_timeout", "?")
+                return f"[bold cyan]{'TIMEOUT':<8}[/]", f"{tool}{detail} ({timeout_s}s)"
             iterm_sid = self._iterm_sid_from_event(data)
-            if iterm_sid and self._is_pane_paused(iterm_sid):
+            if iterm_sid and self.is_pane_paused(iterm_sid):
                 return f"[bold yellow]{'PAUSED':<8}[/]", f"{tool}{detail}"
             return f"[bold green]{'ALLOWED':<8}[/]", f"{tool}{detail}"
+
+        elif event_name == "PostToolUse":
+            tool = data.get("tool_name", "?")
+            if tool == "AskUserQuestion":
+                answers = data.get("tool_input", {}).get("answers", {})
+                answer_vals = [v for v in answers.values() if v]
+                if not answer_vals:
+                    return None, None  # Auto-accepted with no real answer
+                answer_text = ", ".join(answer_vals)
+                return f"[bold green]{'ANSWER':<8}[/]", f"AskUserQuestion -> [bold]{answer_text}[/]"
+            return None, None
 
         elif event_name == "Notification":
             ntype = data.get("notification_type", "")
             message = data.get("message", "")
             if ntype == "idle_prompt":
                 return f"[dim]{'IDLE':<8}[/]", self._oneline(message, 80)
+            elif ntype == "ask_timeout_complete":
+                panel = self._resolve_panel(data)
+                origin = data.get("_timeout_origin")
+                if panel and panel._pending_timeout is not None and getattr(panel, "_timeout_origin", None) == origin:
+                    # Timeout expired naturally — show auto-accept
+                    panel._pending_timeout = None
+                    panel._timeout_origin = None
+                    return f"[bold cyan]{'AUTO':<8}[/]", message
+                # Already answered manually or origin mismatch — suppress
+                return None, None
             elif ntype == "permission_prompt":
                 iterm_sid = self._iterm_sid_from_event(data)
-                if iterm_sid and iterm_sid != _self_session_id and not self._is_pane_paused(iterm_sid):
+                if iterm_sid and iterm_sid != _self_session_id and not self.is_pane_paused(iterm_sid):
+                    # Don't show APPROVED when AskUserQuestion timeout is pending
+                    panel = self._resolve_panel(data)
+                    pending = getattr(panel, "_pending_timeout", None) if panel else None
+                    if pending and pending > time.time():
+                        return None, None
                     return f"[bold green]{'APPROVED':<8}[/]", message
             return f"[bold cyan]{'NOTIFY':<8}[/]", self._oneline(message, 80)
 
@@ -1773,6 +2104,46 @@ class AutoAcceptTUI(App):
         ok = _send_keystroke_sync(session_id, "\r")
         log.debug(f"_send_approve: session={session_id[:8]} ok={ok}")
 
+    # --- Tab title updates ---
+
+    def _compute_tab_titles(self) -> dict[str, str]:
+        """Compute tab titles with active/total session counts. Pure computation, no I/O."""
+        tab_titles: dict[str, str] = {}
+        for tab_id, original_name in self._tab_original_names.items():
+            session_ids = self._tab_session_ids.get(tab_id, set())
+            total_count = sum(1 for sid in session_ids if sid in self.panels)
+            active_count = sum(
+                1 for sid in session_ids
+                if sid in self.panels and (
+                    self.panels[sid]._state == "active" or len(self.panels[sid].active_agents) > 0
+                )
+            )
+            title = f"{original_name} [{active_count}/{total_count}]"
+            tab_titles[tab_id] = title
+        return tab_titles
+
+    @work(thread=True, exit_on_error=False)
+    def update_tab_titles(self) -> None:
+        """Compute active session count per tab and update iTerm2 tab titles.
+
+        Coalesces rapid calls: if a call is already running, mark pending and return.
+        The running call will re-check and apply after it finishes.
+        """
+        if not self._tab_original_names:
+            return
+        if not self._tab_title_lock.acquire(blocking=False):
+            # Another worker is running — mark pending so it re-runs after finishing
+            self._tab_title_pending = True
+            return
+        try:
+            while True:
+                self._tab_title_pending = False
+                _set_tab_titles_sync(self._compute_tab_titles())
+                if not self._tab_title_pending:
+                    break
+        finally:
+            self._tab_title_lock.release()
+
     # --- Keybindings ---
 
     def action_refresh_layout(self) -> None:
@@ -1797,6 +2168,10 @@ class AutoAcceptTUI(App):
         except Exception as e:
             log.debug(f"_do_refresh: error: {e}")
             error = True
+
+        # Refresh usage data (already in a thread, token handles expiry/renewal)
+        if self.settings.account_usage:
+            self._last_usage_data = fetch_usage()
 
         def _restore():
             if error:
@@ -1856,11 +2231,15 @@ class AutoAcceptTUI(App):
         if result is None:
             return
         old_scope = self.settings.iterm_scope
+        old_oauth = self.settings.oauth_json
         self.settings = result
         self._apply_settings(result)
         if result.iterm_scope != old_scope:
             self._current_structure_fp = None  # force rebuild on next poll
             self._do_refresh()
+        if result.oauth_json != old_oauth and result.oauth_json and result.account_usage:
+            invalidate_usage_cache()
+            self._refresh_usage()
         log.debug(f"Settings updated: {result}")
 
     def _apply_settings(self, settings: Settings) -> None:
@@ -1869,6 +2248,9 @@ class AutoAcceptTUI(App):
         # Debug logging level
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.DEBUG if settings.debug else logging.WARNING)
+        # Push OAuth tokens to usage module
+        set_oauth_json(settings.oauth_json)
+        set_on_token_refreshed(self._on_token_refreshed)
         # Start usage polling if newly enabled
         if settings.account_usage and not self._usage_polling:
             self._usage_polling = True
@@ -1880,6 +2262,25 @@ class AutoAcceptTUI(App):
         # Persist excluded_tools and ask_user_timeout to state.json for the hook
         self._save_state()
 
+    def _on_token_refreshed(self, token: str, refresh_token: str, expires_at: float) -> None:
+        """Called from usage module when OAuth token is refreshed. May run in a background thread."""
+        # Update oauth_json in settings if it was the token source
+        if self.settings.oauth_json:
+            oauth_data = {"access_token": token, "refresh_token": refresh_token, "expires_at": expires_at}
+            self.settings.oauth_json = json.dumps(oauth_data)
+            save_settings(self.settings)
+            set_oauth_json(self.settings.oauth_json)
+        # Log to dashboard
+        ts = self._format_ts(datetime.now().astimezone())
+        expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).astimezone()
+        msg = f"[{ts}] [dim]OAuth token refreshed, expires {expires_dt.strftime('%H:%M:%S')}[/]"
+
+        def _log():
+            if self.dashboard:
+                self.dashboard.record_event(msg)
+
+        self.call_from_thread(_log)
+
     def _update_status_bar(self) -> None:
         """Update the status bar to reflect current pause state, usage, version, and clock."""
         try:
@@ -1888,7 +2289,7 @@ class AutoAcceptTUI(App):
             right = self.query_one("#status-right", Static)
             SEP = "  [dim]\u2502[/]  "
 
-            n_paused = sum(1 for p in self.panels.values() if self._is_pane_paused(p.session_id))
+            n_paused = sum(1 for p in self.panels.values() if self.is_pane_paused(p.session_id))
             if self.paused:
                 mode_text = "[bold]MANUAL[/]"
                 bar.set_classes("paused")
@@ -1907,6 +2308,13 @@ class AutoAcceptTUI(App):
             if self._last_usage_data:
                 bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
                 left_parts.append(format_usage_inline(self._last_usage_data, bar_width, usage_mode))
+            elif self.settings.account_usage:
+                if self._usage_next_fetch > 0:
+                    next_dt = datetime.fromtimestamp(self._usage_next_fetch)
+                    next_str = next_dt.strftime("%-I:%M%p").lower()
+                    left_parts.append(f"[dim]usage: updating at {next_str}[/]")
+                else:
+                    left_parts.append("[dim]usage: waiting…[/]")
             left.update(SEP.join(left_parts))
 
             clock = datetime.now().strftime("%-b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
@@ -1957,10 +2365,18 @@ class AutoAcceptTUI(App):
                 self._usage_polling = False
                 break
             self._last_usage_data = fetch_usage()
+            self._usage_next_fetch = time.time() + 300
 
             self.call_from_thread(self._update_status_bar)
             self._stop_event.wait(300)
         log.debug("poll_usage: stopped")
+
+    @work(thread=True, exit_on_error=False)
+    def _refresh_usage(self) -> None:
+        """One-shot usage fetch in a background thread."""
+        self._last_usage_data = fetch_usage()
+        self._usage_next_fetch = time.time() + 300
+        self.call_from_thread(self._update_status_bar)
 
     # --- API server ---
 
@@ -1985,7 +2401,18 @@ class AutoAcceptTUI(App):
 
 
 def main():
-    fetch_iterm_layout()
+    try:
+        fetch_iterm_layout()
+    except ConnectionRefusedError:
+        print("Error: Could not connect to iTerm2.")
+        print()
+        print("The Python API is probably not enabled. To fix:")
+        print("  1. Open iTerm2 → Settings (⌘,)")
+        print("  2. Go to General → Magic")
+        print('  3. Check "Enable Python API"')
+        print()
+        print("Then restart claude-monitor.")
+        raise SystemExit(1)
     app = AutoAcceptTUI()
     app.run()
     # Force exit — background threads (layout polling, event watcher) may be
