@@ -35,7 +35,7 @@ claude-monitor runs alongside your Claude Code sessions in iTerm2. It mirrors yo
 ## Installation
 
 ```bash
-git clone https://github.com/your-user/claude-monitor.git
+git clone https://github.com/cjthompson/claude-monitor.git
 cd claude-monitor
 python3 install.py
 ```

@@ -5,3 +5,6 @@ dist/
 build/
 .venv/
 .eggs/
+.DS_Store
+.idea/
+.claude/settings.local.json

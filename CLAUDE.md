@@ -13,6 +13,8 @@ A Textual TUI that monitors and auto-accepts Claude Code permission prompts acro
 
 These steps are **required** — the TUI must be restarted to pick up code changes (it's a running process). Do not skip or defer these steps. Do them immediately after the code change, before reporting results to the user.
 
+3. **On commit**: Remove the `-beta.X` suffix from `__version__` (e.g. `1.0.5-beta.21` → `1.0.5`). Keep `pyproject.toml` version in sync.
+
 ### Version scheme
 
 Version is in `claude_monitor/__init__.py` (`__version__`) and displayed in the TUI status bar.

@@ -293,6 +293,7 @@ class SessionPanel(Static):
         height: 1fr;
         width: 1fr;
         padding: 0 1;
+        layers: base overlay;
     }
     SessionPanel.pane-paused {
         border: solid $warning;
@@ -300,6 +301,7 @@ class SessionPanel(Static):
     SessionPanel RichLog {
         height: 1fr;
         background: $background;
+        layer: base;
     }
     SessionPanel:focus {
         border: double $accent;
@@ -312,6 +314,7 @@ class SessionPanel(Static):
         height: 1;
         background: $surface;
         color: $text-muted;
+        layer: base;
     }
     SessionPanel .countdown-bar {
         dock: bottom;
@@ -320,13 +323,19 @@ class SessionPanel(Static):
         color: $warning;
         text-style: bold;
         display: none;
+        layer: base;
     }
     SessionPanel .countdown-bar.active {
         display: block;
     }
     SessionPanel .timeout-overlay {
         display: none;
+        layer: overlay;
+        dock: bottom;
+        offset-y: -1;
         height: 1;
+        width: 1fr;
+        background: #006080;
         color: #00e5ff;
         text-style: bold;
         text-align: center;
@@ -546,7 +555,7 @@ class SessionPanel(Static):
                 if remaining > 0:
                     bar.update(f" ⏱ AskUserQuestion auto-accept in {remaining}s")
                     bar.add_class("active")
-                    overlay.update(f"[on #006080] ⏱ AskUserQuestion — auto-accept in {remaining}s [/]")
+                    overlay.update(f" ⏱ AskUserQuestion — auto-accept in [bold white]{remaining}s[/] ")
                     overlay.add_class("active")
                 else:
                     self._pending_timeout = None
@@ -1273,6 +1282,8 @@ class MonitorCommands(Provider):
         ("Questions Log", "action_show_questions", "Review AskUserQuestion events"),
         ("Refresh Layout", "action_refresh_layout", "Re-fetch iTerm2 pane layout"),
         ("Settings", "action_open_settings", "Open settings screen"),
+        ("Next Tab", "action_next_tab", "Switch to the next tab"),
+        ("Previous Tab", "action_prev_tab", "Switch to the previous tab"),
         ("Quit", "action_quit", "Exit Claude Monitor"),
     ]
 
@@ -1511,6 +1522,8 @@ class AutoAcceptTUI(App):
         ("u", "show_questions", "Questions"),
         ("r", "refresh_layout", "Refresh"),
         ("s", "open_settings", "Settings"),
+        ("right_square_bracket", "next_tab", "Next Tab"),
+        ("left_square_bracket", "prev_tab", "Prev Tab"),
         ("q", "quit", "Quit"),
     ]
 
@@ -2122,9 +2135,68 @@ class AutoAcceptTUI(App):
             tab_titles[tab_id] = title
         return tab_titles
 
+    def _update_textual_tab_labels(self) -> None:
+        """Trim Textual TabbedContent tab labels so all tabs fit the terminal width.
+
+        Each label is trimmed to fit within an equal share of the tab bar width.
+        Minimum label length is 6 characters (never truncated shorter).
+
+        NOTE: Textual's Tabs widget does NOT support multi-line/wrapping tab bars.
+        The #tabs-list uses a single Horizontal row with overflow: hidden hidden.
+        Tabs that overflow the bar are scrolled into view when activated, but there
+        is no native wrapping layout. Implementing a custom wrapping tab bar would
+        require replacing TabbedContent entirely with a custom widget.
+        """
+        if not self._tab_original_names:
+            return
+        try:
+            tc = self.query_one("#tab-content", TabbedContent)
+        except Exception:
+            return  # No TabbedContent present (single-tab mode)
+
+        num_tabs = len(self._tab_original_names)
+        if num_tabs == 0:
+            return
+
+        # Compute active/total counts for each tab (same as _compute_tab_titles)
+        counts: dict[str, tuple[int, int]] = {}
+        for tab_id, original_name in self._tab_original_names.items():
+            session_ids = self._tab_session_ids.get(tab_id, set())
+            total_count = sum(1 for sid in session_ids if sid in self.panels)
+            active_count = sum(
+                1 for sid in session_ids
+                if sid in self.panels and (
+                    self.panels[sid]._state == "active" or len(self.panels[sid].active_agents) > 0
+                )
+            )
+            counts[tab_id] = (active_count, total_count)
+
+        # Each tab gets an equal share of the terminal width.
+        # Subtract 2 for the per-tab padding (1 char left, 1 char right).
+        terminal_width = self.size.width
+        per_tab_width = max(6, (terminal_width // num_tabs) - 2)
+
+        for tab_id, original_name in self._tab_original_names.items():
+            active_count, total_count = counts[tab_id]
+            suffix = f" [{active_count}/{total_count}]"
+            # How many chars are left for the name after the suffix and padding?
+            max_name_chars = max(6, per_tab_width - len(suffix))
+            if len(original_name) > max_name_chars:
+                trimmed_name = original_name[:max(6, max_name_chars - 1)] + "…"
+            else:
+                trimmed_name = original_name
+            label = f"{trimmed_name}{suffix}"
+            try:
+                tc.get_tab(_safe_tab_css_id(tab_id)).label = label
+            except Exception:
+                pass  # Tab may not exist yet during rebuild
+
     @work(thread=True, exit_on_error=False)
     def update_tab_titles(self) -> None:
         """Compute active session count per tab and update iTerm2 tab titles.
+
+        Also updates the Textual TabbedContent tab labels with trimmed versions
+        that fit within the available tab bar width.
 
         Coalesces rapid calls: if a call is already running, mark pending and return.
         The running call will re-check and apply after it finishes.
@@ -2139,10 +2211,15 @@ class AutoAcceptTUI(App):
             while True:
                 self._tab_title_pending = False
                 _set_tab_titles_sync(self._compute_tab_titles())
+                self.call_from_thread(self._update_textual_tab_labels)
                 if not self._tab_title_pending:
                     break
         finally:
             self._tab_title_lock.release()
+
+    def on_resize(self) -> None:
+        """Re-trim Textual tab labels when the terminal is resized."""
+        self._update_textual_tab_labels()
 
     # --- Keybindings ---
 
@@ -2221,6 +2298,30 @@ class AutoAcceptTUI(App):
     def action_show_questions(self) -> None:
         """Open the AskUserQuestion review screen."""
         self.push_screen(QuestionsScreen())
+
+    def action_next_tab(self) -> None:
+        """Switch to the next tab."""
+        try:
+            tc = self.query_one("#tab-content", TabbedContent)
+            pane_ids = [pane.id for pane in tc.query(TabPane) if pane.id]
+            if not pane_ids or not tc.active:
+                return
+            idx = pane_ids.index(tc.active)
+            tc.active = pane_ids[(idx + 1) % len(pane_ids)]
+        except Exception:
+            pass
+
+    def action_prev_tab(self) -> None:
+        """Switch to the previous tab."""
+        try:
+            tc = self.query_one("#tab-content", TabbedContent)
+            pane_ids = [pane.id for pane in tc.query(TabPane) if pane.id]
+            if not pane_ids or not tc.active:
+                return
+            idx = pane_ids.index(tc.active)
+            tc.active = pane_ids[(idx - 1) % len(pane_ids)]
+        except Exception:
+            pass
 
     def action_open_settings(self) -> None:
         """Open the settings modal."""

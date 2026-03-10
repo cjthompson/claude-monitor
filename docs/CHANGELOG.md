@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-03-10
+
+### Tasks
+- Trim tab labels to fit all tabs visible; investigate tab bar wrapping (#ui, #tui)
+- Add global keybindings to switch to next/prev tab (#ui, #keybindings)
+
+## 2026-03-09
+
+### Tasks
+- AskUserQuestion countdown modal overlay (#ui, #tui)
+
 ## 2026-03-06
 
 ### Fixes
