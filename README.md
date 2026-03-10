@@ -27,6 +27,11 @@ claude-monitor runs alongside your Claude Code sessions in iTerm2. It mirrors yo
 
 ## Screenshots
 
+### Multi-pane layout
+The TUI mirrors your iTerm2 pane tree, displaying each session with its live event feed. Multiple Claude Code instances run side-by-side with the aggregate dashboard. The top bar shows global stats and mode (MIXED = some panes auto, some manual).
+
+![Multi-pane layout](docs/screenshots/07-multi-pane-layout.png)
+
 ### Auto and Manual modes
 Toggle individual panes between auto-accept and manual approval modes. The status bar shows the current mode and counts of auto/manual panes.
 
