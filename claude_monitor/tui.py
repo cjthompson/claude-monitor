@@ -564,7 +564,9 @@ class SessionPanel(Static):
                     overlay.update("")
                     overlay.remove_class("active")
             else:
+                bar.update("")
                 bar.remove_class("active")
+                overlay.update("")
                 overlay.remove_class("active")
         except Exception:
             log.debug(f"SessionPanel._update_status: countdown/overlay query failed for {self.session_id}")
@@ -2000,6 +2002,13 @@ class AutoAcceptTUI(App):
                 if hasattr(panel, "mark_idle"):
                     panel.mark_idle()
                     self.update_tab_titles()
+            elif ntype == "ask_timeout_complete":
+                # Clear pending timeout — the hook's sleep finished
+                origin = data.get("_timeout_origin")
+                if panel._pending_timeout is not None and getattr(panel, "_timeout_origin", None) == origin:
+                    panel._pending_timeout = None
+                    panel._timeout_origin = None
+                    data["_auto_accepted"] = True  # Signal to _format_event
             elif ntype == "permission_prompt":
                 iterm_sid = self._iterm_sid_from_event(data)
                 if iterm_sid and iterm_sid != _self_session_id and not self.is_pane_paused(iterm_sid):
@@ -2073,12 +2082,7 @@ class AutoAcceptTUI(App):
             if ntype == "idle_prompt":
                 return f"[dim]{'IDLE':<8}[/]", self._oneline(message, 80)
             elif ntype == "ask_timeout_complete":
-                panel = self._resolve_panel(data)
-                origin = data.get("_timeout_origin")
-                if panel and panel._pending_timeout is not None and getattr(panel, "_timeout_origin", None) == origin:
-                    # Timeout expired naturally — show auto-accept
-                    panel._pending_timeout = None
-                    panel._timeout_origin = None
+                if data.get("_auto_accepted"):
                     return f"[bold cyan]{'AUTO':<8}[/]", message
                 # Already answered manually or origin mismatch — suppress
                 return None, None
