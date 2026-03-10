@@ -25,6 +25,28 @@ claude-monitor runs alongside your Claude Code sessions in iTerm2. It mirrors yo
 - **HTTP API** — Localhost API on port 17233 for external tools. Endpoints for health checks, PNG/SVG screenshots, and structured JSON state.
 - **Version + clock** — Right-aligned version number and live clock in the status bar.
 
+## Screenshots
+
+### Auto and Manual modes
+Toggle individual panes between auto-accept and manual approval modes. The status bar shows the current mode and counts of auto/manual panes.
+
+![Auto and Manual modes](docs/screenshots/01-auto-and-manual-modes.png)
+
+### Settings modal
+Configure theme, mode defaults, iTerm2 scope, timestamp style, and API usage tracking.
+
+![Settings modal](docs/screenshots/02-settings-modal.png)
+
+### Permission choices log
+View detailed logs of all permission requests, with full command text and descriptions.
+
+![Permissions log](docs/screenshots/04-permissions-log.png)
+
+### AskUserQuestion log
+Track all AskUserQuestion events across sessions with full question/answer history.
+
+![AskUserQuestion log](docs/screenshots/03-askuserquestion-log.png)
+
 ## Requirements
 
 - **macOS** (requires iTerm2 and macOS Keychain)

@@ -2002,9 +2002,10 @@ class AutoAcceptTUI(App):
         return ts.strftime("%H:%M:%S")
 
     @staticmethod
-    def _oneline(text: str, max_len: int = 60) -> str:
+    def _oneline(text: str, max_len: int = 0) -> str:
         """Collapse multi-line text into one line, replacing newlines with ↵."""
-        return " ↵ ".join(line.strip() for line in text.splitlines() if line.strip())[:max_len]
+        joined = " ↵ ".join(line.strip() for line in text.splitlines() if line.strip())
+        return joined[:max_len] if max_len else joined
 
     def _apply_event(self, panel, data: dict, event_name: str) -> None:
         """Apply side effects of a hook event to a panel (or dashboard).
@@ -2072,7 +2073,7 @@ class AutoAcceptTUI(App):
             elif tool in ("Edit", "Write"):
                 detail = f" `{tool_input.get('file_path', '')}`"
             elif tool == "WebFetch":
-                detail = f" `{tool_input.get('url', '')[:60]}`"
+                detail = f" `{tool_input.get('url', '')}`"
             # Check event-level flags first, then live pane state
             if data.get("_excluded_tool"):
                 return f"[bold red]{'MANUAL':<8}[/]", f"{tool}{detail}"
