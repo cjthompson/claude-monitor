@@ -28,7 +28,7 @@ claude-monitor runs alongside your Claude Code sessions in iTerm2. It mirrors yo
 ## Screenshots
 
 ### Multi-pane layout
-The TUI mirrors your iTerm2 pane tree, displaying each session with its live event feed. Multiple Claude Code instances run side-by-side with the aggregate dashboard. The top bar shows global stats and mode (MIXED = some panes auto, some manual).
+The TUI reads your iTerm2 pane tree and **renders an exact visual replica** of the split layout. Each iTerm2 pane becomes a panel in the TUI with proportional sizing — vertical and horizontal splits are mirrored precisely. In this example, the top-left and top-right panels show two Claude Code sessions running side-by-side, with the dashboard and a default session below. The layout updates every 3 seconds to detect new panes or resizes.
 
 ![Multi-pane layout](docs/screenshots/07-multi-pane-layout.png)
 
