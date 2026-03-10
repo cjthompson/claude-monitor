@@ -27,7 +27,7 @@
 
 ## task: Document that TUI restart must use venv Python for iterm2 module
 **ID:** #001 | **Date:** 2026-03-10 00:00 | **Priority:** medium | **Tags:** #documentation #debugging
-**Status:** pending
+**Status:** completed (2026-03-10 01:35)
 
 ### Requirements
 - Add a section to CLAUDE.md under "How to restart the TUI" explaining that the Python script must use the venv's Python interpreter (not system Python)

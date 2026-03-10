@@ -13,7 +13,7 @@ A Textual TUI that monitors and auto-accepts Claude Code permission prompts acro
 
 These steps are **required** — the TUI must be restarted to pick up code changes (it's a running process). Do not skip or defer these steps. Do them immediately after the code change, before reporting results to the user.
 
-3. **On commit**: Remove the `-beta.X` suffix from `__version__` (e.g. `1.0.5-beta.21` → `1.0.5`). Keep `pyproject.toml` version in sync.
+3. **Before ANY git commit** (code, docs, or otherwise): Remove the `-beta.X` suffix from `__version__` (e.g. `1.0.5-beta.21` → `1.0.5`) and sync `pyproject.toml` to match. This applies to every commit without exception — there is no such thing as a "docs-only commit" that skips this step.
 
 ### Version scheme
 
@@ -28,8 +28,11 @@ Version is in `claude_monitor/__init__.py` (`__version__`) and displayed in the 
 
 Use the iTerm2 Python API to send `q` to the TUI's pane (use `run.sh` wrapper for auto-restart).
 
+**IMPORTANT: Always use `.venv/bin/python3`, NOT system `python3`. The `iterm2` module is only installed in the venv. System Python will fail with `ModuleNotFoundError: No module named 'iterm2'`.**
+
 To find the TUI's session ID, list all sessions and look for `run.sh` or `Python` job:
-```python
+```bash
+/Users/chris/dev/personal/claude-monitor/.venv/bin/python3 - <<'EOF'
 import iterm2
 async def main(connection):
     app = await iterm2.async_get_app(connection)
@@ -42,17 +45,20 @@ async def main(connection):
 conn = iterm2.Connection()
 conn.run_until_complete(main, retry=False)
 if conn.loop: conn.loop.close()
+EOF
 ```
 
 Then send `q` to restart:
-```python
+```bash
+/Users/chris/dev/personal/claude-monitor/.venv/bin/python3 - <<'EOF'
 import iterm2
 async def main(connection):
-    session = (await iterm2.async_get_app(connection)).get_session_by_id(SESSION_ID)
+    session = (await iterm2.async_get_app(connection)).get_session_by_id('SESSION_ID_HERE')
     if session: await session.async_send_text('q')
 conn = iterm2.Connection()
 conn.run_until_complete(main, retry=False)
 if conn.loop: conn.loop.close()
+EOF
 ```
 
 ## Project structure

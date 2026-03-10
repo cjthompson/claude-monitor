@@ -5,6 +5,7 @@
 ### Tasks
 - Trim tab labels to fit all tabs visible; investigate tab bar wrapping (#ui, #tui)
 - Add global keybindings to switch to next/prev tab (#ui, #keybindings)
+- Document that TUI restart must use venv Python for iterm2 module (#documentation, #debugging)
 
 ## 2026-03-09
 
