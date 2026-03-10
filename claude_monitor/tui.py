@@ -287,6 +287,11 @@ class SessionPanel(Static):
             super().__init__()
             self.session_id = session_id
 
+    class AskPauseToggle(Message):
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
+
     DEFAULT_CSS = """
     SessionPanel {
         border: solid $accent;
@@ -350,6 +355,7 @@ class SessionPanel(Static):
 
     BINDINGS = [
         ("m", "toggle_pane_mode", "Toggle Auto/Manual"),
+        ("p", "toggle_ask_pause", "Pause Questions"),
     ]
 
     def __init__(self, session_id: str, title: str, **kwargs) -> None:
@@ -409,6 +415,10 @@ class SessionPanel(Static):
             else:
                 mode = "[green]AUTO[/]"
                 mode_plain = "AUTO"
+            # Ask-pause indicator
+            if hasattr(app, "is_ask_paused") and app.is_ask_paused(self.session_id):
+                mode += " [cyan]?⏸[/]"
+                mode_plain += " ?⏸"
         except Exception:
             log.debug(f"SessionPanel._render_status: failed to check pause state for {self.session_id}")
             mode = ""
@@ -587,6 +597,9 @@ class SessionPanel(Static):
 
     def action_toggle_pane_mode(self) -> None:
         self.post_message(self.PaneToggle(self.session_id))
+
+    def action_toggle_ask_pause(self) -> None:
+        self.post_message(self.AskPauseToggle(self.session_id))
 
 
 class PaneContextMenu(ModalScreen):
@@ -1545,6 +1558,7 @@ class AutoAcceptTUI(App):
         self._api_server = None
         self._global_paused: bool = False
         self._paused_sessions: set[str] = set()
+        self._ask_paused_sessions: set[str] = set()  # panes with AskUserQuestion paused
         self._tab_original_names: dict[str, str] = {}  # tab_id → original tab name
         self._tab_session_ids: dict[str, set[str]] = {}  # tab_id → set of session_ids in that tab
         self._tab_title_lock = threading.Lock()  # prevents concurrent _set_tab_titles_sync calls
@@ -1556,6 +1570,9 @@ class AutoAcceptTUI(App):
 
     def is_pane_paused(self, iterm_sid: str) -> bool:
         return self._global_paused or iterm_sid in self._paused_sessions
+
+    def is_ask_paused(self, iterm_sid: str) -> bool:
+        return iterm_sid in self._ask_paused_sessions
 
     def get_state_snapshot(self) -> dict:
         """Return a serializable dict of the full TUI state for the API.
@@ -1618,6 +1635,7 @@ class AutoAcceptTUI(App):
             "paused_sessions": list(self._paused_sessions),
             "excluded_tools": self.settings.excluded_tools or [],
             "ask_user_timeout": self.settings.ask_user_timeout,
+            "ask_paused_sessions": list(self._ask_paused_sessions),
         }
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
@@ -1626,6 +1644,7 @@ class AutoAcceptTUI(App):
         state = read_state()
         self._global_paused = state.get("global_paused", False)
         self._paused_sessions = set(state.get("paused_sessions", []))
+        self._ask_paused_sessions = set(state.get("ask_paused_sessions", []))
 
     def _update_all_panel_modes(self) -> None:
         for panel in self.panels.values():
@@ -1657,6 +1676,9 @@ class AutoAcceptTUI(App):
         stale = self._paused_sessions - current_sids
         if stale:
             self._paused_sessions -= stale
+        stale_ask = self._ask_paused_sessions - current_sids
+        if stale_ask:
+            self._ask_paused_sessions -= stale_ask
         # Apply default mode from settings
         if self.settings.default_mode == "manual":
             self._global_paused = True
@@ -2279,6 +2301,16 @@ class AutoAcceptTUI(App):
             self._paused_sessions.discard(iterm_sid)
         else:
             self._paused_sessions.add(iterm_sid)
+        self._save_state()
+        self._update_all_panel_modes()
+        self._update_status_bar()
+
+    def on_session_panel_ask_pause_toggle(self, msg: SessionPanel.AskPauseToggle) -> None:
+        iterm_sid = msg.session_id
+        if iterm_sid in self._ask_paused_sessions:
+            self._ask_paused_sessions.discard(iterm_sid)
+        else:
+            self._ask_paused_sessions.add(iterm_sid)
         self._save_state()
         self._update_all_panel_modes()
         self._update_status_bar()

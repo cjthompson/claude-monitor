@@ -40,6 +40,14 @@ def main():
             if tool_name and tool_name in excluded_tools:
                 paused = True
                 data["_excluded_tool"] = True
+        # Check per-pane AskUserQuestion pause
+        if not paused:
+            tool_name = data.get("tool_name", "")
+            if tool_name == "AskUserQuestion":
+                iterm_sid = data["_iterm_session_id"]
+                if iterm_sid and iterm_sid in state.get("ask_paused_sessions", []):
+                    paused = True
+                    data["_excluded_tool"] = True
         # Check AskUserQuestion timeout: sleep to give user time to respond manually
         ask_timeout = 0
         if not paused:
