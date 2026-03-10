@@ -42,10 +42,20 @@ View detailed logs of all permission requests, with full command text and descri
 
 ![Permissions log](docs/screenshots/04-permissions-log.png)
 
+### AskUserQuestion timeout countdown
+When a permission is paused (manual mode), a countdown timer appears. The hook waits for the timeout before auto-accepting in manual mode. Shows the active question and countdown.
+
+![AskUserQuestion timeout](docs/screenshots/05-askuserquestion-timeout.png)
+
 ### AskUserQuestion log
 Track all AskUserQuestion events across sessions with full question/answer history.
 
 ![AskUserQuestion log](docs/screenshots/03-askuserquestion-log.png)
+
+### Dashboard and session layout
+Main view showing the aggregate dashboard (left) with stats and activity sparkline, plus a Claude Code session panel (right) with live event feed.
+
+![Dashboard and session](docs/screenshots/06-dashboard-and-session.png)
 
 ## Requirements
 
