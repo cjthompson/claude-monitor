@@ -3,6 +3,8 @@
 ## 2026-03-13
 
 ### Tasks
+- Hide iterm_scope setting in simple mode (#linux, #settings)
+- Add dashboard states to SimpleTUI (expanded/minimized/tab) (#linux, #tui)
 - Create basic SimpleTUI app in tui_simple.py (#linux, #tui)
 - Add --simple CLI flag and entrypoint detection (#cli, #linux)
 - Refactor tui.py to import shared code from tui_common.py (#refactor, #linux)
