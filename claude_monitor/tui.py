@@ -1370,9 +1370,8 @@ def main():
     if simple_mode:
         try:
             from claude_monitor.tui_simple import SimpleTUI
-        except ImportError:
-            print("Error: SimpleTUI not yet implemented.")
-            print("tui_simple.py does not exist yet.")
+        except ImportError as e:
+            print(f"Error: could not import SimpleTUI: {e}")
             raise SystemExit(1)
         app = SimpleTUI()
         app.run()

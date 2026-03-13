@@ -24,7 +24,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
+from textual.widgets import Footer, RichLog, Static, Tab, TabbedContent, TabPane
 
 from claude_monitor import (
     __version__,
@@ -348,7 +348,7 @@ class SimpleTUI(App):
         """Return the TabPane CSS id for a Claude session."""
         return _safe_tab_css_id(claude_sid)
 
-    def _resolve_panel(self, data: dict) -> SessionPanel | None:
+    async def _resolve_panel(self, data: dict) -> SessionPanel | None:
         """Return (or create) the SessionPanel for a hook event.
 
         Keyed off Claude session ID.  On first event from an unknown session,
@@ -395,32 +395,28 @@ class SimpleTUI(App):
         self.panels[claude_sid] = panel
         self._claude_to_tab[claude_sid] = tab_pane_id
 
-        # Mount a new TabPane into the TabbedContent
+        # Await add_pane directly — we're on the main event loop thread
         tab_pane = TabPane(tab_title, panel, id=tab_pane_id)
         try:
             tc = self.query_one("#tab-content", TabbedContent)
-            self.call_from_thread(self._mount_tab_pane, tc, tab_pane, claude_sid)
+            await tc.add_pane(tab_pane)
+            log.debug(f"_resolve_panel: added tab for session {claude_sid[:8]}")
         except Exception as e:
-            log.warning(f"_resolve_panel: failed to get TabbedContent: {e}")
+            log.warning(f"_resolve_panel: failed to add tab pane: {e}")
 
         return panel
-
-    def _mount_tab_pane(self, tc: TabbedContent, pane: TabPane, claude_sid: str) -> None:
-        """Mount a new TabPane from the main thread (safe for Textual DOM mutations)."""
-        tc.add_pane(pane)
-        log.debug(f"_mount_tab_pane: added tab for session {claude_sid[:8]}")
 
     # ------------------------------------------------------------------
     # Hook event handling
     # ------------------------------------------------------------------
 
-    def on_hook_event(self, msg: HookEvent) -> None:
+    async def on_hook_event(self, msg: HookEvent) -> None:
         data = msg.data
         event_name = data.get("hook_event_name", "")
         event_ts = datetime.fromtimestamp(data.get("_timestamp", time.time()))
         t = self._format_ts(event_ts)
 
-        panel = self._resolve_panel(data)
+        panel = await self._resolve_panel(data)
         if not panel:
             return
 
@@ -573,8 +569,7 @@ class SimpleTUI(App):
         if not panel:
             return
         try:
-            tc = self.query_one("#tab-content", TabbedContent)
-            tab = tc.get_tab(tab_pane_id)
+            tab = self.query_one(f"Tab#{tab_pane_id}", Tab)
             # Build label: title + state indicator
             base = panel.border_title
             # Trim to reasonable length
