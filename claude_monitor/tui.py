@@ -1363,6 +1363,21 @@ class AutoAcceptTUI(App):
 
 
 def main():
+    import sys
+
+    simple_mode = "--simple" in sys.argv or not os.environ.get("ITERM_SESSION_ID")
+
+    if simple_mode:
+        try:
+            from claude_monitor.tui_simple import SimpleTUI
+        except ImportError:
+            print("Error: SimpleTUI not yet implemented.")
+            print("tui_simple.py does not exist yet.")
+            raise SystemExit(1)
+        app = SimpleTUI()
+        app.run()
+        os._exit(0)
+
     try:
         fetch_iterm_layout()
     except ConnectionRefusedError:
