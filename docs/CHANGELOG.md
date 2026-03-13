@@ -3,6 +3,7 @@
 ## 2026-03-13
 
 ### Tasks
+- Refactor tui.py to import shared code from tui_common.py (#refactor, #linux)
 - Update install.py for Linux platform detection (#linux, #install)
 - Make iterm2 dependency conditional on macOS in pyproject.toml (#linux, #packaging)
 - Add env var and .env file OAuth token support for Linux (#linux, #usage)
