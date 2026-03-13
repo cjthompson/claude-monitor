@@ -12,7 +12,7 @@ LOG_FILE = os.path.join(SIGNAL_DIR, "tui-debug.log")
 API_PORT = 17233
 API_PORT_FILE = os.path.join(SIGNAL_DIR, "api-port")
 
-_DEFAULT_STATE = {"global_paused": False, "paused_sessions": [], "excluded_tools": [], "ask_user_timeout": 0}
+_DEFAULT_STATE = {"global_paused": False, "paused_sessions": [], "paused_claude_sessions": [], "excluded_tools": [], "ask_user_timeout": 0}
 
 
 def read_state() -> dict:

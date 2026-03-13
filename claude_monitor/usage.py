@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -106,6 +107,37 @@ def _parse_oauth_json(raw: str) -> tuple[str, str, float] | None:
         return token, refresh, expires_at
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
+
+
+def _extract_oauth_from_code_env() -> tuple[str, str, float] | None:
+    """Extract OAuth tokens from CLAUDE_CODE_OAUTH_TOKEN env var (JSON or plain token)."""
+    raw = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+    if not raw:
+        return None
+    return _parse_oauth_json(raw)
+
+
+def _extract_oauth_from_dot_env() -> tuple[str, str, float] | None:
+    """Extract OAuth tokens from ~/.env or project .env file (CLAUDE_CODE_OAUTH_TOKEN=...)."""
+    candidates = [
+        os.path.expanduser("~/.env"),
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    for path in candidates:
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    if key.strip() == "CLAUDE_CODE_OAUTH_TOKEN":
+                        value = value.strip().strip('"').strip("'")
+                        if value:
+                            return _parse_oauth_json(value)
+        except OSError:
+            continue
+    return None
 
 
 def _extract_oauth_from_env() -> tuple[str, str, float] | None:
@@ -275,7 +307,12 @@ def _refresh_access_token(refresh_token: str) -> tuple[str, str, float] | None:
 def _get_token() -> str | None:
     """Get OAuth token, refreshing if expired or near expiry.
 
-    Resolution order: settings JSON → CLAUDE_OAUTH_TOKEN env var → macOS Keychain.
+    Resolution order:
+      1) Settings JSON
+      2) CLAUDE_CODE_OAUTH_TOKEN env var
+      3) ~/.env or project .env file (CLAUDE_CODE_OAUTH_TOKEN)
+      4) CLAUDE_OAUTH_TOKEN env var
+      5) macOS Keychain (macOS only)
     """
     global _token_cache
     now = time.time()
@@ -293,13 +330,17 @@ def _get_token() -> str | None:
             _token_cache = {"token": token, "refresh_token": new_refresh, "expires_at": expires_at}
             return token
 
-    # Try settings JSON, then env var, then keychain
+    # Try each source in resolution order
     result = None
     if _settings_oauth_json:
         result = _parse_oauth_json(_settings_oauth_json)
     if not result:
-        result = _extract_oauth_from_env()
+        result = _extract_oauth_from_code_env()
     if not result:
+        result = _extract_oauth_from_dot_env()
+    if not result:
+        result = _extract_oauth_from_env()
+    if not result and sys.platform == "darwin":
         result = _extract_oauth_tokens()
     if not result:
         return None

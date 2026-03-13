@@ -33,6 +33,10 @@ def main():
             iterm_sid = data["_iterm_session_id"]
             if iterm_sid:
                 paused = iterm_sid in state.get("paused_sessions", [])
+        if not paused:
+            claude_sid = data.get("session_id", "")
+            if claude_sid:
+                paused = claude_sid in state.get("paused_claude_sessions", [])
         # Check if this tool is in the excluded list
         if not paused:
             tool_name = data.get("tool_name", "")

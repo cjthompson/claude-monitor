@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent
+IS_MACOS = sys.platform == "darwin"
 VENV_DIR = REPO_DIR / ".venv"
 LOCAL_BIN = Path.home() / ".local" / "bin"
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
@@ -65,6 +66,12 @@ def setup_venv():
 
     print("Installing claude-monitor in editable mode ...")
     run([str(venv_python), "-m", "pip", "install", "-e", str(REPO_DIR)])
+
+    if not IS_MACOS:
+        print()
+        print("Note (Linux): cairosvg requires system packages for PNG screenshot support.")
+        print("  Debian/Ubuntu: sudo apt-get install libcairo2-dev")
+        print("  Fedora/RHEL:   sudo dnf install cairo-devel")
 
 
 def symlink_to_path():
@@ -140,7 +147,11 @@ def main():
     configure_hooks()
 
     print()
-    print("Done! Run `claude-monitor` to launch the TUI.")
+    if IS_MACOS:
+        print("Done! Run `claude-monitor` to launch the TUI.")
+    else:
+        print("Done! Run `claude-monitor` to launch the TUI.")
+        print("Note (Linux): iTerm2 integration is not available; pane mirroring is disabled.")
 
 
 if __name__ == "__main__":
