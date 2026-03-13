@@ -168,6 +168,7 @@ class SimpleTUI(App):
         ("u", "show_questions", "Questions"),
         ("s", "open_settings", "Settings"),
         ("d", "toggle_dashboard", "Dashboard"),
+        ("D", "toggle_dashboard_tab", "Dashboard Tab"),
         ("right_square_bracket", "next_tab", "Next Tab"),
         ("left_square_bracket", "prev_tab", "Prev Tab"),
         ("q", "quit", "Quit"),
@@ -185,6 +186,8 @@ class SimpleTUI(App):
         self._global_paused: bool = False
         self._paused_claude_sessions: set[str] = set()
         self._dashboard_mode: str = DASH_EXPANDED
+        self._pre_tab_dashboard_mode: str = DASH_EXPANDED
+        self._dashboard_tab_pane_id: str | None = None
         self._usage_polling = False
         self._last_usage_data = None
         self._usage_next_fetch: float = 0
@@ -637,6 +640,60 @@ class SimpleTUI(App):
                     pass
         except Exception as e:
             log.debug(f"action_toggle_dashboard: {e}")
+
+    async def action_toggle_dashboard_tab(self) -> None:
+        """Toggle dashboard between bottom panel and a tab in TabbedContent."""
+        try:
+            if self._dashboard_mode != DASH_TAB:
+                # Any state → tab mode
+                self._pre_tab_dashboard_mode = self._dashboard_mode
+                self._dashboard_mode = DASH_TAB
+
+                # Hide dashboard area
+                dash_area = self.query_one("#dashboard-area")
+                dash_area.add_class("hidden")
+
+                # Create a new DashboardPanel in a tab
+                tab_pane_id = "tab-dashboard"
+                new_dash = DashboardPanel(id="dashboard-tab-panel")
+                # Transfer state from current dashboard
+                if self.dashboard:
+                    new_dash._start_time = self.dashboard._start_time
+                    new_dash.active_agents = dict(self.dashboard.active_agents)
+                    new_dash.total_agents_completed = self.dashboard.total_agents_completed
+                    new_dash.accept_count = self.dashboard.accept_count
+                    new_dash._event_log = list(self.dashboard._event_log)
+
+                tab_pane = TabPane("Dashboard", new_dash, id=tab_pane_id)
+                tc = self.query_one("#tab-content", TabbedContent)
+                await tc.add_pane(tab_pane)
+                tc.active = tab_pane_id
+                self.dashboard = new_dash
+                self._dashboard_tab_pane_id = tab_pane_id
+            else:
+                # Tab mode → previous state
+                self._dashboard_mode = self._pre_tab_dashboard_mode
+
+                # Remove the dashboard tab
+                if self._dashboard_tab_pane_id:
+                    tc = self.query_one("#tab-content", TabbedContent)
+                    await tc.remove_pane(self._dashboard_tab_pane_id)
+                    self._dashboard_tab_pane_id = None
+
+                # Restore bottom dashboard
+                dash_area = self.query_one("#dashboard-area")
+                dash_area.remove_class("hidden")
+                self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
+
+                # Restore expanded vs minimized
+                if self._dashboard_mode == DASH_MINIMIZED:
+                    dash_area.add_class("minimized")
+                    self.dashboard.display = False
+                else:
+                    dash_area.remove_class("minimized")
+                    self.dashboard.display = True
+        except Exception as e:
+            log.debug(f"action_toggle_dashboard_tab: {e}")
 
     # ------------------------------------------------------------------
     # Keybindings
