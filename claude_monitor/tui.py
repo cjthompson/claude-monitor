@@ -25,7 +25,6 @@ except ImportError:
     ITERM2_AVAILABLE = False
 from textual import work
 from textual.app import App, ComposeResult
-from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
@@ -37,6 +36,7 @@ from claude_monitor.tui_common import (
     FixedWidthSparkline,
     SessionPanel, DashboardPanel,
     PaneContextMenu, ChoicesScreen, QuestionsScreen,
+    MonitorCommands,
     _safe_css_id, _safe_tab_css_id,
     _format_ask_user_question_inline, _format_ask_user_question_detail,
     _oneline as _oneline_fn,
