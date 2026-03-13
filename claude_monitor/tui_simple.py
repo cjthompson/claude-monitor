@@ -25,6 +25,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Footer, RichLog, Static, Tab, TabbedContent, TabPane
+from textual.widgets._tabbed_content import ContentTab
 
 from claude_monitor import (
     __version__,
@@ -321,9 +322,7 @@ class SimpleTUI(App):
         self._update_status_bar()
         # Start background workers
         self.watch_events()
-        if self.settings.account_usage:
-            self._usage_polling = True
-            self.poll_usage()
+        # poll_usage is started by _apply_settings if account_usage is on
         self.set_interval(1.0, self._tick_status)
         self.serve_api()
 
@@ -569,7 +568,8 @@ class SimpleTUI(App):
         if not panel:
             return
         try:
-            tab = self.query_one(f"Tab#{tab_pane_id}", Tab)
+            tab_id = ContentTab.add_prefix(tab_pane_id)
+            tab = self.query_one(f"#{tab_id}", Tab)
             # Build label: title + state indicator
             base = panel.border_title
             # Trim to reasonable length
