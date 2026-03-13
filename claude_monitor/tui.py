@@ -252,6 +252,102 @@ def _size_fingerprint(tabs):
     return tuple(_size_fingerprint_node(root) for _, _, root in tabs)
 
 
+def _get_frame_size(node):
+    """Get pixel (width, height) of an iTerm2 node from its frame."""
+    if isinstance(node, Session):
+        try:
+            return node.frame.size.width, node.frame.size.height
+        except Exception:
+            log.debug(f"_get_node_size: failed to get frame size for session {node.session_id}")
+            return 0, 0
+    elif isinstance(node, Splitter):
+        if not node.children:
+            return 0, 0
+        sizes = [_get_frame_size(c) for c in node.children]
+        if node.vertical:  # side-by-side → sum widths, max heights
+            return sum(w for w, _ in sizes), max(h for _, h in sizes)
+        else:  # stacked → max widths, sum heights
+            return max(w for w, _ in sizes), sum(h for _, h in sizes)
+    return 0, 0
+
+
+def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashboard=None, depth=0, settings=None):
+    """Convert iTerm2 Splitter tree to Textual widget tree.
+
+    If old_panels/old_dashboard are provided, state is transferred to new widgets.
+    Uses frame sizes from iTerm2 to set proportional widths/heights.
+    Returns (root_widget, dashboard_or_None).
+    """
+    indent = "  " * depth
+    if isinstance(node, Session):
+        is_self = node.session_id == self_session_id
+        css_id = _safe_css_id(node.session_id)
+        if is_self:
+            panel = DashboardPanel(id=css_id)
+            if settings:
+                panel._bucket_secs = settings.sparkline_bucket_secs
+            if old_dashboard:
+                panel._start_time = old_dashboard._start_time
+                panel.active_agents = dict(old_dashboard.active_agents)
+                panel.total_agents_completed = old_dashboard.total_agents_completed
+                panel.accept_count = old_dashboard.accept_count
+                panel._event_buckets = old_dashboard._event_buckets
+                panel._bucket_counter = old_dashboard._bucket_counter
+                panel._current_bucket_count = old_dashboard._current_bucket_count
+                panel._event_log = list(old_dashboard._event_log)
+            log.debug(f"{indent}Session {node.session_id[:8]} (SELF/TUI) -> DashboardPanel id={css_id}")
+            return panel, panel
+        else:
+            name = node.name or "Session"
+            sid_short = node.session_id[:8]
+            panel = SessionPanel(node.session_id, f"{name} [{sid_short}]", id=css_id)
+            if old_panels and node.session_id in old_panels:
+                old = old_panels[node.session_id]
+                panel.active_agents = dict(old.active_agents)
+                panel.accept_count = old.accept_count
+                panel.total_agents_completed = old.total_agents_completed
+                panel._start_time = old._start_time
+                panel._last_event_time = old._last_event_time
+                panel._state = old.state
+                panel._event_log = list(old._event_log)
+            panels[node.session_id] = panel
+            log.debug(f"{indent}Session {node.session_id[:8]} {name!r} -> SessionPanel id={css_id}")
+            return panel, None
+
+    elif isinstance(node, Splitter):
+        Container = Horizontal if node.vertical else Vertical
+        cname = "Horizontal" if node.vertical else "Vertical"
+        child_sizes = [_get_frame_size(child) for child in node.children]
+        if node.vertical:
+            total = sum(w for w, _ in child_sizes) or 1
+            fractions = [w / total for w, _ in child_sizes]
+        else:
+            total = sum(h for _, h in child_sizes) or 1
+            fractions = [h / total for _, h in child_sizes]
+
+        log.debug(f"{indent}{cname} ({len(node.children)} children, fractions={[f'{f:.0%}' for f in fractions]})")
+        dashboard_ref = None
+        children = []
+        for i, child in enumerate(node.children):
+            widget, dash = _build_widget_tree(child, self_session_id, panels, old_panels, old_dashboard, depth + 1, settings=settings)
+            pct = round(fractions[i] * 100)
+            if node.vertical:
+                widget.styles.width = f"{pct}%"
+                widget.styles.height = "1fr"
+            else:
+                widget.styles.height = f"{pct}%"
+                widget.styles.width = "1fr"
+            children.append(widget)
+            if dash:
+                dashboard_ref = dash
+        container = Container(*children)
+        container.styles.height = "1fr"
+        container.styles.width = "1fr"
+        return container, dashboard_ref
+
+    return Static("?"), None
+
+
 # Fetch initial layout before Textual starts
 _layout_tabs: list[tuple] = []  # [(tab_id, tab_name, root_splitter), ...]
 _self_session_id: str | None = None
