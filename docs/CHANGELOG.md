@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-03-13
+
+### Tasks
+- Update install.py for Linux platform detection (#linux, #install)
+- Make iterm2 dependency conditional on macOS in pyproject.toml (#linux, #packaging)
+- Add env var and .env file OAuth token support for Linux (#linux, #usage)
+- Add paused_claude_sessions to hook for Linux per-session pause (#hook, #linux)
+- Extract shared widgets from tui.py into tui_common.py (#refactor, #linux)
+
 ## 2026-03-10
 
 ### Tasks
