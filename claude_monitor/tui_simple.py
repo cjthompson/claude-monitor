@@ -702,7 +702,7 @@ class SimpleTUI(App):
             pass
 
     def action_open_settings(self) -> None:
-        self.push_screen(SettingsScreen(self.settings), self._on_settings_closed)
+        self.push_screen(SettingsScreen(self.settings, simple_mode=True), self._on_settings_closed)
 
     def _on_settings_closed(self, result: Settings | None) -> None:
         if result is None:

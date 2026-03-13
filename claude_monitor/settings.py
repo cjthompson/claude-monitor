@@ -223,9 +223,10 @@ class SettingsScreen(ModalScreen[Settings | None]):
         ("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, current: Settings) -> None:
+    def __init__(self, current: Settings, simple_mode: bool = False) -> None:
         super().__init__()
         self._settings = current
+        self._simple_mode = simple_mode
         self._masked_oauth = _mask_oauth_json(current.oauth_json)
 
     def compose(self) -> ComposeResult:
@@ -252,13 +253,14 @@ class SettingsScreen(ModalScreen[Settings | None]):
                         classes="setting-control",
                     )
 
-                # iTerm scope
-                with Horizontal(classes="setting-row"):
-                    yield Label("iTerm scope", classes="setting-label")
-                    yield Select(
-                        SCOPE_OPTIONS, value=s.iterm_scope,
-                        id="scope-select", classes="setting-control",
-                    )
+                # iTerm scope (hidden in simple mode)
+                if not self._simple_mode:
+                    with Horizontal(classes="setting-row"):
+                        yield Label("iTerm scope", classes="setting-label")
+                        yield Select(
+                            SCOPE_OPTIONS, value=s.iterm_scope,
+                            id="scope-select", classes="setting-control",
+                        )
 
                 # Timestamp style
                 with Horizontal(classes="setting-row"):
@@ -369,11 +371,16 @@ class SettingsScreen(ModalScreen[Settings | None]):
         else:
             oauth_json = oauth_text
 
+        iterm_scope = (
+            self._settings.iterm_scope
+            if self._simple_mode
+            else self._get_select_value("scope-select", self._settings.iterm_scope)
+        )
         return Settings(
             default_mode=self._get_select_value("mode-select", self._settings.default_mode),
             theme=self._get_select_value("theme-select", self._settings.theme),
             debug=self.query_one("#debug-switch", Switch).value,
-            iterm_scope=self._get_select_value("scope-select", self._settings.iterm_scope),
+            iterm_scope=iterm_scope,
             timestamp_style=self._get_select_value("timestamp-select", self._settings.timestamp_style),
             account_usage=self.query_one("#usage-switch", Switch).value,
             excluded_tools=excluded_tools,
