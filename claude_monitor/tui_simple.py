@@ -109,7 +109,7 @@ class SimpleTUI(App):
         height: 1fr;
     }
     #dashboard-area {
-        height: 30%;
+        height: 12;
     }
     #dashboard-area.minimized {
         height: 3;
@@ -173,6 +173,8 @@ class SimpleTUI(App):
         ("s", "open_settings", "Settings"),
         ("d", "toggle_dashboard", "Dashboard"),
         ("D", "toggle_dashboard_tab", "Dashboard Tab"),
+        ("equals_sign", "grow_dashboard", "Dash+"),
+        ("hyphen-minus", "shrink_dashboard", "Dash-"),
         ("right_square_bracket", "next_tab", "Next Tab"),
         ("left_square_bracket", "prev_tab", "Prev Tab"),
         ("q", "quit", "Quit"),
@@ -198,6 +200,8 @@ class SimpleTUI(App):
         self._api_server = None
         # Counter for generating unique tab IDs
         self._tab_counter: int = 0
+        # Dashboard expanded height (lines); loaded from settings, persists across minimize toggles
+        self._dashboard_height: int = max(3, self.settings.dashboard_height)
 
     # ------------------------------------------------------------------
     # Pause state helpers (use Claude session IDs, not iTerm2 UUIDs)
@@ -317,6 +321,8 @@ class SimpleTUI(App):
     async def on_mount(self) -> None:
         self._apply_settings(self.settings)
         self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
+        # Apply persisted dashboard height
+        self._apply_dashboard_height()
         self._update_dashboard_subtitle()
         os.makedirs(SIGNAL_DIR, exist_ok=True)
         self._load_state()
@@ -621,12 +627,24 @@ class SimpleTUI(App):
             self.dashboard.border_subtitle = "[@click=app.toggle_dashboard]▲[/]"
         # In tab mode the bottom dashboard is hidden, no subtitle needed
 
+    def _apply_dashboard_height(self) -> None:
+        """Set #dashboard-area CSS height to _dashboard_height (only when expanded)."""
+        if self._dashboard_mode != DASH_EXPANDED:
+            return
+        try:
+            dash_area = self.query_one("#dashboard-area")
+            dash_area.styles.height = self._dashboard_height
+        except Exception as e:
+            log.debug(f"_apply_dashboard_height: {e}")
+
     def action_toggle_dashboard(self) -> None:
         """Cycle dashboard mode: expanded → minimized → expanded."""
         try:
             dash_area = self.query_one("#dashboard-area")
             if self._dashboard_mode == DASH_EXPANDED:
                 self._dashboard_mode = DASH_MINIMIZED
+                # Clear inline height so CSS class rule (.minimized → height: 3) takes effect
+                dash_area.styles.height = None
                 dash_area.add_class("minimized")
                 try:
                     panel = self.query_one("#dashboard-panel", DashboardPanel)
@@ -641,9 +659,42 @@ class SimpleTUI(App):
                     panel.remove_class("minimized")
                 except Exception:
                     pass
+                # Re-apply stored expanded height as inline style
+                self._apply_dashboard_height()
             self._update_dashboard_subtitle()
         except Exception as e:
             log.debug(f"action_toggle_dashboard: {e}")
+
+    def action_grow_dashboard(self) -> None:
+        """Grow the dashboard pane by 1 line (only when expanded)."""
+        if self._dashboard_mode != DASH_EXPANDED:
+            return
+        try:
+            # Cap: sessions area must retain at least 4 visible lines after grow
+            sessions_area = self.query_one("#sessions-area")
+            sessions_h = sessions_area.size.height
+            if sessions_h <= 4:
+                return
+            self._dashboard_height += 1
+            self._apply_dashboard_height()
+            self.settings.dashboard_height = self._dashboard_height
+            save_settings(self.settings)
+        except Exception as e:
+            log.debug(f"action_grow_dashboard: {e}")
+
+    def action_shrink_dashboard(self) -> None:
+        """Shrink the dashboard pane by 1 line (only when expanded)."""
+        if self._dashboard_mode != DASH_EXPANDED:
+            return
+        if self._dashboard_height <= 3:
+            return
+        try:
+            self._dashboard_height -= 1
+            self._apply_dashboard_height()
+            self.settings.dashboard_height = self._dashboard_height
+            save_settings(self.settings)
+        except Exception as e:
+            log.debug(f"action_shrink_dashboard: {e}")
 
     async def action_toggle_dashboard_tab(self) -> None:
         """Toggle dashboard between bottom panel and a tab in TabbedContent."""

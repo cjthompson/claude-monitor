@@ -55,6 +55,7 @@ class Settings:
     ask_user_timeout: int = 0  # seconds to wait before auto-accepting AskUserQuestion (0 = instant)
     sparkline_bucket_secs: int = 5  # seconds per sparkline bucket (events/Ns)
     oauth_json: str = ""  # JSON with access_token (required), refresh_token, expires_at (optional)
+    dashboard_height: int = 12  # dashboard pane height in lines (simple mode, expanded)
 
     def __post_init__(self):
         if self.excluded_tools is None:
