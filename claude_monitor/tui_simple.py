@@ -113,7 +113,12 @@ class SimpleTUI(App):
         height: 30%;
     }
     #dashboard-area.minimized {
-        height: 1;
+        height: 3;
+    }
+    DashboardPanel.minimized .dash-stats,
+    DashboardPanel.minimized .dash-sparkline,
+    DashboardPanel.minimized RichLog {
+        display: none;
     }
     #dashboard-area.hidden {
         display: none;
@@ -599,17 +604,19 @@ class SimpleTUI(App):
         if self._dashboard_mode != DASH_MINIMIZED:
             return
         try:
-            summary = self.query_one("#dashboard-summary", Static)
+            # Summary Static is mounted inside the DashboardPanel when minimized
+            panel = self.query_one("#dashboard-panel", DashboardPanel)
+            summary = panel.query_one("#dashboard-summary", Static)
             SEP = "  [dim]│[/]  "
             if self.panels:
                 active = sum(1 for p in self.panels.values() if p.state == "active")
                 total = len(self.panels)
-                sessions_str = f"[bold green]{active}[/]/{total} instances"
+                sessions_str = f"Instances: [bold green]{active}[/]/{total}"
 
                 total_accepted = sum(p.accept_count for p in self.panels.values())
                 if self.dashboard:
                     total_accepted += self.dashboard.accept_count
-                accepted_str = f"[bold]{total_accepted}[/] approved"
+                accepted_str = f"Approved: [bold]{total_accepted}[/]"
 
                 # Merge tool_counts across all panels (and dashboard)
                 merged: dict[str, int] = {}
@@ -622,19 +629,16 @@ class SimpleTUI(App):
                 if merged:
                     # Sort by count descending, show top 5
                     top = sorted(merged.items(), key=lambda x: -x[1])[:5]
-                    breakdown = " ".join(f"[dim]{t}[/]:{c}" for t, c in top)
-                    accepted_str += f"  ({breakdown})"
+                    breakdown = ", ".join(f"[dim]{t}[/]: {c}" for t, c in top)
+                    accepted_str += f" ({breakdown})"
 
                 total_agents_active = sum(len(p.active_agents) for p in self.panels.values())
                 if self.dashboard:
                     total_agents_active += len(self.dashboard.active_agents)
-                if total_agents_active:
-                    agents_str = f"[bold magenta]{total_agents_active}[/] agents"
-                else:
-                    agents_str = "[dim]0 agents[/]"
+                agents_str = f"Agents: [bold magenta]{total_agents_active}[/]"
 
                 uptime = fmt_duration(time.time() - self.dashboard._start_time) if self.dashboard else "?"
-                uptime_str = f"[dim]up {uptime}[/]"
+                uptime_str = f"Uptime: [dim]{uptime}[/]"
 
                 summary.update(SEP.join([sessions_str, accepted_str, agents_str, uptime_str]))
             else:
@@ -658,26 +662,29 @@ class SimpleTUI(App):
             dash_area = self.query_one("#dashboard-area")
             if self._dashboard_mode == DASH_EXPANDED:
                 self._dashboard_mode = DASH_MINIMIZED
-                # Replace DashboardPanel with a one-line summary
                 dash_area.add_class("minimized")
+                # Keep DashboardPanel visible (provides blue border + ▲ subtitle)
+                # but collapse its internal content via CSS class
                 try:
-                    self.query_one("#dashboard-panel", DashboardPanel).display = False
+                    panel = self.query_one("#dashboard-panel", DashboardPanel)
+                    panel.add_class("minimized")
+                    # Mount summary line inside the panel
+                    try:
+                        panel.query_one("#dashboard-summary", Static)
+                    except NoMatches:
+                        panel.mount(Static("", id="dashboard-summary"))
                 except Exception:
                     pass
-                # Add summary widget if not present
-                try:
-                    self.query_one("#dashboard-summary", Static)
-                except NoMatches:
-                    dash_area.mount(Static("", id="dashboard-summary"))
             else:
                 self._dashboard_mode = DASH_EXPANDED
                 dash_area.remove_class("minimized")
                 try:
-                    self.query_one("#dashboard-panel", DashboardPanel).display = True
-                except Exception:
-                    pass
-                try:
-                    self.query_one("#dashboard-summary", Static).remove()
+                    panel = self.query_one("#dashboard-panel", DashboardPanel)
+                    panel.remove_class("minimized")
+                    try:
+                        panel.query_one("#dashboard-summary", Static).remove()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             self._update_dashboard_subtitle()
