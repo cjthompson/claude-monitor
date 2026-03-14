@@ -1161,6 +1161,8 @@ class MonitorCommands(Provider):
         ("Show Questions Log", "show_questions"),
         ("Refresh Layout", "refresh_layout"),
         ("Open Settings", "open_settings"),
+        ("Dashboard: Grow", "grow_dashboard"),
+        ("Dashboard: Shrink", "shrink_dashboard"),
         ("Next Tab", "next_tab"),
         ("Previous Tab", "prev_tab"),
         ("Quit", "quit"),

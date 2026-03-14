@@ -13,6 +13,11 @@ A Textual TUI that monitors and auto-accepts Claude Code permission prompts acro
 
 These steps are **required** — the TUI must be restarted to pick up code changes (it's a running process). Do not skip or defer these steps. Do them immediately after the code change, before reporting results to the user.
 
+**CHECKLIST — verify both before saying anything to the user:**
+- [ ] Version bumped in `claude_monitor/__init__.py`
+- [ ] TUI restarted (sent `q` to its iTerm2 pane)
+- [ ] Screenshot taken and visually verified (see verification loop below)
+
 3. **Before ANY git commit** (code, docs, or otherwise): Remove the `-beta.X` suffix from `__version__` (e.g. `1.0.5-beta.21` → `1.0.5`) and sync `pyproject.toml` to match. This applies to every commit without exception — there is no such thing as a "docs-only commit" that skips this step.
 
 ### Version scheme
@@ -60,6 +65,18 @@ conn.run_until_complete(main, retry=False)
 if conn.loop: conn.loop.close()
 EOF
 ```
+
+### Verification loop (after every code change)
+
+After bumping the version and restarting, you MUST verify the change visually before reporting to the user:
+
+1. **Restart the TUI** — send `q` to its iTerm2 pane, wait ~3s for restart
+2. **Send keystrokes if needed** — e.g. `d` to toggle dashboard minimize, `=`/`-` to resize, `s` for settings. Use the same iTerm2 `async_send_text()` approach.
+3. **Take a screenshot** — `curl -s 'http://localhost:17233/screenshot' -o /tmp/tui-check.png` and read the PNG
+4. **Review the screenshot** — confirm the change is visible and correct
+5. **Loop if not done** — if the change isn't working, fix and restart again
+
+For features that toggle state (like `d` for dashboard minimize/expand), test the full cycle: verify state A → toggle → verify state B → toggle back → verify state A is restored.
 
 ## Project structure
 
