@@ -394,6 +394,7 @@ class SessionPanel(Static):
         self.border_subtitle = ""
         self.active_agents: dict[str, str] = {}  # agent_id → agent_type
         self.accept_count = 0
+        self.tool_counts: dict[str, int] = {}  # tool_name → accepted count
         self.total_agents_completed = 0
         self._start_time = time.time()
         self._last_event_time: float | None = None
@@ -756,6 +757,7 @@ class DashboardPanel(Static):
         self.active_agents: dict[str, str] = {}  # agent_id → agent_type (own session)
         self.total_agents_completed = 0
         self.accept_count = 0
+        self.tool_counts: dict[str, int] = {}  # tool_name → accepted count
         # Track events per N-second bucket for sparkline
         self._event_buckets: collections.deque = collections.deque(maxlen=300)
         self._bucket_secs = 5  # overridden from settings after mount

@@ -291,6 +291,7 @@ def _build_widget_tree(node, self_session_id, panels, old_panels=None, old_dashb
                 panel.active_agents = dict(old_dashboard.active_agents)
                 panel.total_agents_completed = old_dashboard.total_agents_completed
                 panel.accept_count = old_dashboard.accept_count
+                panel.tool_counts = dict(old_dashboard.tool_counts)
                 panel._event_buckets = old_dashboard._event_buckets
                 panel._bucket_counter = old_dashboard._bucket_counter
                 panel._current_bucket_count = old_dashboard._current_bucket_count

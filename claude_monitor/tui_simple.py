@@ -443,6 +443,8 @@ class SimpleTUI(App):
             claude_sid = data.get("session_id", "")
             if not self.is_pane_paused(claude_sid):
                 panel.accept_count += 1
+                tool = data.get("tool_name", "?")
+                panel.tool_counts[tool] = panel.tool_counts.get(tool, 0) + 1
 
         elif event_name == "Notification":
             ntype = data.get("notification_type", "")
@@ -598,16 +600,45 @@ class SimpleTUI(App):
             return
         try:
             summary = self.query_one("#dashboard-summary", Static)
+            SEP = "  [dim]│[/]  "
             if self.panels:
                 active = sum(1 for p in self.panels.values() if p.state == "active")
                 total = len(self.panels)
-                paused = sum(1 for sid in self.panels if self.is_pane_paused(sid))
-                parts = [f"Sessions: {active}/{total} active"]
-                if paused:
-                    parts.append(f"{paused} paused")
-                summary.update("  ".join(parts))
+                sessions_str = f"[bold green]{active}[/]/{total} instances"
+
+                total_accepted = sum(p.accept_count for p in self.panels.values())
+                if self.dashboard:
+                    total_accepted += self.dashboard.accept_count
+                accepted_str = f"[bold]{total_accepted}[/] approved"
+
+                # Merge tool_counts across all panels (and dashboard)
+                merged: dict[str, int] = {}
+                for p in self.panels.values():
+                    for tool, cnt in p.tool_counts.items():
+                        merged[tool] = merged.get(tool, 0) + cnt
+                if self.dashboard:
+                    for tool, cnt in self.dashboard.tool_counts.items():
+                        merged[tool] = merged.get(tool, 0) + cnt
+                if merged:
+                    # Sort by count descending, show top 5
+                    top = sorted(merged.items(), key=lambda x: -x[1])[:5]
+                    breakdown = " ".join(f"[dim]{t}[/]:{c}" for t, c in top)
+                    accepted_str += f"  ({breakdown})"
+
+                total_agents_active = sum(len(p.active_agents) for p in self.panels.values())
+                if self.dashboard:
+                    total_agents_active += len(self.dashboard.active_agents)
+                if total_agents_active:
+                    agents_str = f"[bold magenta]{total_agents_active}[/] agents"
+                else:
+                    agents_str = "[dim]0 agents[/]"
+
+                uptime = fmt_duration(time.time() - self.dashboard._start_time) if self.dashboard else "?"
+                uptime_str = f"[dim]up {uptime}[/]"
+
+                summary.update(SEP.join([sessions_str, accepted_str, agents_str, uptime_str]))
             else:
-                summary.update("No sessions yet — waiting for Claude Code events…")
+                summary.update("[dim]No sessions yet — waiting for Claude Code events…[/]")
         except Exception:
             pass
 
