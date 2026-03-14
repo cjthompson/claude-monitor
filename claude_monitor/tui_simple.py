@@ -313,6 +313,7 @@ class SimpleTUI(App):
     async def on_mount(self) -> None:
         self._apply_settings(self.settings)
         self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
+        self._update_dashboard_subtitle()
         os.makedirs(SIGNAL_DIR, exist_ok=True)
         self._load_state()
         # Apply default mode from settings
@@ -610,6 +611,16 @@ class SimpleTUI(App):
         except Exception:
             pass
 
+    def _update_dashboard_subtitle(self) -> None:
+        """Set the border_subtitle glyph based on dashboard mode."""
+        if not self.dashboard:
+            return
+        if self._dashboard_mode == DASH_EXPANDED:
+            self.dashboard.border_subtitle = "[@click=app.toggle_dashboard]▼[/]"
+        elif self._dashboard_mode == DASH_MINIMIZED:
+            self.dashboard.border_subtitle = "[@click=app.toggle_dashboard]▲[/]"
+        # In tab mode the bottom dashboard is hidden, no subtitle needed
+
     def action_toggle_dashboard(self) -> None:
         """Cycle dashboard mode: expanded → minimized → expanded."""
         try:
@@ -638,6 +649,7 @@ class SimpleTUI(App):
                     self.query_one("#dashboard-summary", Static).remove()
                 except Exception:
                     pass
+            self._update_dashboard_subtitle()
         except Exception as e:
             log.debug(f"action_toggle_dashboard: {e}")
 
@@ -692,6 +704,7 @@ class SimpleTUI(App):
                 else:
                     dash_area.remove_class("minimized")
                     self.dashboard.display = True
+                self._update_dashboard_subtitle()
         except Exception as e:
             log.debug(f"action_toggle_dashboard_tab: {e}")
 
