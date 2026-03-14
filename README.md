@@ -1,11 +1,11 @@
 # claude-monitor
 
-A terminal UI that monitors and auto-accepts Claude Code permission prompts across iTerm2 panes.
+A terminal UI that monitors and auto-accepts Claude Code permission prompts. Works with iTerm2 pane mirroring on macOS or as a simple tabbed TUI on any platform.
 
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
-![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+![macOS / Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
 
-claude-monitor runs alongside your Claude Code sessions in iTerm2. It mirrors your pane layout, auto-accepts permission prompts so sessions run unattended, and gives you a live dashboard of activity across all sessions.
+claude-monitor runs alongside your Claude Code sessions. It auto-accepts permission prompts so sessions run unattended, and gives you a live dashboard of activity across all sessions. On macOS with iTerm2, it mirrors your exact pane layout. On Linux or other terminals, it runs in simple tabbed mode.
 
 ## Features
 
@@ -14,7 +14,9 @@ claude-monitor runs alongside your Claude Code sessions in iTerm2. It mirrors yo
 - **iTerm2 layout mirroring** — Reads your iTerm2 pane tree and builds a matching TUI layout with proportional sizing. Each iTerm2 pane gets a corresponding panel.
 - **Multi-tab support** — Monitors panes across multiple iTerm2 tabs, rendered as a `TabbedContent` widget. Single-tab layouts skip the tab UI entirely.
 - **Live event feed** — Displays permission requests, notifications, and agent spawns/stops per session in real time, with color-coded labels.
-- **Aggregate dashboard** — The TUI's own pane shows a combined feed from all sessions, stats (active sessions, running agents, accepted prompts), and an activity sparkline.
+- **Simple mode** — Tabbed TUI that works on any platform without iTerm2. Auto-detects sessions via the event log. Use `--simple` flag or run outside iTerm2.
+- **Resizable dashboard** — Grow (`=`) or shrink (`-`) the dashboard pane. Press `d` to minimize to a one-line summary; press `d` again to restore. Height persists across restarts.
+- **Aggregate dashboard** — Combined feed from all sessions with stats (instances, agents, approved requests with tool breakdown), activity sparkline, and uptime.
 - **Agent tracking** — Tracks subagent lifecycle (start/stop) per session with active counts, type breakdowns, and completion totals.
 - **API usage bar** — Optional status bar widget showing 5-hour and 7-day Anthropic API quota utilization with progress bars, color coding, and reset countdowns. Uses your OAuth token from the macOS Keychain.
 - **Settings modal** — Configure mode, theme, iTerm scope, timestamp style, and more. Persists across sessions.
@@ -64,10 +66,10 @@ Main view showing the aggregate dashboard (left) with stats and activity sparkli
 
 ## Requirements
 
-- **macOS** (requires iTerm2 and macOS Keychain)
-- **iTerm2** with the Python API enabled (Preferences > General > Magic > Enable Python API)
 - **Python 3.12+**
 - **Claude Code** installed
+- **macOS + iTerm2** (for full pane-mirroring mode): iTerm2 with Python API enabled (Preferences > General > Magic > Enable Python API)
+- **Linux / other terminals**: Works in simple tabbed mode — no iTerm2 needed
 
 ## Installation
 
@@ -102,20 +104,29 @@ Then add hooks to `~/.claude/settings.json` manually (see [How it works](#how-it
 
 # Or run directly
 claude-monitor
+
+# Force simple tabbed mode (no iTerm2 required)
+claude-monitor --simple
 ```
 
-Run this in an iTerm2 pane alongside your Claude Code sessions. The TUI will discover all panes and start mirroring the layout.
+On macOS with iTerm2, run this in an iTerm2 pane alongside your Claude Code sessions — the TUI will discover all panes and mirror the layout. Outside iTerm2 or on Linux, simple mode is used automatically.
 
 ### Keybindings
 
 | Key | Action |
 |---|---|
 | `a` | Toggle global Auto/Manual mode |
-| `Shift+Tab` | Toggle global Auto/Manual mode (alternate) |
 | `m` | Toggle focused panel's Auto/Manual mode |
+| `d` | Minimize/restore dashboard (stores height for restore) |
+| `D` | Toggle dashboard as a tab |
+| `=` | Grow dashboard pane |
+| `-` | Shrink dashboard pane |
 | `r` | Refresh iTerm2 layout |
 | `s` | Open settings |
 | `c` | View choices log |
+| `u` | View questions log |
+| `]` | Next tab |
+| `[` | Previous tab |
 | `Ctrl+P` | Open command palette |
 | `Tab` | Move focus between panels |
 | `q` | Quit |
@@ -149,7 +160,8 @@ textual-dark, textual-light, textual-ansi, atom-one-dark, atom-one-light, catppu
 
 Enable via Settings > Account usage. Displays your Anthropic API rate limit utilization.
 
-- Reads OAuth token from the macOS Keychain (`Claude Code-credentials`), cached until expiry
+- **macOS**: Reads OAuth token from the macOS Keychain (`Claude Code-credentials`), cached until expiry
+- **Linux**: Set `CLAUDE_CODE_OAUTH_TOKEN` env var or add it to a `.env` file in the project root
 - Fetches from `api.anthropic.com/api/oauth/usage` every 5 minutes; status bar updates every 30 seconds
 - Shows 5-hour and 7-day usage windows with progress bars and reset countdowns
 - Color coded: green (<40%), yellow (<60%), orange (<80%), red (>=80%)
@@ -237,10 +249,12 @@ The screenshot uses Textual's internal rendering, so it works even when the wind
 
 ```
 claude_monitor/
-  __init__.py      # Version, shared constants, utilities, read_state()
+  __init__.py      # Version, shared constants, utilities
   api.py           # HTTP API server — /health, /screenshot, /text endpoints
   hook.py          # Claude Code hook — auto-accepts permissions, logs events
-  tui.py           # Textual TUI — mirrors iTerm2 layout, displays events
+  tui.py           # Full TUI — mirrors iTerm2 pane layout (macOS only)
+  tui_simple.py    # Simple TUI — tabbed layout, works on any platform
+  tui_common.py    # Shared widgets: SessionPanel, DashboardPanel, modals, commands
   settings.py      # Settings dataclass, persistence, and modal screen
   usage.py         # OAuth token extraction, API usage fetching, usage bar widget
 install.py         # Setup script — venv, symlinks, hook configuration
@@ -269,5 +283,5 @@ cat /tmp/claude-auto-accept/state.json | python3 -m json.tool
 ## Dependencies
 
 - [textual](https://github.com/Textualize/textual) >= 1.0 — TUI framework
-- [iterm2](https://iterm2.com/python-api/) >= 2.14 — iTerm2 Python API
+- [iterm2](https://iterm2.com/python-api/) >= 2.14 — iTerm2 Python API (macOS only, optional on Linux)
 - [cairosvg](https://cairosvg.org/) — SVG to PNG conversion for API screenshots
