@@ -22,7 +22,6 @@ from pathlib import Path
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Footer, RichLog, Static, Tab, TabbedContent, TabPane
 from textual.widgets._tabbed_content import ContentTab
@@ -600,47 +599,13 @@ class SimpleTUI(App):
     # ------------------------------------------------------------------
 
     def _update_dashboard_summary(self) -> None:
-        """Update the minimized dashboard summary bar."""
-        if self._dashboard_mode != DASH_MINIMIZED:
+        """Update the dashboard summary line (both expanded and minimized states)."""
+        if not self.dashboard:
             return
         try:
-            # Summary Static is mounted inside the DashboardPanel when minimized
-            panel = self.query_one("#dashboard-panel", DashboardPanel)
-            summary = panel.query_one("#dashboard-summary", Static)
-            SEP = "  [dim]│[/]  "
+            summary = self.dashboard.query_one("#dashboard-summary", Static)
             if self.panels:
-                active = sum(1 for p in self.panels.values() if p.state == "active")
-                total = len(self.panels)
-                sessions_str = f"Instances: [bold green]{active}[/]/{total}"
-
-                total_accepted = sum(p.accept_count for p in self.panels.values())
-                if self.dashboard:
-                    total_accepted += self.dashboard.accept_count
-                accepted_str = f"Approved: [bold]{total_accepted}[/]"
-
-                # Merge tool_counts across all panels (and dashboard)
-                merged: dict[str, int] = {}
-                for p in self.panels.values():
-                    for tool, cnt in p.tool_counts.items():
-                        merged[tool] = merged.get(tool, 0) + cnt
-                if self.dashboard:
-                    for tool, cnt in self.dashboard.tool_counts.items():
-                        merged[tool] = merged.get(tool, 0) + cnt
-                if merged:
-                    # Sort by count descending, show top 5
-                    top = sorted(merged.items(), key=lambda x: -x[1])[:5]
-                    breakdown = ", ".join(f"[dim]{t}[/]: {c}" for t, c in top)
-                    accepted_str += f" ({breakdown})"
-
-                total_agents_active = sum(len(p.active_agents) for p in self.panels.values())
-                if self.dashboard:
-                    total_agents_active += len(self.dashboard.active_agents)
-                agents_str = f"Agents: [bold magenta]{total_agents_active}[/]"
-
-                uptime = fmt_duration(time.time() - self.dashboard._start_time) if self.dashboard else "?"
-                uptime_str = f"Uptime: [dim]{uptime}[/]"
-
-                summary.update(SEP.join([sessions_str, accepted_str, agents_str, uptime_str]))
+                summary.update(self.dashboard._render_stats(self.panels))
             else:
                 summary.update("[dim]No sessions yet — waiting for Claude Code events…[/]")
         except Exception:
@@ -663,16 +628,9 @@ class SimpleTUI(App):
             if self._dashboard_mode == DASH_EXPANDED:
                 self._dashboard_mode = DASH_MINIMIZED
                 dash_area.add_class("minimized")
-                # Keep DashboardPanel visible (provides blue border + ▲ subtitle)
-                # but collapse its internal content via CSS class
                 try:
                     panel = self.query_one("#dashboard-panel", DashboardPanel)
                     panel.add_class("minimized")
-                    # Mount summary line inside the panel
-                    try:
-                        panel.query_one("#dashboard-summary", Static)
-                    except NoMatches:
-                        panel.mount(Static("", id="dashboard-summary"))
                 except Exception:
                     pass
             else:
@@ -681,10 +639,6 @@ class SimpleTUI(App):
                 try:
                     panel = self.query_one("#dashboard-panel", DashboardPanel)
                     panel.remove_class("minimized")
-                    try:
-                        panel.query_one("#dashboard-summary", Static).remove()
-                    except Exception:
-                        pass
                 except Exception:
                     pass
             self._update_dashboard_subtitle()

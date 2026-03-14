@@ -729,7 +729,7 @@ class DashboardPanel(Static):
         width: 1fr;
         padding: 0 1;
     }
-    DashboardPanel .dash-stats {
+    DashboardPanel #dashboard-summary {
         height: 1;
     }
     DashboardPanel .dash-sparkline {
@@ -766,7 +766,7 @@ class DashboardPanel(Static):
         self._event_log: list[str] = []  # stored for replay after rebuild
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render_stats(), classes="dash-stats")
+        yield Static(self._render_stats(), id="dashboard-summary")
         yield Horizontal(
             Vertical(
                 Static(f"[dim]Activity (events/{self._bucket_secs}s)[/]"),
@@ -800,7 +800,7 @@ class DashboardPanel(Static):
             self._current_bucket_count = 0
             self._bucket_counter = 0
         try:
-            self.query_one(".dash-stats", Static).update(self._render_stats(panels))
+            self.query_one("#dashboard-summary", Static).update(self._render_stats(panels))
         except Exception:
             log.debug("Dashboard.refresh_dashboard: dash-stats query failed")
         try:
@@ -835,37 +835,42 @@ class DashboardPanel(Static):
         return f"[dim]now {self._current_bucket_count} · peak {peak}[/]"
 
     def _render_stats(self, panels: dict | None = None) -> str:
-        SEP = " [dim]│[/] "
+        SEP = "  [dim]│[/]  "
 
         if panels:
             total_accepted = sum(p.accept_count for p in panels.values())
-            total_agents_done = sum(p.total_agents_completed for p in panels.values())
             total_agents_active = sum(len(p.active_agents) for p in panels.values())
             active_sessions = sum(1 for p in panels.values() if p.state == "active")
-            idle_sessions = sum(1 for p in panels.values() if p.state == "idle")
+            total_sessions = len(panels)
+            merged: dict[str, int] = {}
+            for p in panels.values():
+                for tool, cnt in p.tool_counts.items():
+                    merged[tool] = merged.get(tool, 0) + cnt
         else:
-            total_accepted = total_agents_done = total_agents_active = 0
-            active_sessions = idle_sessions = 0
+            total_accepted = total_agents_active = 0
+            active_sessions = total_sessions = 0
+            merged = {}
 
         # Include dashboard's own session agents in totals
         total_accepted += self.accept_count
-        total_agents_done += self.total_agents_completed
         total_agents_active += len(self.active_agents)
-
-        sessions = f"[bold green]{active_sessions}[/] active"
-        if idle_sessions:
-            sessions += f" [yellow]{idle_sessions}[/] idle"
+        for tool, cnt in self.tool_counts.items():
+            merged[tool] = merged.get(tool, 0) + cnt
 
         uptime = fmt_duration(time.time() - self._start_time)
 
-        agents_str = f"[bold magenta]{total_agents_active}[/] running" if total_agents_active else "[dim]0[/]"
+        instances_str = f"Instances: [bold green]{active_sessions}[/]/{total_sessions}"
+        agents_str = f"Agents: [bold magenta]{total_agents_active}[/]"
 
-        return (
-            f"Sessions: {sessions}{SEP}"
-            f"Agents: {agents_str} [dim]({total_agents_done} done)[/]{SEP}"
-            f"Accepted: [bold]{total_accepted}[/]{SEP}"
-            f"Uptime: {uptime}"
-        )
+        approved_str = f"Approved: [bold]{total_accepted}[/]"
+        if merged:
+            top = sorted(merged.items(), key=lambda x: -x[1])[:5]
+            breakdown = ", ".join(f"{t}: {c}" for t, c in top)
+            approved_str += f" ({breakdown})"
+
+        uptime_str = f"Uptime: [dim]{uptime}[/]"
+
+        return SEP.join([instances_str, agents_str, approved_str, uptime_str])
 
 
 # ---------------------------------------------------------------------------
