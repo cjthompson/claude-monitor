@@ -2,6 +2,9 @@
 
 ## 2026-03-16
 
+### Fixes
+- Right-align first column in help modal (#ui)
+
 ### Tasks
 - Add ? shortcut key modal showing all keybindings (#ui, #keybindings)
 
