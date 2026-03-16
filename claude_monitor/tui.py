@@ -461,6 +461,7 @@ class AutoAcceptTUI(App):
         ("u", "show_questions", "Questions"),
         ("r", "refresh_layout", "Refresh"),
         ("s", "open_settings", "Settings"),
+        ("question_mark", "show_help", "Help"),
         ("right_square_bracket", "next_tab", "Next Tab"),
         ("left_square_bracket", "prev_tab", "Prev Tab"),
         ("q", "quit", "Quit"),
@@ -1260,7 +1261,7 @@ class AutoAcceptTUI(App):
 
     def action_show_help(self) -> None:
         """Open the keyboard shortcuts help modal."""
-        self.push_screen(HelpScreen(self.BINDINGS))
+        self.push_screen(HelpScreen(self.BINDINGS, SessionPanel.BINDINGS))
 
     def action_next_tab(self) -> None:
         """Switch to the next tab."""

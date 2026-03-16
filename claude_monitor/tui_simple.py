@@ -791,7 +791,7 @@ class SimpleTUI(App):
             pass
 
     def action_show_help(self) -> None:
-        self.push_screen(HelpScreen(self.BINDINGS))
+        self.push_screen(HelpScreen(self.BINDINGS, SessionPanel.BINDINGS))
 
     def action_open_settings(self) -> None:
         self.push_screen(SettingsScreen(self.settings, simple_mode=True), self._on_settings_closed)
