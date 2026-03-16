@@ -7,6 +7,7 @@
 - Right-align first column in help modal (#ui)
 
 ### Tasks
+- Help modal: split into Global and Instance sections with responsive layout (#ui, #help)
 - Add ? shortcut key modal showing all keybindings (#ui, #keybindings)
 
 ## 2026-03-14
