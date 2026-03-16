@@ -45,6 +45,7 @@ from claude_monitor.tui_common import (
     PaneContextMenu,
     ChoicesScreen,
     QuestionsScreen,
+    HelpScreen,
     MonitorCommands,
     _safe_css_id,
     _safe_tab_css_id,
@@ -168,6 +169,7 @@ class SimpleTUI(App):
         ("minus", "shrink_dashboard", "Dash-"),
         ("right_square_bracket", "next_tab", "Next Tab"),
         ("left_square_bracket", "prev_tab", "Prev Tab"),
+        ("question_mark", "show_help", "Help"),
         ("q", "quit", "Quit"),
     ]
 
@@ -787,6 +789,9 @@ class SimpleTUI(App):
             tc.active = pane_ids[(idx - 1) % len(pane_ids)]
         except Exception:
             pass
+
+    def action_show_help(self) -> None:
+        self.push_screen(HelpScreen(self.BINDINGS))
 
     def action_open_settings(self) -> None:
         self.push_screen(SettingsScreen(self.settings, simple_mode=True), self._on_settings_closed)

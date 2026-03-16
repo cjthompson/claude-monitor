@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-03-16
+
+### Tasks
+- Add ? shortcut key modal showing all keybindings (#ui, #keybindings)
+
 ## 2026-03-14
 
 ### Tasks

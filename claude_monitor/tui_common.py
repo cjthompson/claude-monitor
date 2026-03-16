@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
@@ -1143,6 +1144,100 @@ class QuestionsScreen(ModalScreen):
             f"[bold]{t}[/]  [{session}]  [bold]{project}[/]\n"
             f"  {badge} [bold]AskUserQuestion[/]{detail_block}\n"
         )
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
+# ---------------------------------------------------------------------------
+# HelpScreen — keyboard shortcuts modal
+# ---------------------------------------------------------------------------
+
+class HelpScreen(ModalScreen):
+    """Modal showing all keybindings as a two-column list."""
+
+    DEFAULT_CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+    HelpScreen #help-dialog {
+        width: 62;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $primary;
+        padding: 0;
+    }
+    HelpScreen #help-title {
+        text-align: center;
+        text-style: bold;
+        width: 100%;
+        padding: 1 0 0 0;
+        margin-bottom: 1;
+    }
+    HelpScreen #help-scroll {
+        height: auto;
+        max-height: 100%;
+        padding: 0 2 1 2;
+    }
+    HelpScreen #help-log {
+        height: auto;
+    }
+    HelpScreen #help-footer {
+        dock: bottom;
+        height: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+    ]
+
+    def __init__(self, bindings: list) -> None:
+        super().__init__()
+        self._app_bindings = bindings
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import ScrollableContainer
+        with Vertical(id="help-dialog"):
+            yield Static("Keyboard Shortcuts", id="help-title")
+            with ScrollableContainer(id="help-scroll"):
+                yield RichLog(markup=True, id="help-log", highlight=False)
+            yield Static("[dim]ESC to close[/]", id="help-footer")
+
+    # Map internal Textual key names to readable display names
+    _KEY_DISPLAY = {
+        "equals_sign": "=",
+        "minus": "-",
+        "question_mark": "?",
+        "right_square_bracket": "]",
+        "left_square_bracket": "[",
+        "ctrl+p": "Ctrl+P",
+        "shift+tab": "Shift+Tab",
+    }
+
+    def on_mount(self) -> None:
+        rl = self.query_one("#help-log", RichLog)
+        seen_actions: set[str] = set()
+        for binding in self._app_bindings:
+            if isinstance(binding, tuple):
+                key = binding[0] if len(binding) > 0 else ""
+                action = binding[1] if len(binding) > 1 else ""
+                description = binding[2] if len(binding) > 2 else ""
+            else:
+                key = getattr(binding, "key", "")
+                action = getattr(binding, "action", "")
+                description = getattr(binding, "description", "")
+            if not description:
+                continue
+            if action in seen_actions:
+                continue
+            seen_actions.add(action)
+            display_key = self._KEY_DISPLAY.get(key, key)
+            rl.write(f"[bold #fea62b]{display_key:<14}[/]  {description}")
 
     def action_dismiss(self) -> None:
         self.app.pop_screen()
