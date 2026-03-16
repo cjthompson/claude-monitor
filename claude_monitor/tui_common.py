@@ -1237,7 +1237,7 @@ class HelpScreen(ModalScreen):
                 continue
             seen_actions.add(action)
             display_key = self._KEY_DISPLAY.get(key, key)
-            rl.write(f"[bold #fea62b]{display_key:<14}[/]  {description}")
+            rl.write(f"[bold #fea62b]{display_key:>14}[/]  {description}")
 
     def action_dismiss(self) -> None:
         self.app.pop_screen()
