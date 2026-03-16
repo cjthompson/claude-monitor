@@ -3,6 +3,7 @@
 ## 2026-03-16
 
 ### Fixes
+- Add help command to command palette (#ui)
 - Right-align first column in help modal (#ui)
 
 ### Tasks
