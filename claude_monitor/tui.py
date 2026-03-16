@@ -36,6 +36,7 @@ from claude_monitor.tui_common import (
     FixedWidthSparkline,
     SessionPanel, DashboardPanel,
     PaneContextMenu, ChoicesScreen, QuestionsScreen,
+    HelpScreen,
     MonitorCommands,
     _safe_css_id, _safe_tab_css_id,
     _format_ask_user_question_inline, _format_ask_user_question_detail,
@@ -1256,6 +1257,10 @@ class AutoAcceptTUI(App):
     def action_show_questions(self) -> None:
         """Open the AskUserQuestion review screen."""
         self.push_screen(QuestionsScreen())
+
+    def action_show_help(self) -> None:
+        """Open the keyboard shortcuts help modal."""
+        self.push_screen(HelpScreen(self.BINDINGS))
 
     def action_next_tab(self) -> None:
         """Switch to the next tab."""
