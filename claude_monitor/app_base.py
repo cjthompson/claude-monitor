@@ -126,10 +126,18 @@ class MonitorApp(App):
     # State snapshot (used by HTTP API /text endpoint)
     # ------------------------------------------------------------------
 
-    def get_state_snapshot(self) -> dict:
-        """Return a serialisable dict of the full TUI state for the API."""
+    def get_state_snapshot(self) -> dict[str, object]:
+        """Return a serialisable dict of the full TUI state for the API.
+
+        Called from the HTTP API thread — snapshots panels dict upfront to
+        avoid RuntimeError if the main thread adds/removes panels concurrently.
+        """
+        # Snapshot before iterating — main thread can modify panels at any time.
+        panels_snapshot = list(self.panels.items())
+        panels_values = [p for _, p in panels_snapshot]
+
         sessions = []
-        for sid, panel in self.panels.items():
+        for sid, panel in panels_snapshot:
             sessions.append({
                 "id": sid,
                 "title": panel.border_title,
@@ -144,21 +152,21 @@ class MonitorApp(App):
         if self.dashboard:
             d = self.dashboard
             total_accepted = (
-                sum(p.accept_count for p in self.panels.values()) + d.accept_count
+                sum(p.accept_count for p in panels_values) + d.accept_count
             )
             total_agents_active = (
-                sum(len(p.active_agents) for p in self.panels.values())
+                sum(len(p.active_agents) for p in panels_values)
                 + len(d.active_agents)
             )
             total_agents_done = (
-                sum(p.total_agents_completed for p in self.panels.values())
+                sum(p.total_agents_completed for p in panels_values)
                 + d.total_agents_completed
             )
             active_sessions = sum(
-                1 for p in self.panels.values() if p.state == "active"
+                1 for p in panels_values if p.state == "active"
             )
             idle_sessions = sum(
-                1 for p in self.panels.values() if p.state == "idle"
+                1 for p in panels_values if p.state == "idle"
             )
             dashboard_data = {
                 "total_accepted": total_accepted,
@@ -303,18 +311,22 @@ class MonitorApp(App):
     ) -> None:
         """Called from the usage module when the OAuth token is refreshed.
 
-        May be called from a background thread — uses ``call_from_thread``
-        for any UI updates.
+        May be called from a background thread — all mutable state changes
+        are marshalled to the main thread via ``call_from_thread``.
         """
         if self.settings.oauth_json:
-            oauth_data = {
+            new_json = json.dumps({
                 "access_token": token,
                 "refresh_token": refresh_token,
                 "expires_at": expires_at,
-            }
-            self.settings.oauth_json = json.dumps(oauth_data)
-            save_settings(self.settings)
-            set_oauth_json(self.settings.oauth_json)
+            })
+
+            def _update_settings() -> None:
+                self.settings.oauth_json = new_json
+                save_settings(self.settings)
+                set_oauth_json(new_json)
+
+            self.call_from_thread(_update_settings)
         ts = self._format_ts(datetime.now().astimezone())
         expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).astimezone()
         msg = (
@@ -362,12 +374,13 @@ class MonitorApp(App):
     # Shared actions
     # ------------------------------------------------------------------
 
+    @abc.abstractmethod
     def action_toggle_pause(self) -> None:
-        """``a`` key: toggle between all-auto and all-manual."""
-        raise NotImplementedError(
-            "Subclasses must override action_toggle_pause "
-            "(pause collections differ between tui.py and tui_simple.py)"
-        )
+        """``a`` key: toggle between all-auto and all-manual.
+
+        Must be overridden — pause collections differ between tui.py (iTerm2
+        UUID-based) and tui_simple.py (Claude session ID-based).
+        """
 
     def action_show_choices(self) -> None:
         """``c`` key: open the permission choices review screen."""
