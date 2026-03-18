@@ -7,6 +7,7 @@ dependencies = [
     "cairosvg",  # Requires system packages on Linux: libcairo2-dev (Debian/Ubuntu) or cairo-devel (Fedora/RHEL)
     "iterm2>=2.14; sys_platform == 'darwin'",
     "textual>=1.0",
+    "websockets>=13.0,<15",
 ]
 
 [project.optional-dependencies]
@@ -40,3 +41,6 @@ claude-monitor-hook = "claude_monitor.hook:main"
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+claude_monitor = ["static/*", "static/fonts/*"]
