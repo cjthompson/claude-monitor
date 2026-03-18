@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Claude Monitor - Real-time monitoring dashboard for Claude Code sessions">
+    <title>Claude Monitor</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400&family=IBM+Plex+Sans:wght@400&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-deep: #0a0e14;
+            --bg-card: #111820;
+            --bg-card-hover: #161e28;
+            --border: #1e2a38;
+            --border-active: #2a3a4e;
+            --text-primary: #c8d0da;
+            --text-secondary: #5a6a7e;
+            --text-dim: #3a4a5e;
+            --green: #00ff88;
+            --green-dim: #00cc6a;
+            --amber: #ffaa00;
+            --red: #ff4466;
+            --blue: #4488ff;
+            --cyan: #00bbff;
+            --interactive: #5588cc;
+            --glow-green: 0 0 12px rgba(0, 255, 136, 0.3);
+            --glow-amber: 0 0 12px rgba(255, 170, 0, 0.3);
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            font-family: 'IBM Plex Sans', sans-serif;
+            background-color: var(--bg-deep);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: url("data:image/svg+xml,%3Csvg width='100' height='100' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' result='noise'/%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23noise)' opacity='0.1'/%3E%3C/svg%3E") repeat;
+            opacity: 0.03;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 0;
+        }
+
+        .top-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 48px;
+            background: linear-gradient(to bottom, var(--bg-card), var(--bg-deep));
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 20px;
+            gap: 20px;
+            z-index: 100;
+        }
+
+        .top-bar-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+        }
+
+        .title {
+            font-weight: bold;
+            color: var(--text-primary);
+        }
+
+        .mode-badge {
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            cursor: pointer;
+        }
+
+        .mode-auto {
+            background-color: rgba(0, 255, 136, 0.15);
+            color: var(--green);
+            box-shadow: var(--glow-green);
+        }
+
+        .mode-manual {
+            background-color: rgba(255, 170, 0, 0.15);
+            color: var(--amber);
+            box-shadow: var(--glow-amber);
+        }
+
+        .top-bar-center {
+            flex: 1;
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .top-bar-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+
+        .connection-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--green);
+            animation: breathing 3s ease-in-out infinite;
+        }
+
+        .connection-status.disconnected {
+            background-color: var(--red);
+            animation: none;
+        }
+
+        @keyframes breathing {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
+        .main-content {
+            margin-top: 48px;
+            margin-bottom: 40px;
+            overflow-y: auto;
+            flex: 1;
+            padding: 20px;
+        }
+
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+            max-width: 1200px;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 2.5rem;
+            color: var(--green);
+            text-shadow: var(--glow-green);
+            line-height: 1;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        .sessions-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+            gap: 15px;
+            max-width: 1400px;
+        }
+
+        .session-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--green);
+            border-radius: 4px;
+            padding: 15px;
+            animation: slideIn 0.3s ease-out backwards;
+        }
+
+        .session-card:hover {
+            background-color: var(--bg-card-hover);
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .session-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+            gap: 10px;
+        }
+
+        .session-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+        }
+
+        .session-meta {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        .session-mode {
+            text-transform: uppercase;
+            font-weight: bold;
+            letter-spacing: 0.05em;
+        }
+
+        .mode-auto { color: var(--green); }
+        .mode-manual { color: var(--amber); }
+
+        .session-state {
+            color: var(--text-secondary);
+        }
+
+        .agent-count {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--blue);
+        }
+
+        .session-divider {
+            height: 1px;
+            background-color: var(--border);
+            margin: 10px 0;
+        }
+
+        .event-log {
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            min-height: 40px;
+        }
+
+        .event-line {
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(30, 42, 56, 0.5);
+            display: flex;
+            gap: 8px;
+            animation: slideInEvent 0.15s ease-out;
+        }
+
+        @keyframes slideInEvent {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .event-time {
+            color: var(--text-secondary);
+            flex-shrink: 0;
+            min-width: 70px;
+        }
+
+        .event-badge {
+            padding: 0px 6px;
+            border-radius: 2px;
+            font-size: 0.65rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            flex-shrink: 0;
+            min-width: 60px;
+        }
+
+        .badge-allowed { background-color: rgba(0, 255, 136, 0.2); color: var(--green); }
+        .badge-paused { background-color: rgba(255, 170, 0, 0.2); color: var(--amber); }
+        .badge-deferred { background-color: rgba(255, 68, 102, 0.2); color: var(--red); }
+        .badge-timeout { background-color: rgba(0, 187, 255, 0.2); color: var(--cyan); }
+        .badge-agent { background-color: rgba(68, 136, 255, 0.2); color: var(--blue); }
+        .badge-idle { color: var(--text-dim); }
+
+        .event-detail {
+            color: var(--text-primary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+        }
+
+        .pause-button {
+            background-color: var(--interactive);
+            border: 1px solid var(--border-active);
+            color: var(--bg-deep);
+            padding: 6px 12px;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-top: 10px;
+        }
+
+        .pause-button:hover {
+            background-color: var(--blue);
+            transform: scale(1.05);
+        }
+
+        .empty-state {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 300px;
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .usage-section {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 40px;
+            background: linear-gradient(to top, var(--bg-card), var(--bg-deep));
+            border-top: 1px solid var(--border);
+            padding: 8px 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            z-index: 100;
+        }
+
+        .usage-bar {
+            flex: 1;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .usage-label {
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+        }
+
+        .usage-gauge {
+            flex: 0 1 150px;
+            height: 6px;
+            background-color: var(--bg-card-hover);
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .usage-fill {
+            height: 100%;
+            background: linear-gradient(to right, var(--green), var(--amber), var(--red));
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .usage-text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-primary);
+            min-width: 30px;
+        }
+
+        @media (max-width: 768px) {
+            .sessions-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stats-row {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .stat-value {
+                font-size: 1.8rem;
+            }
+
+            .pause-button {
+                width: 100%;
+            }
+
+            .event-line {
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .event-detail {
+                white-space: normal;
+            }
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background-color: var(--bg-deep);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background-color: var(--border);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background-color: var(--border-active);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="top-bar">
+            <div class="top-bar-left">
+                <span class="title">▪ Claude Monitor</span>
+                <span class="mode-badge mode-auto" id="globalModeBadge">AUTO</span>
+            </div>
+            <div class="top-bar-center" id="usageSummary">—</div>
+            <div class="top-bar-right">
+                <span id="version">v—</span>
+                <div class="connection-status" id="connectionStatus"></div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="stats-row">
+                <div class="stat-item">
+                    <div class="stat-value" id="sessionCount">0</div>
+                    <div class="stat-label">Sessions</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="agentCount">0</div>
+                    <div class="stat-label">Agents</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="allowedCount">0</div>
+                    <div class="stat-label">Approved</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="uptime">0h</div>
+                    <div class="stat-label">Uptime</div>
+                </div>
+            </div>
+
+            <div class="sessions-grid" id="sessionsGrid">
+                <div class="empty-state">Waiting for Claude Code sessions...</div>
+            </div>
+        </div>
+
+        <div class="usage-section">
+            <div class="usage-bar">
+                <span class="usage-label">Usage (hourly)</span>
+                <div class="usage-gauge">
+                    <div class="usage-fill" id="usageHourlyFill" style="width: 0%"></div>
+                </div>
+                <span class="usage-text" id="usageHourlyText">—%</span>
+            </div>
+            <div class="usage-bar">
+                <span class="usage-label">Usage (daily)</span>
+                <div class="usage-gauge">
+                    <div class="usage-fill" id="usageDailyFill" style="width: 0%"></div>
+                </div>
+                <span class="usage-text" id="usageDailyText">—%</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const WS_RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000];
+        let wsReconnectAttempt = 0;
+        let ws = null;
+        let state = {
+            version: '—',
+            uptime: 0,
+            global_paused: false,
+            paused_sessions: [],
+            paused_claude_sessions: [],
+            sessions: [],
+            usage: { hourly: 0, daily: 0 }
+        };
+        let sessionLogs = {};
+
+        async function fetchInitialState() {
+            try {
+                const response = await fetch('/text');
+                if (response.ok) {
+                    const data = await response.json();
+                    state = data;
+                    updateUI();
+                    connectWebSocket();
+                } else {
+                    console.error('Failed to fetch initial state');
+                    setTimeout(fetchInitialState, 2000);
+                }
+            } catch (e) {
+                console.error('Error fetching initial state:', e);
+                setTimeout(fetchInitialState, 2000);
+            }
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = `${protocol}//${window.location.host}/ws`;
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                wsReconnectAttempt = 0;
+                updateConnectionStatus(true);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+
+                    if (msg.type === 'snapshot') {
+                        state = msg.data;
+                        sessionLogs = {};
+                        updateUI();
+                    } else if (msg.type === 'event') {
+                        const evt = msg.data;
+                        const sid = evt.session_id || evt._iterm_session_id;
+                        if (!sessionLogs[sid]) sessionLogs[sid] = [];
+                        sessionLogs[sid].push(evt);
+                        if (sessionLogs[sid].length > 100) sessionLogs[sid].shift();
+                        updateSessionCard(sid);
+                    } else if (msg.type === 'state') {
+                        state = Object.assign(state, msg.data);
+                        updateUI();
+                    }
+                } catch (e) {
+                    console.error('Error parsing WebSocket message:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                updateConnectionStatus(false);
+                scheduleReconnect();
+            };
+
+            ws.onerror = () => {
+                console.error('WebSocket error');
+            };
+        }
+
+        function scheduleReconnect() {
+            const delay = WS_RECONNECT_DELAYS[Math.min(wsReconnectAttempt, WS_RECONNECT_DELAYS.length - 1)];
+            wsReconnectAttempt++;
+            setTimeout(connectWebSocket, delay);
+        }
+
+        function updateConnectionStatus(connected) {
+            const el = document.getElementById('connectionStatus');
+            if (connected) {
+                el.classList.remove('disconnected');
+            } else {
+                el.classList.add('disconnected');
+            }
+        }
+
+        function updateUI() {
+            document.getElementById('version').textContent = 'v' + (state.version || '—');
+            document.getElementById('sessionCount').textContent = String(state.sessions?.length || 0);
+            document.getElementById('agentCount').textContent = String(state.sessions?.reduce((sum, s) => sum + (s.agent_count || 0), 0) || 0);
+            document.getElementById('allowedCount').textContent = String(state.allowed_count || 0);
+            document.getElementById('uptime').textContent = formatUptime(state.uptime || 0);
+
+            const hourlyUsage = state.usage?.hourly || 0;
+            const dailyUsage = state.usage?.daily || 0;
+            document.getElementById('usageHourlyFill').style.width = Math.min(hourlyUsage, 100) + '%';
+            document.getElementById('usageHourlyText').textContent = hourlyUsage + '%';
+            document.getElementById('usageDailyFill').style.width = Math.min(dailyUsage, 100) + '%';
+            document.getElementById('usageDailyText').textContent = dailyUsage + '%';
+            document.getElementById('usageSummary').textContent = '◆' + hourlyUsage + '% ◇' + dailyUsage + '%';
+
+            const globalMode = state.global_paused ? 'MANUAL' : 'AUTO';
+            const badge = document.getElementById('globalModeBadge');
+            badge.className = 'mode-badge ' + (state.global_paused ? 'mode-manual' : 'mode-auto');
+            badge.textContent = globalMode;
+
+            renderSessions();
+        }
+
+        function renderSessions() {
+            const grid = document.getElementById('sessionsGrid');
+
+            if (!state.sessions || state.sessions.length === 0) {
+                grid.textContent = '';
+                const empty = document.createElement('div');
+                empty.className = 'empty-state';
+                empty.textContent = 'Waiting for Claude Code sessions...';
+                grid.appendChild(empty);
+                return;
+            }
+
+            const sessionIds = state.sessions.map((_, i) => i);
+            const existingIds = new Set(Array.from(grid.children).filter(el => el.id && el.id.startsWith('session-')).map(el => parseInt(el.id.split('-')[1])));
+            const newIds = new Set(sessionIds);
+
+            for (const id of existingIds) {
+                if (!newIds.has(id)) {
+                    const el = document.getElementById('session-' + id);
+                    if (el) el.remove();
+                }
+            }
+
+            state.sessions.forEach((session, idx) => {
+                let card = document.getElementById('session-' + idx);
+                if (!card) {
+                    card = document.createElement('div');
+                    card.id = 'session-' + idx;
+                    card.className = 'session-card';
+                    card.style.animationDelay = (idx * 80) + 'ms';
+                    grid.appendChild(card);
+                }
+                updateSessionCard(idx);
+            });
+        }
+
+        function updateSessionCard(idOrIndex) {
+            let idx;
+            if (typeof idOrIndex === 'number') {
+                idx = idOrIndex;
+            } else {
+                idx = state.sessions.findIndex(s => (s.id || s._iterm_session_id) === idOrIndex);
+            }
+
+            if (idx < 0) return;
+
+            const session = state.sessions[idx];
+            const card = document.getElementById('session-' + idx);
+            if (!card) return;
+
+            const isPaused = (state.paused_sessions && state.paused_sessions.includes(session._iterm_session_id)) || (state.paused_claude_sessions && state.paused_claude_sessions.includes(session.id));
+            const mode = isPaused ? 'MANUAL' : 'AUTO';
+            const isActive = session.active !== false;
+            const agentCount = session.agent_count || 0;
+
+            const logs = sessionLogs[session.id || session._iterm_session_id] || [];
+
+            card.className = 'session-card ' + (isActive ? '' : 'idle ') + (isPaused ? 'manual' : '');
+
+            // Clear and rebuild card with safe DOM methods
+            card.innerHTML = '';
+
+            const header = document.createElement('div');
+            header.className = 'session-header';
+            const name = document.createElement('div');
+            name.className = 'session-name';
+            name.textContent = session.cwd || 'Unknown';
+            header.appendChild(name);
+            card.appendChild(header);
+
+            const meta = document.createElement('div');
+            meta.className = 'session-meta';
+            const modeSpan = document.createElement('span');
+            modeSpan.className = 'session-mode ' + (isPaused ? 'mode-manual' : 'mode-auto');
+            modeSpan.textContent = isPaused ? '⊗' : '✓';
+            const stateSpan = document.createElement('span');
+            stateSpan.className = 'session-state';
+            stateSpan.textContent = isActive ? 'active' : 'idle';
+            const agentSpan = document.createElement('span');
+            agentSpan.className = 'agent-count';
+            agentSpan.textContent = 'ag:' + agentCount;
+            meta.appendChild(modeSpan);
+            meta.appendChild(stateSpan);
+            meta.appendChild(agentSpan);
+            card.appendChild(meta);
+
+            const divider = document.createElement('div');
+            divider.className = 'session-divider';
+            card.appendChild(divider);
+
+            const eventLog = document.createElement('div');
+            eventLog.className = 'event-log';
+            logs.slice(-10).forEach(evt => {
+                eventLog.appendChild(createEventElement(evt));
+            });
+            card.appendChild(eventLog);
+
+            const pauseBtn = document.createElement('button');
+            pauseBtn.className = 'pause-button';
+            pauseBtn.textContent = isPaused ? 'Resume' : 'Pause';
+            const sessId = session.id || session._iterm_session_id;
+            const sessType = session.id ? 'claude' : 'iterm';
+            pauseBtn.onclick = () => togglePause(sessId, sessType);
+            card.appendChild(pauseBtn);
+        }
+
+        function createEventElement(evt) {
+            const time = evt.timestamp ? new Date(evt.timestamp * 1000).toLocaleTimeString() : '—:—:—';
+            let badgeClass = 'badge-idle';
+            let label = evt.event_type || '?';
+
+            if (evt.event_type === 'ALLOWED') badgeClass = 'badge-allowed';
+            else if (evt.event_type === 'PAUSED') badgeClass = 'badge-paused';
+            else if (evt.event_type === 'DEFERRED') badgeClass = 'badge-deferred';
+            else if (evt.event_type === 'TIMEOUT') badgeClass = 'badge-timeout';
+            else if (evt.event_type && evt.event_type.includes('AGENT')) badgeClass = 'badge-agent';
+
+            const detail = evt.detail || evt.tool_name || '—';
+
+            const line = document.createElement('div');
+            line.className = 'event-line';
+
+            const timeEl = document.createElement('span');
+            timeEl.className = 'event-time';
+            timeEl.textContent = time;
+
+            const badge = document.createElement('span');
+            badge.className = 'event-badge ' + badgeClass;
+            badge.textContent = label;
+
+            const detailEl = document.createElement('span');
+            detailEl.className = 'event-detail';
+            detailEl.textContent = detail;
+
+            line.appendChild(timeEl);
+            line.appendChild(badge);
+            line.appendChild(detailEl);
+
+            return line;
+        }
+
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return h + 'h ' + m + 'm';
+        }
+
+        function togglePause(id, type) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('WebSocket not connected');
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                action: 'toggle_pause',
+                session_id: id,
+                type: type
+            }));
+        }
+
+        function toggleGlobalPause() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('WebSocket not connected');
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                action: 'toggle_global_pause'
+            }));
+        }
+
+        document.getElementById('globalModeBadge').addEventListener('click', toggleGlobalPause);
+
+        window.addEventListener('DOMContentLoaded', fetchInitialState);
+    </script>
+</body>
+</html>
