@@ -10,11 +10,30 @@ import os
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Protocol
 from urllib.parse import urlparse, parse_qs
 
 from claude_monitor import __version__, API_PORT, API_PORT_FILE
 
 log = logging.getLogger(__name__)
+
+
+class AppStateProtocol(Protocol):
+    """Interface the HTTP handler expects from the TUI app.
+
+    Implementations (AutoAcceptTUI, SimpleTUI) must provide these two methods.
+    Both are called via ``call_from_thread()`` so they run on the Textual event
+    loop, not the HTTP-server thread.
+    """
+
+    def get_state_snapshot(self) -> dict[str, object]:
+        """Return a JSON-serialisable snapshot of current TUI state."""
+        ...
+
+    def export_screenshot(self) -> str:
+        """Export the current screen as an SVG string."""
+        ...
+
 
 # Textual exports SVG with "Fira Code" but it may not be installed.
 # Detect the best available monospace font for PNG rendering.
@@ -36,7 +55,7 @@ def _detect_monospace_font():
                 _PNG_FONT = font
                 log.debug(f"PNG font: {_PNG_FONT}")
                 return _PNG_FONT
-    except Exception:
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
     _PNG_FONT = "monospace"
     return _PNG_FONT
@@ -100,7 +119,7 @@ class MonitorHTTPHandler(BaseHTTPRequestHandler):
 
         try:
             svg_text = self.app.call_from_thread(self.app.export_screenshot)
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             log.error(f"Screenshot export failed: {e}")
             self._send_error(503, f"Screenshot failed: {e}")
             return
@@ -129,7 +148,7 @@ class MonitorHTTPHandler(BaseHTTPRequestHandler):
                 buf = BytesIO()
                 quantized.save(buf, format="PNG", optimize=True)
                 png_bytes = buf.getvalue()
-            except Exception as e:
+            except (ImportError, OSError, ValueError) as e:
                 log.error(f"SVG to PNG conversion failed: {e}")
                 self._send_error(503, f"PNG conversion failed: {e}")
                 return
@@ -150,12 +169,12 @@ class MonitorHTTPHandler(BaseHTTPRequestHandler):
             snapshot = self.app.call_from_thread(self.app.get_state_snapshot)
             snapshot["uptime"] = uptime
             self._send_json(snapshot)
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             log.error(f"Text endpoint failed: {e}")
             self._send_error(503, f"Failed to collect state: {e}")
 
 
-def start_api_server(app, port=API_PORT):
+def start_api_server(app: AppStateProtocol, port: int = API_PORT) -> HTTPServer:
     """Create and return an HTTPServer with the app reference stored on the handler."""
     MonitorHTTPHandler.app = app
     MonitorHTTPHandler._start_time = time.time()
