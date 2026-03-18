@@ -24,6 +24,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Footer, Static, Tab, TabbedContent, TabPane
 from textual.widgets._tabbed_content import ContentTab
@@ -403,7 +404,7 @@ class SimpleTUI(MonitorApp):
             tc = self.query_one("#tab-content", TabbedContent)
             await tc.add_pane(tab_pane)
             log.debug(f"_resolve_panel: added tab for session {claude_sid[:8]}")
-        except Exception as e:
+        except Exception as e:  # Textual raises generic Exception for add_pane failures
             log.warning(f"_resolve_panel: failed to add tab pane: {e}")
 
         return panel
@@ -578,7 +579,7 @@ class SimpleTUI(MonitorApp):
                 tab.label = f"⏸ {base}"
             else:
                 tab.label = base
-        except Exception:
+        except Exception:  # Textual raises NoMatches or AttributeError for widget/attribute access failures
             log.debug(f"_update_tab_label: failed for {claude_sid[:8]}")
 
     # ------------------------------------------------------------------
@@ -595,7 +596,7 @@ class SimpleTUI(MonitorApp):
                 summary.update(self.dashboard._render_stats(self.panels))
             else:
                 summary.update("[dim]No sessions yet — waiting for Claude Code events…[/]")
-        except Exception:
+        except NoMatches:  # Widget not yet mounted
             pass
 
     def _update_arrow(self) -> None:
@@ -616,7 +617,7 @@ class SimpleTUI(MonitorApp):
         try:
             dash_area = self.query_one("#dashboard-area")
             dash_area.styles.height = self._dashboard_height
-        except Exception as e:
+        except NoMatches as e:
             log.debug(f"_apply_dashboard_height: {e}")
 
     def action_toggle_dashboard(self) -> None:
@@ -651,7 +652,7 @@ class SimpleTUI(MonitorApp):
             self.settings.dashboard_height = self._dashboard_height
             save_settings(self.settings)
             self._update_arrow()
-        except Exception as e:
+        except NoMatches as e:
             log.debug(f"action_grow_dashboard: {e}")
 
     def action_shrink_dashboard(self) -> None:
@@ -667,7 +668,7 @@ class SimpleTUI(MonitorApp):
             self.settings.dashboard_height = self._dashboard_height
             save_settings(self.settings)
             self._update_arrow()
-        except Exception as e:
+        except NoMatches as e:
             log.debug(f"action_shrink_dashboard: {e}")
 
     def on_drag_handle_drag_delta(self, msg: DragHandle.DragDelta) -> None:
@@ -686,7 +687,7 @@ class SimpleTUI(MonitorApp):
             total_available = sessions_h + self._dashboard_height
             max_dashboard = total_available - 4
             new_height = min(new_height, max_dashboard)
-        except Exception as e:
+        except NoMatches as e:
             log.debug(f"on_drag_handle_drag_delta: {e}")
         if new_height == self._dashboard_height:
             return
@@ -709,8 +710,8 @@ class SimpleTUI(MonitorApp):
                 dash_area.add_class("hidden")
                 try:
                     self.query_one("#drag-handle").add_class("hidden")
-                except Exception:
-                    pass
+                except NoMatches:
+                    pass  # drag-handle is optional; not present in all layouts
 
                 # Create a new DashboardPanel in a tab
                 tab_pane_id = "tab-dashboard"
@@ -744,14 +745,14 @@ class SimpleTUI(MonitorApp):
                 dash_area.remove_class("hidden")
                 try:
                     self.query_one("#drag-handle").remove_class("hidden")
-                except Exception:
-                    pass
+                except NoMatches:
+                    pass  # drag-handle is optional; not present in all layouts
                 self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
 
                 # Apply current height and arrow
                 self._apply_dashboard_height()
                 self._update_arrow()
-        except Exception as e:
+        except Exception as e:  # Textual raises generic Exception for add_pane/remove_pane failures
             log.debug(f"action_toggle_dashboard_tab: {e}")
 
     # ------------------------------------------------------------------
@@ -806,7 +807,7 @@ class SimpleTUI(MonitorApp):
                     break
             if claude_sid:
                 await self._remove_session(claude_sid)
-        except Exception as e:
+        except Exception as e:  # Textual raises generic Exception for tab query/remove failures
             log.debug(f"action_close_tab: {e}")
 
     async def _remove_session(self, claude_sid: str) -> None:
@@ -817,7 +818,7 @@ class SimpleTUI(MonitorApp):
         try:
             tc = self.query_one("#tab-content", TabbedContent)
             await tc.remove_pane(tab_pane_id)
-        except Exception as e:
+        except Exception as e:  # Textual raises generic Exception for remove_pane failures
             log.debug(f"_remove_session: failed to remove pane: {e}")
         self.panels.pop(claude_sid, None)
         self._claude_to_tab.pop(claude_sid, None)

@@ -31,6 +31,7 @@ from pathlib import Path
 from textual import work
 from textual.app import App
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from claude_monitor import (
@@ -41,14 +42,9 @@ from claude_monitor import (
     API_PORT_FILE,
     read_state,
 )
-from claude_monitor.tui_common import (
-    HookEvent,
-    ChoicesScreen,
-    QuestionsScreen,
-    HelpScreen,
-    SessionPanel,
-    DashboardPanel,
-)
+from claude_monitor.messages import HookEvent
+from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen
+from claude_monitor.widgets import SessionPanel, DashboardPanel
 from claude_monitor.api import start_api_server
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
 from claude_monitor.usage import (
@@ -272,7 +268,7 @@ class MonitorApp(App):
                 .replace("PM", "pm")
             )
             right.update(f"[dim]v{__version__}[/]{SEP}{clock}")
-        except Exception:
+        except NoMatches:
             log.debug("_update_status_bar: failed to update status bar widgets")
 
     # ------------------------------------------------------------------
@@ -405,7 +401,7 @@ class MonitorApp(App):
                 return
             idx = pane_ids.index(tc.active)
             tc.active = pane_ids[(idx + 1) % len(pane_ids)]
-        except Exception:
+        except (NoMatches, ValueError):
             pass
 
     def action_prev_tab(self) -> None:
@@ -419,7 +415,7 @@ class MonitorApp(App):
                 return
             idx = pane_ids.index(tc.active)
             tc.active = pane_ids[(idx - 1) % len(pane_ids)]
-        except Exception:
+        except (NoMatches, ValueError):
             pass
 
     def action_open_settings(self) -> None:

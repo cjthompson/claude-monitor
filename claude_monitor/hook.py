@@ -14,6 +14,47 @@ import time
 from claude_monitor import SIGNAL_DIR, EVENTS_FILE, extract_iterm_session_id, read_state
 
 
+def decide_permission(state: dict, event: dict) -> tuple[str, int]:
+    """Determine the permission decision for a PermissionRequest event.
+
+    Returns a tuple of (decision, ask_timeout) where decision is one of:
+      - "allowed"  — auto-accept
+      - "deferred" — paused (manual mode)
+      - "timeout"  — AskUserQuestion with a configured timeout
+
+    Pure function: reads from ``state`` and ``event`` only, no I/O.
+    """
+    iterm_sid = event.get("_iterm_session_id")
+    claude_sid = event.get("session_id", "")
+    tool_name = event.get("tool_name", "")
+
+    # Global pause
+    if state.get("global_paused", False):
+        return "deferred", 0
+
+    # Per-iTerm-session pause
+    if iterm_sid and iterm_sid in state.get("paused_sessions", []):
+        return "deferred", 0
+
+    # Per-Claude-session pause
+    if claude_sid and claude_sid in state.get("paused_claude_sessions", []):
+        return "deferred", 0
+
+    # Excluded tools
+    if tool_name and tool_name in state.get("excluded_tools", []):
+        return "deferred", 0
+
+    # Per-pane AskUserQuestion pause
+    if tool_name == "AskUserQuestion":
+        if iterm_sid and iterm_sid in state.get("ask_paused_sessions", []):
+            return "deferred", 0
+        ask_timeout = state.get("ask_user_timeout", 0)
+        if ask_timeout > 0:
+            return "timeout", ask_timeout
+
+    return "allowed", 0
+
+
 def main():
     os.makedirs(SIGNAL_DIR, exist_ok=True)
 
@@ -24,43 +65,18 @@ def main():
     raw = os.environ.get("ITERM_SESSION_ID", "")
     data["_iterm_session_id"] = extract_iterm_session_id(raw) or None
 
-    # For PermissionRequest, check global and per-session pause state
-    paused = False
+    ask_timeout = 0
+
     if event_name == "PermissionRequest":
         state = read_state()
-        paused = state.get("global_paused", False)
-        if not paused:
-            iterm_sid = data["_iterm_session_id"]
-            if iterm_sid:
-                paused = iterm_sid in state.get("paused_sessions", [])
-        if not paused:
-            claude_sid = data.get("session_id", "")
-            if claude_sid:
-                paused = claude_sid in state.get("paused_claude_sessions", [])
-        # Check if this tool is in the excluded list
-        if not paused:
+        decision, ask_timeout = decide_permission(state, data)
+        data["_decision"] = decision
+        if decision == "deferred":
             tool_name = data.get("tool_name", "")
-            excluded_tools = state.get("excluded_tools", [])
-            if tool_name and tool_name in excluded_tools:
-                paused = True
+            excluded = state.get("excluded_tools", [])
+            if tool_name and (tool_name in excluded or tool_name == "AskUserQuestion"):
                 data["_excluded_tool"] = True
-        # Check per-pane AskUserQuestion pause
-        if not paused:
-            tool_name = data.get("tool_name", "")
-            if tool_name == "AskUserQuestion":
-                iterm_sid = data["_iterm_session_id"]
-                if iterm_sid and iterm_sid in state.get("ask_paused_sessions", []):
-                    paused = True
-                    data["_excluded_tool"] = True
-        # Check AskUserQuestion timeout: sleep to give user time to respond manually
-        ask_timeout = 0
-        if not paused:
-            tool_name = data.get("tool_name", "")
-            if tool_name == "AskUserQuestion":
-                ask_timeout = state.get("ask_user_timeout", 0)
-        data["_decision"] = "deferred" if paused else "allowed"
-        if ask_timeout > 0:
-            data["_decision"] = "timeout"
+        elif decision == "timeout":
             data["_ask_timeout"] = ask_timeout
 
     # Log the event
@@ -68,13 +84,12 @@ def main():
         f.write(json.dumps(data) + "\n")
 
     # Only auto-allow for PermissionRequest when not paused
-    if event_name != "PermissionRequest" or paused:
+    if event_name != "PermissionRequest" or data.get("_decision") == "deferred":
         return
 
     # AskUserQuestion with timeout: sleep then auto-allow
     if ask_timeout > 0:
         time.sleep(ask_timeout)
-        # Log timeout completion so TUI can show it
         completion = {
             "_timestamp": time.time(),
             "_iterm_session_id": data.get("_iterm_session_id"),
