@@ -11,58 +11,41 @@ Layout (vertical):
   └─────────────────────────────┘
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
-import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-from textual import events, work
-from textual.app import App, ComposeResult
+from textual import events
+from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.message import Message
 from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
-from textual.widgets import Footer, RichLog, Static, Tab, TabbedContent, TabPane
+from textual.message import Message
+from textual.widgets import Footer, Static, Tab, TabbedContent, TabPane
 from textual.widgets._tabbed_content import ContentTab
 
 from claude_monitor import (
-    __version__,
     SIGNAL_DIR,
-    EVENTS_FILE,
     STATE_FILE,
     LOG_FILE,
-    API_PORT_FILE,
-    fmt_duration,
     read_state,
 )
-from claude_monitor.tui_common import (
-    HookEvent,
-    HorizontalScrollBarRender,
-    VerticalScrollBarRender,
-    SessionPanel,
-    DashboardPanel,
-    PaneContextMenu,
-    ChoicesScreen,
-    QuestionsScreen,
-    HelpScreen,
-    MonitorCommands,
+from claude_monitor.messages import HookEvent
+from claude_monitor.commands import MonitorCommands
+from claude_monitor.widgets import SessionPanel, DashboardPanel
+from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen, PaneContextMenu  # noqa: F401
+from claude_monitor.formatting import (
     _safe_css_id,
     _safe_tab_css_id,
     _format_ask_user_question_inline,
     _oneline as _oneline_fn,
 )
-from claude_monitor.api import start_api_server
+from claude_monitor.app_base import MonitorApp
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
-from claude_monitor.usage import (
-    fetch_usage,
-    format_usage_inline,
-    invalidate_usage_cache,
-    set_oauth_json,
-    set_on_token_refreshed,
-)
 
 os.makedirs(SIGNAL_DIR, exist_ok=True)
 logging.basicConfig(
@@ -145,7 +128,7 @@ class DragHandle(Static):
         self.remove_class("dragging")
 
 
-class SimpleTUI(App):
+class SimpleTUI(MonitorApp):
     """Simple session-tabbed TUI for claude-monitor (no iTerm2 required)."""
 
     CSS = """
@@ -246,21 +229,11 @@ class SimpleTUI(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self.settings = load_settings()
-        # panels keyed by Claude session ID
-        self.panels: dict[str, SessionPanel] = {}
-        self.dashboard: DashboardPanel | None = None
         # Maps claude_session_id → tab pane id (for TabbedContent)
         self._claude_to_tab: dict[str, str] = {}
-        self._stop_event = threading.Event()
-        self._global_paused: bool = False
         self._paused_claude_sessions: set[str] = set()
         self._dashboard_in_tab: bool = False
         self._dashboard_tab_pane_id: str | None = None
-        self._usage_polling = False
-        self._last_usage_data = None
-        self._usage_next_fetch: float = 0
-        self._api_server = None
         # Counter for generating unique tab IDs
         self._tab_counter: int = 0
         # Dashboard height (lines); loaded from settings
@@ -269,12 +242,8 @@ class SimpleTUI(App):
         self._stored_dashboard_height: int | None = None
 
     # ------------------------------------------------------------------
-    # Pause state helpers (use Claude session IDs, not iTerm2 UUIDs)
+    # Abstract method implementations
     # ------------------------------------------------------------------
-
-    @property
-    def paused(self) -> bool:
-        return self._global_paused
 
     def is_pane_paused(self, claude_sid: str) -> bool:
         return self._global_paused or claude_sid in self._paused_claude_sessions
@@ -284,64 +253,11 @@ class SimpleTUI(App):
         # doesn't implement it — always return False.
         return False
 
-    def get_state_snapshot(self) -> dict:
-        """Return serializable TUI state for the HTTP API /text endpoint."""
-        sessions = []
-        for sid, panel in self.panels.items():
-            sessions.append({
-                "id": sid,
-                "title": panel.border_title,
-                "state": panel.state,
-                "mode": "manual" if self.is_pane_paused(sid) else "auto",
-                "active_agents": len(panel.active_agents),
-                "completed_agents": panel.total_agents_completed,
-                "accept_count": panel.accept_count,
-            })
-
-        dashboard_data = None
-        if self.dashboard:
-            d = self.dashboard
-            total_accepted = sum(p.accept_count for p in self.panels.values()) + d.accept_count
-            total_agents_active = (
-                sum(len(p.active_agents) for p in self.panels.values()) + len(d.active_agents)
-            )
-            total_agents_done = (
-                sum(p.total_agents_completed for p in self.panels.values())
-                + d.total_agents_completed
-            )
-            active_sessions = sum(1 for p in self.panels.values() if p.state == "active")
-            idle_sessions = sum(1 for p in self.panels.values() if p.state == "idle")
-            dashboard_data = {
-                "total_accepted": total_accepted,
-                "total_agents_active": total_agents_active,
-                "total_agents_completed": total_agents_done,
-                "active_sessions": active_sessions,
-                "idle_sessions": idle_sessions,
-            }
-
-        usage_data = None
-        if self._last_usage_data:
-            u = self._last_usage_data
-            usage_data = {
-                "five_hour": {
-                    "utilization": u.five_hour.utilization,
-                    "resets_at": u.five_hour.resets_at.isoformat() if u.five_hour.resets_at else None,
-                },
-                "seven_day": {
-                    "utilization": u.seven_day.utilization,
-                    "resets_at": u.seven_day.resets_at.isoformat() if u.seven_day.resets_at else None,
-                },
-            }
-
-        return {
-            "global_mode": "manual" if self._global_paused else "auto",
-            "sessions": sessions,
-            "dashboard": dashboard_data,
-            "usage": usage_data,
-        }
+    def _session_id_from_event(self, data: dict) -> str:
+        return data.get("session_id", "")
 
     # ------------------------------------------------------------------
-    # State persistence
+    # State persistence (override to add paused_claude_sessions)
     # ------------------------------------------------------------------
 
     def _save_state(self) -> None:
@@ -367,6 +283,13 @@ class SimpleTUI(App):
                 panel.add_class("pane-paused")
             else:
                 panel.remove_class("pane-paused")
+
+    # ------------------------------------------------------------------
+    # Settings overrides (pass simple_mode=True)
+    # ------------------------------------------------------------------
+
+    def action_open_settings(self) -> None:
+        self.push_screen(SettingsScreen(self.settings, simple_mode=True), self._on_settings_closed)
 
     # ------------------------------------------------------------------
     # Compose + mount
@@ -625,14 +548,6 @@ class SimpleTUI(App):
 
         return None, None
 
-    def _format_ts(self, ts: datetime) -> str:
-        style = self.settings.timestamp_style
-        if style == "12hr":
-            return ts.strftime("%-I:%M:%S%p").lower()
-        if style == "date_time":
-            return ts.strftime("%Y-%m-%d %H:%M:%S")
-        return ts.strftime("%H:%M:%S")
-
     @staticmethod
     def _oneline(text: str, max_len: int = 0) -> str:
         return _oneline_fn(text, max_len)
@@ -840,7 +755,7 @@ class SimpleTUI(App):
             log.debug(f"action_toggle_dashboard_tab: {e}")
 
     # ------------------------------------------------------------------
-    # Keybindings
+    # Per-pane pause toggle
     # ------------------------------------------------------------------
 
     def on_session_panel_pane_toggle(self, msg: SessionPanel.PaneToggle) -> None:
@@ -869,124 +784,9 @@ class SimpleTUI(App):
         self._update_all_panel_modes()
         self._update_status_bar()
 
-    def action_show_choices(self) -> None:
-        self.push_screen(ChoicesScreen())
-
-    def action_show_questions(self) -> None:
-        self.push_screen(QuestionsScreen())
-
-    def action_next_tab(self) -> None:
-        try:
-            tc = self.query_one("#tab-content", TabbedContent)
-            pane_ids = [pane.id for pane in tc.query(TabPane) if pane.id]
-            if not pane_ids or not tc.active:
-                return
-            idx = pane_ids.index(tc.active)
-            tc.active = pane_ids[(idx + 1) % len(pane_ids)]
-        except Exception:
-            pass
-
-    def action_prev_tab(self) -> None:
-        try:
-            tc = self.query_one("#tab-content", TabbedContent)
-            pane_ids = [pane.id for pane in tc.query(TabPane) if pane.id]
-            if not pane_ids or not tc.active:
-                return
-            idx = pane_ids.index(tc.active)
-            tc.active = pane_ids[(idx - 1) % len(pane_ids)]
-        except Exception:
-            pass
-
-    def action_show_help(self) -> None:
-        self.push_screen(HelpScreen(self.BINDINGS, SessionPanel.BINDINGS))
-
-    def action_open_settings(self) -> None:
-        self.push_screen(SettingsScreen(self.settings, simple_mode=True), self._on_settings_closed)
-
-    def _on_settings_closed(self, result: Settings | None) -> None:
-        if result is None:
-            return
-        old_oauth = self.settings.oauth_json
-        self.settings = result
-        self._apply_settings(result)
-        if result.oauth_json != old_oauth and result.oauth_json and result.account_usage:
-            invalidate_usage_cache()
-            self._refresh_usage()
-        log.debug(f"Settings updated: {result}")
-
-    def _apply_settings(self, settings: Settings) -> None:
-        self.theme = settings.theme
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG if settings.debug else logging.WARNING)
-        set_oauth_json(settings.oauth_json)
-        set_on_token_refreshed(self._on_token_refreshed)
-        if settings.account_usage and not self._usage_polling:
-            self._usage_polling = True
-            self.poll_usage()
-        if not settings.account_usage and self._last_usage_data:
-            self._last_usage_data = None
-            self._update_status_bar()
-        self._save_state()
-
-    def _on_token_refreshed(self, token: str, refresh_token: str, expires_at: float) -> None:
-        if self.settings.oauth_json:
-            oauth_data = {
-                "access_token": token,
-                "refresh_token": refresh_token,
-                "expires_at": expires_at,
-            }
-            self.settings.oauth_json = json.dumps(oauth_data)
-            save_settings(self.settings)
-            set_oauth_json(self.settings.oauth_json)
-        ts = self._format_ts(datetime.now().astimezone())
-        expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).astimezone()
-        msg = f"[{ts}] [dim]OAuth token refreshed, expires {expires_dt.strftime('%H:%M:%S')}[/]"
-
-        def _log():
-            if self.dashboard:
-                self.dashboard.record_event(msg)
-
-        self.call_from_thread(_log)
-
-    def _update_status_bar(self) -> None:
-        try:
-            bar = self.query_one("#status-bar", Horizontal)
-            left = self.query_one("#status-left", Static)
-            right = self.query_one("#status-right", Static)
-            SEP = "  [dim]\u2502[/]  "
-
-            n_paused = sum(1 for sid in self.panels if self.is_pane_paused(sid))
-            if self.paused:
-                mode_text = "[bold]MANUAL[/]"
-                bar.set_classes("paused")
-                usage_mode = "paused"
-            elif n_paused == 0:
-                mode_text = "[bold] AUTO [/]"
-                bar.set_classes("running")
-                usage_mode = "running"
-            else:
-                n_total = len(self.panels)
-                mode_text = f"[bold]MIXED [/] [dim]{n_total - n_paused}a {n_paused}m[/]"
-                bar.set_classes("paused")
-                usage_mode = "paused"
-
-            left_parts = [mode_text]
-            if self._last_usage_data:
-                bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
-                left_parts.append(format_usage_inline(self._last_usage_data, bar_width, usage_mode))
-            elif self.settings.account_usage:
-                if self._usage_next_fetch > 0:
-                    next_dt = datetime.fromtimestamp(self._usage_next_fetch)
-                    next_str = next_dt.strftime("%-I:%M%p").lower()
-                    left_parts.append(f"[dim]usage: updating at {next_str}[/]")
-                else:
-                    left_parts.append("[dim]usage: waiting…[/]")
-            left.update(SEP.join(left_parts))
-
-            clock = datetime.now().strftime("%-b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
-            right.update(f"[dim]v{__version__}[/]{SEP}{clock}")
-        except Exception:
-            log.debug("_update_status_bar: failed to update status bar widgets")
+    # ------------------------------------------------------------------
+    # Tab management
+    # ------------------------------------------------------------------
 
     async def action_close_tab(self) -> None:
         """Remove the currently active session tab."""
@@ -1023,78 +823,6 @@ class SimpleTUI(App):
         self._claude_to_tab.pop(claude_sid, None)
         self._paused_claude_sessions.discard(claude_sid)
         log.debug(f"_remove_session: removed session {claude_sid[:8]}")
-
-    def action_quit(self) -> None:
-        self._stop_event.set()
-        self.exit()
-
-    def _on_exit_app(self) -> None:
-        self._stop_event.set()
-
-    # ------------------------------------------------------------------
-    # Background workers
-    # ------------------------------------------------------------------
-
-    @work(thread=True, exit_on_error=False)
-    def watch_events(self) -> None:
-        """Tail events.jsonl and post HookEvent messages to the app."""
-        os.makedirs(SIGNAL_DIR, exist_ok=True)
-        Path(EVENTS_FILE).touch(exist_ok=True)
-
-        with open(EVENTS_FILE, "r") as f:
-            f.seek(0, 2)  # seek to end — only process new events
-            while not self._stop_event.is_set():
-                line = f.readline()
-                if line:
-                    line = line.strip()
-                    if line:
-                        try:
-                            data = json.loads(line)
-                            self.post_message(HookEvent(data))
-                        except json.JSONDecodeError:
-                            log.debug(f"watch_events: failed to parse JSON: {line[:100]}")
-                else:
-                    self._stop_event.wait(0.2)
-        log.debug("watch_events: stopped")
-
-    @work(thread=True, exit_on_error=False)
-    def poll_usage(self) -> None:
-        """Poll usage every 5 minutes."""
-        log.debug("poll_usage: started")
-        while not self._stop_event.is_set():
-            if not self.settings.account_usage:
-                self._usage_polling = False
-                break
-            self._last_usage_data = fetch_usage()
-            self._usage_next_fetch = time.time() + 300
-            self.call_from_thread(self._update_status_bar)
-            self._stop_event.wait(300)
-        log.debug("poll_usage: stopped")
-
-    @work(thread=True, exit_on_error=False)
-    def _refresh_usage(self) -> None:
-        self._last_usage_data = fetch_usage()
-        self._usage_next_fetch = time.time() + 300
-        self.call_from_thread(self._update_status_bar)
-
-    @work(thread=True, exit_on_error=False)
-    def serve_api(self) -> None:
-        """Run the HTTP API server in a background thread."""
-        try:
-            self._api_server = start_api_server(self)
-            log.debug("serve_api: started")
-            while not self._stop_event.is_set():
-                self._api_server.handle_request()
-        except OSError as e:
-            log.error(f"serve_api: failed to start: {e}")
-        finally:
-            if self._api_server:
-                self._api_server.server_close()
-            try:
-                os.remove(API_PORT_FILE)
-            except OSError:
-                log.debug("serve_api: failed to remove API port file")
-            log.debug("serve_api: stopped")
 
 
 def main():
