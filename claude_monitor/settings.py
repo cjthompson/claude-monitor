@@ -61,6 +61,7 @@ class Settings:
     dashboard_height: int = 12  # dashboard pane height in lines (simple mode, expanded)
     tab_close_mode: str = "none"  # none / idle / immediate
     tab_idle_timeout_secs: int = 300  # seconds of idle before closing tab (when tab_close_mode="idle")
+    web_lan_access: bool = False  # bind HTTP API to 0.0.0.0 instead of localhost
 
     def __post_init__(self) -> None:
         if self.excluded_tools is None:
@@ -156,6 +157,7 @@ FIELD_DEFS: list[FieldDef] = [
     {"name": "timestamp_style", "label": "Timestamp",       "widget_type": "select",   "options": TIMESTAMP_OPTIONS},
     {"name": "debug",           "label": "Debug logging",   "widget_type": "switch"},
     {"name": "account_usage",   "label": "Account usage",   "widget_type": "switch"},
+    {"name": "web_lan_access",  "label": "LAN access",      "widget_type": "switch",   "description": "Bind HTTP API to 0.0.0.0 (all interfaces) instead of localhost only"},
     {
         "name": "oauth_json",
         "label": "OAuth token",
@@ -484,6 +486,7 @@ class SettingsScreen(ModalScreen[Settings | None]):
             dashboard_height=s.dashboard_height,
             tab_close_mode=self._get_select_value(_widget_id("tab_close_mode"), s.tab_close_mode),
             tab_idle_timeout_secs=tab_idle_timeout,
+            web_lan_access=self.query_one(f"#{_widget_id('web_lan_access')}", Switch).value,
         )
 
     # ------------------------------------------------------------------
