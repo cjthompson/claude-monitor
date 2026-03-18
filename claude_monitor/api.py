@@ -61,6 +61,46 @@ def _detect_monospace_font():
     return _PNG_FONT
 
 
+def generate_health_response(start_time, now) -> dict:
+    """Return a JSON-serialisable health response dict."""
+    uptime = int(now - start_time) if start_time is not None else 0
+    return {
+        "status": "ok",
+        "version": __version__,
+        "uptime": uptime,
+    }
+
+
+def generate_screenshot_svg(app) -> str:
+    """Export the current screen as an SVG string using the app's export_screenshot."""
+    return app.call_from_thread(app.export_screenshot)
+
+
+def generate_screenshot_png(svg_text: str) -> bytes:
+    """Convert an SVG string to optimised PNG bytes (256-color quantised)."""
+    import cairosvg
+    from PIL import Image
+    from io import BytesIO
+
+    font = _detect_monospace_font()
+    if font != "Fira Code":
+        svg_text = svg_text.replace("Fira Code", font)
+    raw_png = cairosvg.svg2png(bytestring=svg_text.encode("utf-8"))
+    img = Image.open(BytesIO(raw_png))
+    quantized = img.quantize(colors=256, method=2, dither=0).convert("RGB")
+    buf = BytesIO()
+    quantized.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def app_state_snapshot(app, start_time, now) -> dict:
+    """Return a JSON-serialisable snapshot of TUI state with uptime injected."""
+    uptime = int(now - start_time) if start_time is not None else 0
+    snapshot = app.call_from_thread(app.get_state_snapshot)
+    snapshot["uptime"] = uptime
+    return snapshot
+
+
 class MonitorHTTPHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the monitor API.
 
