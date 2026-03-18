@@ -61,6 +61,11 @@ def isolated_state(tmp_path, monkeypatch):
     # Use port 0 so the OS picks a free port if serve_api runs.
     monkeypatch.setattr(api_mod, "API_PORT", 0)
 
+    import claude_monitor.web as web_mod
+    monkeypatch.setattr(web_mod, "EVENTS_FILE", events_file)
+    monkeypatch.setattr(web_mod, "STATE_FILE", state_file)
+    monkeypatch.setattr(web_mod, "API_PORT_FILE", api_port_file)
+
     return {
         "signal_dir": signal_dir,
         "events_file": events_file,
@@ -200,40 +205,15 @@ def inject_message(app_fixture):
 
 @pytest.fixture
 async def app_fixture_with_api(isolated_state, monkeypatch):
-    """Like app_fixture but with the API server enabled. Used only in test_api_endpoints.py.
-
-    watch_events is patched out (not needed for API tests). serve_api runs but
-    with a short timeout so handle_request() returns within 0.1s after _stop_event
-    is set, avoiding asyncio executor teardown hangs.
-
-    IMPORTANT: This fixture is async so its teardown code runs WITHIN the event loop,
-    before Python's asyncio shuts down the executor (shutdown_default_executor).
-    That guarantees _stop_event is set before the serve_api thread is joined.
-    """
+    """Like app_fixture but with the API server enabled."""
     monkeypatch.setattr("claude_monitor.app_base.fetch_usage", lambda: None)
     monkeypatch.setattr("claude_monitor.app_base.MonitorApp.watch_events", lambda self: None)
     monkeypatch.setattr("claude_monitor.app_base.MonitorApp.poll_usage", lambda self: None)
-
-    # Reduce HTTPServer.timeout so handle_request() polls at 0.1s instead of 1s,
-    # ensuring the serve_api thread exits promptly after _stop_event is set.
-    import claude_monitor.api as api_mod
-    original_start = api_mod.start_api_server
-
-    def fast_timeout_start(app, port=0):
-        server = original_start(app, port=port)
-        server.timeout = 0.1
-        return server
-
-    monkeypatch.setattr("claude_monitor.api.start_api_server", fast_timeout_start)
-    monkeypatch.setattr("claude_monitor.app_base.start_api_server", fast_timeout_start)
 
     from claude_monitor.tui_simple import SimpleTUI
     app = SimpleTUI()
     yield app
 
-    # Teardown runs within the event loop — before asyncio calls shutdown_default_executor.
-    # Set _stop_event so serve_api's while-loop exits, then wait > server.timeout (0.1s)
-    # for handle_request() to return and the thread to finish cleanly.
     import asyncio
     app._stop_event.set()
-    await asyncio.sleep(0.25)
+    await asyncio.sleep(0.5)

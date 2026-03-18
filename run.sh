@@ -1,6 +1,6 @@
 #!/bin/bash
 while true; do
-    claude-monitor
+    claude-monitor $@
     echo "Restarting..."
     sleep 0.5
 done

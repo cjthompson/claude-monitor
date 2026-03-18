@@ -20,6 +20,7 @@ base class is proven stable.
 from __future__ import annotations
 
 import abc
+import asyncio
 import json
 import logging
 import os
@@ -39,13 +40,14 @@ from claude_monitor import (
     SIGNAL_DIR,
     EVENTS_FILE,
     STATE_FILE,
+    API_PORT,
     API_PORT_FILE,
     read_state,
 )
 from claude_monitor.messages import HookEvent
 from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen
 from claude_monitor.widgets import SessionPanel, DashboardPanel
-from claude_monitor.api import start_api_server
+from claude_monitor.web import start_web_server
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
 from claude_monitor.usage import (
     fetch_usage,
@@ -487,17 +489,32 @@ class MonitorApp(App):
 
     @work(thread=True, exit_on_error=False)
     def serve_api(self) -> None:
-        """Run the HTTP API server in a background thread."""
+        """Run the unified HTTP+WebSocket server in a background thread."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        stop_event = asyncio.Event()
+
+        def _watch_stop() -> None:
+            """Bridge threading.Event → asyncio.Event for clean shutdown."""
+            self._stop_event.wait()
+            try:
+                loop.call_soon_threadsafe(stop_event.set)
+            except RuntimeError:
+                # Loop is already closed, that's fine
+                pass
+
+        watcher = threading.Thread(target=_watch_stop, daemon=True)
+        watcher.start()
+
         try:
-            self._api_server = start_api_server(self)
-            log.debug("serve_api: started")
-            while not self._stop_event.is_set():
-                self._api_server.handle_request()
+            log.debug("serve_api: starting")
+            loop.run_until_complete(
+                start_web_server(self, port=API_PORT, stop_event=stop_event)
+            )
         except OSError as e:
             log.error(f"serve_api: failed to start: {e}")
         finally:
-            if self._api_server:
-                self._api_server.server_close()
+            loop.close()
             try:
                 os.remove(API_PORT_FILE)
             except OSError:

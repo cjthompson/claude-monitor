@@ -16,26 +16,19 @@ def _get_free_port():
 
 
 def _patch_api_port(monkeypatch, isolated_state, port):
-    """Patch start_api_server to use a specific port + isolated port file.
+    """Patch start_web_server to use a specific port + isolated port file."""
+    import claude_monitor.web as web_mod
+    import claude_monitor.app_base as app_base_mod
 
-    Note: app_fixture_with_api already wraps start_api_server for fast timeout.
-    We re-wrap whatever is currently in place to inject the desired port.
-    """
-    import claude_monitor.api as api_mod
+    original_start = web_mod.start_web_server
 
-    # Grab the already-wrapped version (from app_fixture_with_api's fast_timeout_start)
-    already_wrapped = api_mod.start_api_server
+    async def patched_start(app, port=port, stop_event=None):
+        web_mod.API_PORT_FILE = isolated_state["api_port_file"]
+        await original_start(app, port=port, stop_event=stop_event)
 
-    def patched_start(app, port=port):
-        old = api_mod.API_PORT_FILE
-        api_mod.API_PORT_FILE = isolated_state["api_port_file"]
-        try:
-            return already_wrapped(app, port=port)
-        finally:
-            api_mod.API_PORT_FILE = old
-
-    monkeypatch.setattr("claude_monitor.api.start_api_server", patched_start)
-    monkeypatch.setattr("claude_monitor.app_base.start_api_server", patched_start)
+    monkeypatch.setattr("claude_monitor.web.start_web_server", patched_start)
+    monkeypatch.setattr("claude_monitor.app_base.start_web_server", patched_start)
+    monkeypatch.setattr(app_base_mod, "API_PORT", port)
 
 
 class TestAPIEndpoints:
