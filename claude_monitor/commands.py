@@ -1,6 +1,6 @@
 """Command palette provider for claude-monitor TUI."""
 
-from textual.command import DiscoveryHit, Hits, Provider
+from textual.command import DiscoveryHit, Hit, Hits, Provider
 
 
 class MonitorCommands(Provider):
@@ -27,11 +27,11 @@ class MonitorCommands(Provider):
         for name, action in self.COMMANDS_LIST:
             score = matcher.match(name)
             if score > 0:
-                yield DiscoveryHit(
-                    name,
+                yield Hit(
+                    score,
+                    matcher.highlight(name),
                     getattr(app, f"action_{action}", None) or (lambda: None),
                     help=f"action_{action}",
-                    score=score,
                 )
 
     async def discover(self) -> Hits:
