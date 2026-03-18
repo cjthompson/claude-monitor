@@ -1,6 +1,6 @@
 [project]
 name = "claude-monitor"
-version = "1.0.25"
+version = "1.0.26"
 description = "Monitor and auto-accept Claude Code permission prompts"
 requires-python = ">=3.12"
 dependencies = [

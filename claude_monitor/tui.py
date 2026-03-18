@@ -25,6 +25,7 @@ except ImportError:
     ITERM2_AVAILABLE = False
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
@@ -455,16 +456,21 @@ class AutoAcceptTUI(App):
     COMMANDS = {MonitorCommands}
 
     BINDINGS = [
-        ("a", "toggle_pause", "Auto/Manual"),
-        ("shift+tab", "toggle_pause", "Auto/Manual"),
-        ("c", "show_choices", "Choices"),
-        ("u", "show_questions", "Questions"),
-        ("r", "refresh_layout", "Refresh"),
-        ("s", "open_settings", "Settings"),
-        ("question_mark", "show_help", "Help"),
-        ("right_square_bracket", "next_tab", "Next Tab"),
-        ("left_square_bracket", "prev_tab", "Prev Tab"),
-        ("q", "quit", "Quit"),
+        Binding("a", "toggle_pause", "Auto/Manual"),
+        Binding("shift+tab", "toggle_pause", "Auto/Manual", show=False),
+        Binding("c", "show_choices", "Choices", show=False),
+        Binding("u", "show_questions", "Questions", show=False),
+        Binding("r", "refresh_layout", "Refresh", show=False),
+        Binding("s", "open_settings", "Settings", show=False),
+        Binding("d", "toggle_dashboard", "Dashboard", show=False),
+        Binding("D", "toggle_dashboard_tab", "Dashboard Tab", show=False),
+        Binding("equals_sign", "grow_dashboard", "Dash+", show=False),
+        Binding("minus", "shrink_dashboard", "Dash-", show=False),
+        Binding("right_square_bracket", "next_tab", "Next Tab", show=False),
+        Binding("left_square_bracket", "prev_tab", "Prev Tab", show=False),
+        Binding("x", "close_tab", "Close Tab", show=False),
+        Binding("question_mark", "show_help", "Help"),
+        Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self) -> None:

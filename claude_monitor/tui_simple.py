@@ -19,8 +19,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.message import Message
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Footer, RichLog, Static, Tab, TabbedContent, TabPane
@@ -82,6 +84,67 @@ DASH_TAB = "tab"             # dashboard as a tab in TabbedContent
 MIN_DASHBOARD_HEIGHT = 3     # minimum height in lines for the dashboard area
 
 
+class DragHandle(Static):
+    """A 1-line drag splitter between sessions area and dashboard area."""
+
+    class DragDelta(Message):
+        """Posted during drag. delta is signed integer lines (negative = grow dashboard)."""
+        def __init__(self, delta: int) -> None:
+            super().__init__()
+            self.delta = delta
+
+    DEFAULT_CSS = """
+    DragHandle {
+        height: 1;
+        width: 1fr;
+        background: $surface;
+        color: $text-muted;
+        content-align: center middle;
+    }
+    DragHandle:hover {
+        background: $accent 30%;
+        color: $text;
+    }
+    DragHandle.dragging {
+        background: $accent 50%;
+        color: $text;
+    }
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__("⸺ drag to resize ⸺", **kwargs)
+        self._drag_start_y: float | None = None
+        self._drag_start_height: int = 0
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 1:
+            self._drag_start_y = event.screen_y
+            self._drag_start_height = 0
+            self.capture_mouse()
+            self.add_class("dragging")
+            event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._drag_start_y is not None:
+            delta = int(event.screen_y - self._drag_start_y)
+            if delta != 0:
+                self._drag_start_y = event.screen_y
+                self.post_message(self.DragDelta(delta))
+            event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._drag_start_y is not None:
+            self._drag_start_y = None
+            self.release_mouse()
+            self.remove_class("dragging")
+            event.stop()
+
+    def on_mouse_release(self, event: events.MouseRelease) -> None:
+        """Called when mouse capture is released externally."""
+        self._drag_start_y = None
+        self.remove_class("dragging")
+
+
 class SimpleTUI(App):
     """Simple session-tabbed TUI for claude-monitor (no iTerm2 required)."""
 
@@ -112,6 +175,13 @@ class SimpleTUI(App):
         height: 12;
     }
     #dashboard-area.hidden {
+        display: none;
+    }
+    #drag-handle {
+        height: 1;
+        width: 1fr;
+    }
+    #drag-handle.hidden {
         display: none;
     }
     #dashboard-summary {
@@ -158,20 +228,20 @@ class SimpleTUI(App):
     COMMANDS = {MonitorCommands}
 
     BINDINGS = [
-        ("a", "toggle_pause", "Auto/Manual"),
-        ("shift+tab", "toggle_pause", "Auto/Manual"),
-        ("c", "show_choices", "Choices"),
-        ("u", "show_questions", "Questions"),
-        ("s", "open_settings", "Settings"),
-        ("d", "toggle_dashboard", "Dashboard"),
-        ("D", "toggle_dashboard_tab", "Dashboard Tab"),
-        ("equals_sign", "grow_dashboard", "Dash+"),
-        ("minus", "shrink_dashboard", "Dash-"),
-        ("right_square_bracket", "next_tab", "Next Tab"),
-        ("left_square_bracket", "prev_tab", "Prev Tab"),
-        ("x", "close_tab", "Close Tab"),
-        ("question_mark", "show_help", "Help"),
-        ("q", "quit", "Quit"),
+        Binding("a", "toggle_pause", "Auto/Manual"),
+        Binding("shift+tab", "toggle_pause", "Auto/Manual", show=False),
+        Binding("c", "show_choices", "Choices", show=False),
+        Binding("u", "show_questions", "Questions", show=False),
+        Binding("s", "open_settings", "Settings", show=False),
+        Binding("d", "toggle_dashboard", "Dashboard", show=False),
+        Binding("D", "toggle_dashboard_tab", "Dashboard Tab", show=False),
+        Binding("equals_sign", "grow_dashboard", "Dash+", show=False),
+        Binding("minus", "shrink_dashboard", "Dash-", show=False),
+        Binding("right_square_bracket", "next_tab", "Next Tab", show=False),
+        Binding("left_square_bracket", "prev_tab", "Prev Tab", show=False),
+        Binding("x", "close_tab", "Close Tab", show=False),
+        Binding("question_mark", "show_help", "Help"),
+        Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self) -> None:
@@ -309,6 +379,7 @@ class SimpleTUI(App):
         with Vertical(id="layout-root"):
             with Vertical(id="sessions-area"):
                 yield TabbedContent(id="tab-content")
+            yield DragHandle(id="drag-handle")
             with Vertical(id="dashboard-area"):
                 yield DashboardPanel(id="dashboard-panel")
         yield Footer()
@@ -684,6 +755,33 @@ class SimpleTUI(App):
         except Exception as e:
             log.debug(f"action_shrink_dashboard: {e}")
 
+    def on_drag_handle_drag_delta(self, msg: DragHandle.DragDelta) -> None:
+        """Handle drag-to-resize from the DragHandle splitter."""
+        if self._dashboard_in_tab:
+            return
+        # Positive delta = dragged down = dashboard shrinks
+        # Negative delta = dragged up = dashboard grows
+        new_height = self._dashboard_height - msg.delta
+        # Clamp: minimum dashboard height
+        new_height = max(MIN_DASHBOARD_HEIGHT, new_height)
+        # Clamp: sessions area must retain at least 4 visible lines
+        try:
+            sessions_area = self.query_one("#sessions-area")
+            sessions_h = sessions_area.size.height
+            total_available = sessions_h + self._dashboard_height
+            max_dashboard = total_available - 4
+            new_height = min(new_height, max_dashboard)
+        except Exception as e:
+            log.debug(f"on_drag_handle_drag_delta: {e}")
+        if new_height == self._dashboard_height:
+            return
+        self._dashboard_height = new_height
+        self._stored_dashboard_height = None
+        self._apply_dashboard_height()
+        self.settings.dashboard_height = self._dashboard_height
+        save_settings(self.settings)
+        self._update_arrow()
+
     async def action_toggle_dashboard_tab(self) -> None:
         """Toggle dashboard between bottom panel and a tab in TabbedContent."""
         try:
@@ -694,6 +792,10 @@ class SimpleTUI(App):
                 # Hide dashboard area
                 dash_area = self.query_one("#dashboard-area")
                 dash_area.add_class("hidden")
+                try:
+                    self.query_one("#drag-handle").add_class("hidden")
+                except Exception:
+                    pass
 
                 # Create a new DashboardPanel in a tab
                 tab_pane_id = "tab-dashboard"
@@ -725,6 +827,10 @@ class SimpleTUI(App):
                 # Restore bottom dashboard
                 dash_area = self.query_one("#dashboard-area")
                 dash_area.remove_class("hidden")
+                try:
+                    self.query_one("#drag-handle").remove_class("hidden")
+                except Exception:
+                    pass
                 self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
 
                 # Apply current height and arrow
