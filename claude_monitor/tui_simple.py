@@ -169,6 +169,7 @@ class SimpleTUI(App):
         ("minus", "shrink_dashboard", "Dash-"),
         ("right_square_bracket", "next_tab", "Next Tab"),
         ("left_square_bracket", "prev_tab", "Prev Tab"),
+        ("x", "close_tab", "Close Tab"),
         ("question_mark", "show_help", "Help"),
         ("q", "quit", "Quit"),
     ]
@@ -880,6 +881,42 @@ class SimpleTUI(App):
             right.update(f"[dim]v{__version__}[/]{SEP}{clock}")
         except Exception:
             log.debug("_update_status_bar: failed to update status bar widgets")
+
+    async def action_close_tab(self) -> None:
+        """Remove the currently active session tab."""
+        try:
+            tc = self.query_one("#tab-content", TabbedContent)
+            active_pane_id = tc.active
+            if not active_pane_id:
+                return
+            # Don't close dashboard tab
+            if active_pane_id == self._dashboard_tab_pane_id:
+                return
+            # Find the claude session ID for this tab
+            claude_sid = None
+            for sid, tab_id in self._claude_to_tab.items():
+                if tab_id == active_pane_id:
+                    claude_sid = sid
+                    break
+            if claude_sid:
+                await self._remove_session(claude_sid)
+        except Exception as e:
+            log.debug(f"action_close_tab: {e}")
+
+    async def _remove_session(self, claude_sid: str) -> None:
+        """Remove a session's tab, panel, and pause state."""
+        tab_pane_id = self._claude_to_tab.get(claude_sid)
+        if not tab_pane_id:
+            return
+        try:
+            tc = self.query_one("#tab-content", TabbedContent)
+            await tc.remove_pane(tab_pane_id)
+        except Exception as e:
+            log.debug(f"_remove_session: failed to remove pane: {e}")
+        self.panels.pop(claude_sid, None)
+        self._claude_to_tab.pop(claude_sid, None)
+        self._paused_claude_sessions.discard(claude_sid)
+        log.debug(f"_remove_session: removed session {claude_sid[:8]}")
 
     def action_quit(self) -> None:
         self._stop_event.set()

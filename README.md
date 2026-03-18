@@ -127,6 +127,7 @@ On macOS with iTerm2, run this in an iTerm2 pane alongside your Claude Code sess
 | `u` | View questions log |
 | `]` | Next tab |
 | `[` | Previous tab |
+| `x` | Close current session tab (auto-recreates if session is still active) |
 | `Ctrl+P` | Open command palette |
 | `Tab` | Move focus between panels |
 | `q` | Quit |

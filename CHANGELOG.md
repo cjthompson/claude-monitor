@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-03-17
+
+### Features
+- Close session tabs with `x` keybinding — dismissed tabs auto-recreate if the session is still active (#ui, #keybindings)
+
 ## 2026-03-16
 
 ### Fixes
