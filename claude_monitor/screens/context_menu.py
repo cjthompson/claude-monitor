@@ -4,6 +4,7 @@ import logging
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
@@ -81,7 +82,7 @@ class PaneContextMenu(ModalScreen):
             region = menu.region
             if not region.contains(event.screen_x, event.screen_y):
                 self.app.pop_screen()
-        except Exception:
+        except NoMatches:
             self.app.pop_screen()
 
     def action_dismiss(self) -> None:

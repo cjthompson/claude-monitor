@@ -494,7 +494,7 @@ class UsageManager:
             if self._on_token_refreshed:
                 try:
                     self._on_token_refreshed(new_access, new_refresh, new_expires_at)
-                except Exception as e:
+                except Exception as e:  # Callback is user-supplied; catch all to avoid breaking token refresh
                     log.debug(f"Token refresh callback failed: {e}")
 
             return new_access, new_refresh, new_expires_at

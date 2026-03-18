@@ -13,6 +13,7 @@ from typing import TypedDict
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch, TextArea
 
@@ -83,7 +84,7 @@ def load_settings() -> Settings:
         with open(CONFIG_FILE) as f:
             data = json.load(f)
         return Settings(**{k: v for k, v in data.items() if k in Settings.__dataclass_fields__})
-    except Exception as e:
+    except (OSError, json.JSONDecodeError, TypeError) as e:
         log.warning(f"Failed to load settings: {e}")
         return Settings()
 
@@ -102,10 +103,10 @@ def save_settings(settings: Settings) -> None:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
             os.replace(tmp_path, CONFIG_FILE)
-        except Exception:
+        except OSError:
             os.unlink(tmp_path)
             raise
-    except Exception as e:
+    except OSError as e:
         log.warning(f"Failed to save settings: {e}")
 
 
@@ -395,13 +396,13 @@ class SettingsScreen(ModalScreen[Settings | None]):
         """Check if current form values differ from the original settings."""
         try:
             return asdict(self._collect_settings()) != asdict(self._settings)
-        except Exception:
+        except Exception:  # _collect_settings calls query_one; Textual raises NoMatches if widgets not yet mounted
             return False
 
     def _refresh_save_button(self) -> None:
         try:
             self.query_one("#save-btn", Button).disabled = not self._has_changes()
-        except Exception:
+        except NoMatches:
             pass
 
     def _get_select_value(self, widget_id: str, fallback: str) -> str:

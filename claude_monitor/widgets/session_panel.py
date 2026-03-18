@@ -4,6 +4,7 @@ import logging
 import time
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import RichLog, Static
 
@@ -127,7 +128,7 @@ class SessionPanel(Static):
         self._event_log.append(text)
         try:
             self.query_one(RichLog).write(text)
-        except Exception:
+        except NoMatches:
             log.debug(f"SessionPanel.write: RichLog query failed for session {self.session_id}")
 
     def touch(self) -> None:
@@ -154,7 +155,7 @@ class SessionPanel(Static):
             if hasattr(app, "is_ask_paused") and app.is_ask_paused(self.session_id):
                 mode += " [cyan]?\u23f8[/]"
                 mode_plain += " ?\u23f8"
-        except Exception:
+        except AttributeError:
             log.debug(f"SessionPanel._render_mode: failed to check pause state for {self.session_id}")
             mode = ""
             mode_plain = ""
@@ -211,7 +212,7 @@ class SessionPanel(Static):
         # Available width for choosing tier
         try:
             w = self.size.width
-        except Exception:
+        except AttributeError:
             log.debug(f"SessionPanel._render_status: failed to get widget width for {self.session_id}, defaulting to 120")
             w = 120  # fallback to widest
 
@@ -298,7 +299,7 @@ class SessionPanel(Static):
     def _update_status(self) -> None:
         try:
             self.query_one(".panel-status", Static).update(self._render_status())
-        except Exception:
+        except NoMatches:
             log.debug(f"SessionPanel._update_status: panel-status query failed for {self.session_id}")
         # Update countdown overlay and bar
         try:
@@ -322,7 +323,7 @@ class SessionPanel(Static):
                 bar.remove_class("active")
                 overlay.update("")
                 overlay.remove_class("active")
-        except Exception:
+        except NoMatches:
             log.debug(f"SessionPanel._update_status: countdown/overlay query failed for {self.session_id}")
 
     def on_click(self, event) -> None:
@@ -337,7 +338,7 @@ class SessionPanel(Static):
             status = self.query_one(".panel-status", Static)
             if event.screen_y >= status.region.y:
                 self.post_message(self.PaneToggle(self.session_id))
-        except Exception:
+        except NoMatches:
             log.debug(f"SessionPanel.on_click: panel-status query failed for {self.session_id}")
 
     def action_toggle_pane_mode(self) -> None:

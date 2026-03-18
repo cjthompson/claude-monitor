@@ -6,6 +6,7 @@ import time
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import RichLog, Static
 
 from claude_monitor import fmt_duration
@@ -84,7 +85,7 @@ class DashboardPanel(Static):
         self._event_log.append(text)
         try:
             self.query_one(RichLog).write(text)
-        except Exception:
+        except NoMatches:
             log.debug("Dashboard.record_event: RichLog query failed")
         self._current_bucket_count += 1
 
@@ -97,12 +98,12 @@ class DashboardPanel(Static):
             self._bucket_counter = 0
         try:
             self.query_one("#dashboard-summary", Static).update(self._render_stats(panels))
-        except Exception:
+        except NoMatches:
             log.debug("Dashboard.refresh_dashboard: dash-stats query failed")
         try:
             self.query_one(FixedWidthSparkline).data = self._scaled_data()
             self.query_one(".dash-scale-label", Static).update(self._render_scale_label())
-        except Exception:
+        except NoMatches:
             log.debug("Dashboard.refresh_dashboard: Sparkline query failed")
 
     _MIN_Y_SCALE = 4  # minimum y-axis max so low counts don't fill the bar
@@ -112,7 +113,7 @@ class DashboardPanel(Static):
         raw = list(self._event_buckets) + [self._current_bucket_count]
         try:
             width = self.query_one(FixedWidthSparkline).size.width
-        except Exception:
+        except NoMatches:
             log.debug("Dashboard._visible_data: failed to get sparkline width, using raw data length")
             width = len(raw)
         return raw[-width:] if len(raw) > width else raw
