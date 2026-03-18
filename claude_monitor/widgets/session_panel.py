@@ -90,7 +90,7 @@ class SessionPanel(Static):
 
     BINDINGS = [
         ("m", "toggle_pane_mode", "Toggle Auto/Manual"),
-        ("p", "toggle_ask_pause", "Pause Questions"),
+        ("p", "toggle_ask_pause", "Toggle Q-Pause"),
     ]
 
     def __init__(self, session_id: str, title: str, **kwargs) -> None:

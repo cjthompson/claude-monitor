@@ -59,6 +59,8 @@ class Settings:
     sparkline_bucket_secs: int = 5  # seconds per sparkline bucket (events/Ns)
     oauth_json: str = ""  # JSON with access_token (required), refresh_token, expires_at (optional)
     dashboard_height: int = 12  # dashboard pane height in lines (simple mode, expanded)
+    tab_close_mode: str = "none"  # none / idle / immediate
+    tab_idle_timeout_secs: int = 300  # seconds of idle before closing tab (when tab_close_mode="idle")
 
     def __post_init__(self) -> None:
         if self.excluded_tools is None:
@@ -74,6 +76,9 @@ class Settings:
         self.ask_user_timeout = max(0, min(300, int(self.ask_user_timeout)))
         self.sparkline_bucket_secs = max(1, int(self.sparkline_bucket_secs))
         self.dashboard_height = max(3, int(self.dashboard_height))
+        if self.tab_close_mode not in ("none", "idle", "immediate"):
+            self.tab_close_mode = "none"
+        self.tab_idle_timeout_secs = max(10, min(3600, int(self.tab_idle_timeout_secs)))
 
 
 def load_settings() -> Settings:
@@ -124,6 +129,11 @@ TIMESTAMP_OPTIONS = [
     ("Date + time", "date_time"),
     ("Auto (responsive)", "auto"),
 ]
+TAB_CLOSE_OPTIONS = [
+    ("No auto-close", "none"),
+    ("On idle (idle_prompt)", "idle"),
+    ("Immediate (on close hook)", "immediate"),
+]
 
 
 # --- Declarative field definitions ---
@@ -166,6 +176,21 @@ FIELD_DEFS: list[FieldDef] = [
         "placeholder": "0",
         "input_type": "integer",
         "description": "Seconds to wait before auto-accepting AskUserQuestion (0 = instant, max 300)",
+    },
+    {
+        "name": "tab_close_mode",
+        "label": "Tab auto-close",
+        "widget_type": "select",
+        "options": TAB_CLOSE_OPTIONS,
+        "description": "When to automatically close idle session tabs in simple mode",
+    },
+    {
+        "name": "tab_idle_timeout_secs",
+        "label": "Idle timeout",
+        "widget_type": "input",
+        "placeholder": "300",
+        "input_type": "integer",
+        "description": "Seconds of inactivity before auto-closing tab (when mode is 'On idle')",
     },
 ]
 
@@ -439,6 +464,12 @@ class SettingsScreen(ModalScreen[Settings | None]):
         else:
             iterm_scope = self._get_select_value(_widget_id("iterm_scope"), s.iterm_scope)
 
+        # tab_idle_timeout_secs: integer input, clamped
+        try:
+            tab_idle_timeout = min(3600, max(10, int(self.query_one(f"#{_widget_id('tab_idle_timeout_secs')}", Input).value)))
+        except (ValueError, TypeError):
+            tab_idle_timeout = 300
+
         return Settings(
             default_mode=self._get_select_value(_widget_id("default_mode"), s.default_mode),
             theme=self._get_select_value(_widget_id("theme"), s.theme),
@@ -451,6 +482,8 @@ class SettingsScreen(ModalScreen[Settings | None]):
             oauth_json=oauth_json,
             sparkline_bucket_secs=s.sparkline_bucket_secs,
             dashboard_height=s.dashboard_height,
+            tab_close_mode=self._get_select_value(_widget_id("tab_close_mode"), s.tab_close_mode),
+            tab_idle_timeout_secs=tab_idle_timeout,
         )
 
     # ------------------------------------------------------------------

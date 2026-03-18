@@ -74,7 +74,7 @@ def main():
         if decision == "deferred":
             tool_name = data.get("tool_name", "")
             excluded = state.get("excluded_tools", [])
-            if tool_name and (tool_name in excluded or tool_name == "AskUserQuestion"):
+            if tool_name and tool_name in excluded:
                 data["_excluded_tool"] = True
         elif decision == "timeout":
             data["_ask_timeout"] = ask_timeout

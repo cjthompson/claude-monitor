@@ -44,6 +44,7 @@ from claude_monitor.formatting import (
     _safe_tab_css_id,
     _format_ask_user_question_inline,
     _oneline as _oneline_fn,
+    format_event as _format_event_shared,
 )
 from claude_monitor.app_base import MonitorApp
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
@@ -68,44 +69,23 @@ DASH_TAB = "tab"             # dashboard as a tab in TabbedContent
 MIN_DASHBOARD_HEIGHT = 3     # minimum height in lines for the dashboard area
 
 
-class DragHandle(Static):
-    """A 1-line drag splitter between sessions area and dashboard area."""
+class DraggableDashboard(DashboardPanel):
+    """DashboardPanel with drag-to-resize on the top border."""
 
     class DragDelta(Message):
-        """Posted during drag. delta is signed integer lines (negative = grow dashboard)."""
+        """Posted during border drag. delta is signed integer lines."""
         def __init__(self, delta: int) -> None:
             super().__init__()
             self.delta = delta
 
-    DEFAULT_CSS = """
-    DragHandle {
-        height: 1;
-        width: 1fr;
-        background: $surface;
-        color: $text-muted;
-        content-align: center middle;
-    }
-    DragHandle:hover {
-        background: $accent 30%;
-        color: $text;
-    }
-    DragHandle.dragging {
-        background: $accent 50%;
-        color: $text;
-    }
-    """
-
     def __init__(self, **kwargs) -> None:
-        super().__init__("⸺ drag to resize ⸺", **kwargs)
+        super().__init__(**kwargs)
         self._drag_start_y: float | None = None
-        self._drag_start_height: int = 0
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        if event.button == 1:
+        if event.button == 1 and event.y == 0:
             self._drag_start_y = event.screen_y
-            self._drag_start_height = 0
             self.capture_mouse()
-            self.add_class("dragging")
             event.stop()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
@@ -113,20 +93,17 @@ class DragHandle(Static):
             delta = int(event.screen_y - self._drag_start_y)
             if delta != 0:
                 self._drag_start_y = event.screen_y
-                self.post_message(self.DragDelta(delta))
+                self.post_message(DraggableDashboard.DragDelta(delta))
             event.stop()
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         if self._drag_start_y is not None:
             self._drag_start_y = None
             self.release_mouse()
-            self.remove_class("dragging")
             event.stop()
 
     def on_mouse_release(self, event: events.MouseRelease) -> None:
-        """Called when mouse capture is released externally."""
         self._drag_start_y = None
-        self.remove_class("dragging")
 
 
 class SimpleTUI(MonitorApp):
@@ -159,13 +136,6 @@ class SimpleTUI(MonitorApp):
         height: 12;
     }
     #dashboard-area.hidden {
-        display: none;
-    }
-    #drag-handle {
-        height: 1;
-        width: 1fr;
-    }
-    #drag-handle.hidden {
         display: none;
     }
     #dashboard-summary {
@@ -233,6 +203,7 @@ class SimpleTUI(MonitorApp):
         # Maps claude_session_id → tab pane id (for TabbedContent)
         self._claude_to_tab: dict[str, str] = {}
         self._paused_claude_sessions: set[str] = set()
+        self._ask_paused_sessions: set[str] = set()
         self._dashboard_in_tab: bool = False
         self._dashboard_tab_pane_id: str | None = None
         # Counter for generating unique tab IDs
@@ -250,9 +221,7 @@ class SimpleTUI(MonitorApp):
         return self._global_paused or claude_sid in self._paused_claude_sessions
 
     def is_ask_paused(self, claude_sid: str) -> bool:
-        # Ask-pause is tracked per-panel in the full version; simple version
-        # doesn't implement it — always return False.
-        return False
+        return claude_sid in self._ask_paused_sessions
 
     def _session_id_from_event(self, data: dict) -> str:
         return data.get("session_id", "")
@@ -268,7 +237,7 @@ class SimpleTUI(MonitorApp):
             "paused_claude_sessions": list(self._paused_claude_sessions),
             "excluded_tools": self.settings.excluded_tools or [],
             "ask_user_timeout": self.settings.ask_user_timeout,
-            "ask_paused_sessions": [],
+            "ask_paused_sessions": list(self._ask_paused_sessions),
         }
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
@@ -277,6 +246,7 @@ class SimpleTUI(MonitorApp):
         state = read_state()
         self._global_paused = state.get("global_paused", False)
         self._paused_claude_sessions = set(state.get("paused_claude_sessions", []))
+        self._ask_paused_sessions = set(state.get("ask_paused_sessions", []))
 
     def _update_all_panel_modes(self) -> None:
         for panel in self.panels.values():
@@ -303,9 +273,8 @@ class SimpleTUI(MonitorApp):
         with Vertical(id="layout-root"):
             with Vertical(id="sessions-area"):
                 yield TabbedContent(id="tab-content")
-            yield DragHandle(id="drag-handle")
             with Vertical(id="dashboard-area"):
-                yield DashboardPanel(id="dashboard-panel")
+                yield DraggableDashboard(id="dashboard-panel")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -342,6 +311,17 @@ class SimpleTUI(MonitorApp):
             self.dashboard.refresh_dashboard(self.panels)
         self._update_status_bar()
         self._update_dashboard_summary()
+        # Idle-timeout auto-close logic
+        if self.settings.tab_close_mode == "idle":
+            timeout = self.settings.tab_idle_timeout_secs
+            now = time.time()
+            for sid, panel in list(self.panels.items()):
+                if (
+                    panel._state == "idle"
+                    and panel._last_event_time is not None
+                    and (now - panel._last_event_time) >= timeout
+                ):
+                    self.call_later(self._remove_session, sid)
 
     # ------------------------------------------------------------------
     # Session / tab management
@@ -452,6 +432,8 @@ class SimpleTUI(MonitorApp):
                 if hasattr(panel, "mark_idle"):
                     panel.mark_idle()
                     self._update_tab_label(panel.session_id)
+                if self.settings.tab_close_mode == "immediate":
+                    self.call_later(self._remove_session, panel.session_id)
             elif ntype == "ask_timeout_complete":
                 origin = data.get("_timeout_origin")
                 if panel._pending_timeout is not None and getattr(panel, "_timeout_origin", None) == origin:
@@ -481,73 +463,15 @@ class SimpleTUI(MonitorApp):
             panel.total_agents_completed += 1
 
     def _format_event(self, data: dict, event_name: str):
-        """Format a hook event into display text. Returns (label, detail) or (None, None)."""
-        if event_name == "PermissionRequest":
-            tool = data.get("tool_name", "?")
-            tool_input = data.get("tool_input", {})
-            detail = ""
-            if tool == "AskUserQuestion":
-                detail = _format_ask_user_question_inline(tool_input)
-            elif tool == "Bash":
-                detail = f" `{self._oneline(tool_input.get('command', ''))}`"
-            elif tool in ("Edit", "Write"):
-                detail = f" `{tool_input.get('file_path', '')}`"
-            elif tool == "WebFetch":
-                detail = f" `{tool_input.get('url', '')}`"
-            if data.get("_excluded_tool"):
-                return f"[bold red]{'MANUAL':<8}[/]", f"{tool}{detail}"
-            decision = data.get("_decision", "allowed")
-            if decision == "deferred":
-                return f"[bold yellow]{'DEFERRED':<8}[/]", f"{tool}{detail}"
-            if decision == "timeout":
-                timeout_s = data.get("_ask_timeout", "?")
-                return f"[bold cyan]{'TIMEOUT':<8}[/]", f"{tool}{detail} ({timeout_s}s)"
-            claude_sid = data.get("session_id", "")
-            if self.is_pane_paused(claude_sid):
-                return f"[bold yellow]{'PAUSED':<8}[/]", f"{tool}{detail}"
-            return f"[bold green]{'ALLOWED':<8}[/]", f"{tool}{detail}"
-
-        elif event_name == "PostToolUse":
-            tool = data.get("tool_name", "?")
-            if tool == "AskUserQuestion":
-                answers = data.get("tool_input", {}).get("answers", {})
-                answer_vals = [v for v in answers.values() if v]
-                if not answer_vals:
-                    return None, None
-                answer_text = ", ".join(answer_vals)
-                return f"[bold green]{'ANSWER':<8}[/]", f"AskUserQuestion -> [bold]{answer_text}[/]"
-            return None, None
-
-        elif event_name == "Notification":
-            ntype = data.get("notification_type", "")
-            message = data.get("message", "")
-            if ntype == "idle_prompt":
-                return f"[dim]{'IDLE':<8}[/]", self._oneline(message, 80)
-            elif ntype == "ask_timeout_complete":
-                if data.get("_auto_accepted"):
-                    return f"[bold cyan]{'AUTO':<8}[/]", message
-                return None, None
-            elif ntype == "permission_prompt":
-                claude_sid = data.get("session_id", "")
-                if not self.is_pane_paused(claude_sid):
-                    panel = self.panels.get(claude_sid)
-                    pending = getattr(panel, "_pending_timeout", None) if panel else None
-                    if pending and pending > time.time():
-                        return None, None
-                    return f"[bold green]{'APPROVED':<8}[/]", message
-            return f"[bold cyan]{'NOTIFY':<8}[/]", self._oneline(message, 80)
-
-        elif event_name == "SubagentStart":
-            agent_id = data.get("agent_id", "?")
-            agent_type = data.get("agent_type", "?")
-            return f"[bold magenta]{'AGENT+':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
-
-        elif event_name == "SubagentStop":
-            agent_id = data.get("agent_id", "?")
-            agent_type = data.get("agent_type", "?")
-            return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
-
-        return None, None
+        """Format a hook event into display text. Delegates to shared formatter."""
+        return _format_event_shared(
+            data,
+            event_name,
+            is_pane_paused=self.is_pane_paused,
+            get_panel=lambda d: self.panels.get(d.get("session_id", "")),
+            oneline=self._oneline,
+            self_sid=None,
+        )
 
     @staticmethod
     def _oneline(text: str, max_len: int = 0) -> str:
@@ -671,7 +595,7 @@ class SimpleTUI(MonitorApp):
         except NoMatches as e:
             log.debug(f"action_shrink_dashboard: {e}")
 
-    def on_drag_handle_drag_delta(self, msg: DragHandle.DragDelta) -> None:
+    def on_draggable_dashboard_drag_delta(self, msg: DraggableDashboard.DragDelta) -> None:
         """Handle drag-to-resize from the DragHandle splitter."""
         if self._dashboard_in_tab:
             return
@@ -708,10 +632,6 @@ class SimpleTUI(MonitorApp):
                 # Hide dashboard area
                 dash_area = self.query_one("#dashboard-area")
                 dash_area.add_class("hidden")
-                try:
-                    self.query_one("#drag-handle").add_class("hidden")
-                except NoMatches:
-                    pass  # drag-handle is optional; not present in all layouts
 
                 # Create a new DashboardPanel in a tab
                 tab_pane_id = "tab-dashboard"
@@ -726,7 +646,13 @@ class SimpleTUI(MonitorApp):
 
                 tab_pane = TabPane("Dashboard", new_dash, id=tab_pane_id)
                 tc = self.query_one("#tab-content", TabbedContent)
-                await tc.add_pane(tab_pane)
+                # Insert Dashboard as the first (left-most) tab
+                existing_panes = tc.query(TabPane)
+                first_pane_id = existing_panes.first(TabPane).id if existing_panes else None
+                if first_pane_id:
+                    await tc.add_pane(tab_pane, before=first_pane_id)
+                else:
+                    await tc.add_pane(tab_pane)
                 tc.active = tab_pane_id
                 self.dashboard = new_dash
                 self._dashboard_tab_pane_id = tab_pane_id
@@ -743,10 +669,6 @@ class SimpleTUI(MonitorApp):
                 # Restore bottom dashboard
                 dash_area = self.query_one("#dashboard-area")
                 dash_area.remove_class("hidden")
-                try:
-                    self.query_one("#drag-handle").remove_class("hidden")
-                except NoMatches:
-                    pass  # drag-handle is optional; not present in all layouts
                 self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
 
                 # Apply current height and arrow
@@ -771,6 +693,16 @@ class SimpleTUI(MonitorApp):
             self._paused_claude_sessions.discard(claude_sid)
         else:
             self._paused_claude_sessions.add(claude_sid)
+        self._save_state()
+        self._update_all_panel_modes()
+        self._update_status_bar()
+
+    def on_session_panel_ask_pause_toggle(self, msg: SessionPanel.AskPauseToggle) -> None:
+        claude_sid = msg.session_id
+        if claude_sid in self._ask_paused_sessions:
+            self._ask_paused_sessions.discard(claude_sid)
+        else:
+            self._ask_paused_sessions.add(claude_sid)
         self._save_state()
         self._update_all_panel_modes()
         self._update_status_bar()

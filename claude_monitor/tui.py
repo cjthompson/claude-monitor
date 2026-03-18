@@ -36,6 +36,7 @@ from claude_monitor.formatting import (
     _format_ask_user_question_inline,
     _format_ask_user_question_detail,
     _oneline as _oneline_fn,
+    format_event as _format_event_shared,
 )
 from claude_monitor.iterm2_layout import (
     ITERM2_AVAILABLE,
@@ -720,83 +721,15 @@ class AutoAcceptTUI(MonitorApp):
             panel.total_agents_completed += 1
 
     def _format_event(self, data: dict, event_name: str):
-        """Format a hook event into display text.  Pure formatting — no side effects.
-
-        Returns (label, detail) or (None, None).
-        """
-        if event_name == "PermissionRequest":
-            tool = data.get("tool_name", "?")
-            tool_input = data.get("tool_input", {})
-            detail = ""
-            if tool == "AskUserQuestion":
-                detail = _format_ask_user_question_inline(tool_input)
-            elif tool == "Bash":
-                detail = f" `{self._oneline(tool_input.get('command', ''))}`"
-            elif tool in ("Edit", "Write"):
-                detail = f" `{tool_input.get('file_path', '')}`"
-            elif tool == "WebFetch":
-                detail = f" `{tool_input.get('url', '')}`"
-            # Check event-level flags first, then live pane state
-            if data.get("_excluded_tool"):
-                return f"[bold red]{'MANUAL':<8}[/]", f"{tool}{detail}"
-            decision = data.get("_decision", "allowed")
-            if decision == "deferred":
-                return f"[bold yellow]{'DEFERRED':<8}[/]", f"{tool}{detail}"
-            if decision == "timeout":
-                timeout_s = data.get("_ask_timeout", "?")
-                return f"[bold cyan]{'TIMEOUT':<8}[/]", f"{tool}{detail} ({timeout_s}s)"
-            iterm_sid = self._iterm_sid_from_event(data)
-            if iterm_sid and self.is_pane_paused(iterm_sid):
-                return f"[bold yellow]{'PAUSED':<8}[/]", f"{tool}{detail}"
-            return f"[bold green]{'ALLOWED':<8}[/]", f"{tool}{detail}"
-
-        elif event_name == "PostToolUse":
-            tool = data.get("tool_name", "?")
-            if tool == "AskUserQuestion":
-                answers = data.get("tool_input", {}).get("answers", {})
-                answer_vals = [v for v in answers.values() if v]
-                if not answer_vals:
-                    return None, None  # Auto-accepted with no real answer
-                answer_text = ", ".join(answer_vals)
-                return f"[bold green]{'ANSWER':<8}[/]", f"AskUserQuestion -> [bold]{answer_text}[/]"
-            return None, None
-
-        elif event_name == "Notification":
-            ntype = data.get("notification_type", "")
-            message = data.get("message", "")
-            if ntype == "idle_prompt":
-                return f"[dim]{'IDLE':<8}[/]", self._oneline(message, 80)
-            elif ntype == "ask_timeout_complete":
-                if data.get("_auto_accepted"):
-                    return f"[bold cyan]{'AUTO':<8}[/]", message
-                # Already answered manually or origin mismatch — suppress
-                return None, None
-            elif ntype == "permission_prompt":
-                iterm_sid = self._iterm_sid_from_event(data)
-                if (
-                    iterm_sid
-                    and iterm_sid != _self_session_id
-                    and not self.is_pane_paused(iterm_sid)
-                ):
-                    # Don't show APPROVED when AskUserQuestion timeout is pending
-                    panel = self._resolve_panel(data)
-                    pending = getattr(panel, "_pending_timeout", None) if panel else None
-                    if pending and pending > time.time():
-                        return None, None
-                    return f"[bold green]{'APPROVED':<8}[/]", message
-            return f"[bold cyan]{'NOTIFY':<8}[/]", self._oneline(message, 80)
-
-        elif event_name == "SubagentStart":
-            agent_id = data.get("agent_id", "?")
-            agent_type = data.get("agent_type", "?")
-            return f"[bold magenta]{'AGENT+':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
-
-        elif event_name == "SubagentStop":
-            agent_id = data.get("agent_id", "?")
-            agent_type = data.get("agent_type", "?")
-            return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
-
-        return None, None
+        """Format a hook event into display text. Delegates to shared formatter."""
+        return _format_event_shared(
+            data,
+            event_name,
+            is_pane_paused=self.is_pane_paused,
+            get_panel=self._resolve_panel,
+            oneline=self._oneline,
+            self_sid=_self_session_id,
+        )
 
     # ------------------------------------------------------------------
     # Auto-approve via iTerm2 keystroke
@@ -950,6 +883,9 @@ class AutoAcceptTUI(MonitorApp):
         self._save_state()
         self._update_all_panel_modes()
         self._update_status_bar()
+        # Refresh the affected panel's status bar immediately
+        if iterm_sid in self.panels:
+            self.panels[iterm_sid]._update_status()
 
     # ------------------------------------------------------------------
     # Settings (override to handle iTerm scope changes)

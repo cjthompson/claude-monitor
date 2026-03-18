@@ -1,3 +1,21 @@
 #!/usr/bin/env bash
-cd "$(dirname "$0")"
-exec .venv/bin/claude-monitor "$@"
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+ENTRY="$REPO_ROOT/.venv/bin/claude-monitor"
+
+if [ ! -x "$ENTRY" ]; then
+    echo "Error: $ENTRY not found."
+    echo ""
+    read -p "Run install script to set up the environment? [y/N] " answer
+    if [[ "$answer" =~ ^[Yy] ]]; then
+        python3 "$REPO_ROOT/install.py"
+        if [ ! -x "$ENTRY" ]; then
+            echo "Install completed but entry point still missing. Try: cd $REPO_ROOT && .venv/bin/pip install -e ."
+            exit 1
+        fi
+    else
+        echo "Run: cd $REPO_ROOT && python3 install.py"
+        exit 1
+    fi
+fi
+
+exec "$ENTRY" "$@"

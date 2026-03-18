@@ -230,6 +230,9 @@ class MonitorApp(App):
             n_paused = sum(
                 1 for sid in self.panels if self.is_pane_paused(sid)
             )
+            n_ask_paused = sum(
+                1 for sid in self.panels if self.is_ask_paused(sid)
+            )
             if self.paused:
                 mode_text = "[bold]MANUAL[/]"
                 bar.set_classes("paused")
@@ -247,6 +250,8 @@ class MonitorApp(App):
                 usage_mode = "paused"
 
             left_parts = [mode_text]
+            if n_ask_paused > 0:
+                left_parts.append(f"[bold cyan]? PAUSED[/] [dim]({n_ask_paused})[/]")
             if self._last_usage_data:
                 bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
                 left_parts.append(
