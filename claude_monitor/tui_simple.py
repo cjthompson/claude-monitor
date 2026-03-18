@@ -656,9 +656,23 @@ class SimpleTUI(MonitorApp):
                 tc.active = tab_pane_id
                 self.dashboard = new_dash
                 self._dashboard_tab_pane_id = tab_pane_id
+                # Replay event log into the newly mounted RichLog
+                if new_dash._event_log:
+                    try:
+                        from textual.widgets import RichLog
+                        rl = new_dash.query_one(RichLog)
+                        for line in new_dash._event_log:
+                            rl.write(line)
+                    except Exception:
+                        log.debug("action_toggle_dashboard_tab: failed to replay event log into tab dashboard")
             else:
                 # Tab mode → restore bottom panel
                 self._dashboard_in_tab = False
+
+                # Capture log from tab dashboard before removing the pane
+                tab_event_log: list[str] = []
+                if self.dashboard and self.dashboard._event_log:
+                    tab_event_log = list(self.dashboard._event_log)
 
                 # Remove the dashboard tab
                 if self._dashboard_tab_pane_id:
@@ -670,6 +684,18 @@ class SimpleTUI(MonitorApp):
                 dash_area = self.query_one("#dashboard-area")
                 dash_area.remove_class("hidden")
                 self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
+
+                # Transfer log from tab dashboard and replay into pane dashboard's RichLog
+                if tab_event_log:
+                    self.dashboard._event_log = tab_event_log
+                    try:
+                        from textual.widgets import RichLog
+                        rl = self.dashboard.query_one(RichLog)
+                        rl.clear()
+                        for line in tab_event_log:
+                            rl.write(line)
+                    except Exception:
+                        log.debug("action_toggle_dashboard_tab: failed to replay event log into pane dashboard")
 
                 # Apply current height and arrow
                 self._apply_dashboard_height()

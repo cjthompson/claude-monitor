@@ -1,6 +1,6 @@
 [project]
 name = "claude-monitor"
-version = "1.0.29"
+version = "1.0.30"
 description = "Monitor and auto-accept Claude Code permission prompts"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,6 +28,9 @@ addopts = "--cov=claude_monitor --cov-report=term-missing"
 omit = [
     "tests/*",
     ".venv/*",
+    "claude_monitor/iterm2_layout.py",
+    "claude_monitor/tui.py",
+    "install.py",
 ]
 
 [project.scripts]
