@@ -297,6 +297,7 @@ async def _broadcast_state(state: dict) -> None:
 
 async def _broadcast(message: str) -> None:
     """Send message to all connected clients; discard dead connections on error."""
+    global _clients
     dead: set = set()
     for client in _clients.copy():
         try:
