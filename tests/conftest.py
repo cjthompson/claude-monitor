@@ -54,13 +54,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_mod, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(settings_mod, "CONFIG_FILE", config_file)
 
-    import claude_monitor.api as api_mod
-    monkeypatch.setattr(api_mod, "API_PORT_FILE", api_port_file)
-
-    # Prevent tests from binding to the production port (17233).
-    # Use port 0 so the OS picks a free port if serve_api runs.
-    monkeypatch.setattr(api_mod, "API_PORT", 0)
-
+    # Patch web module (the new unified HTTP+WebSocket server)
     import claude_monitor.web as web_mod
     monkeypatch.setattr(web_mod, "EVENTS_FILE", events_file)
     monkeypatch.setattr(web_mod, "STATE_FILE", state_file)

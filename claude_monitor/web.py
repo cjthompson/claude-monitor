@@ -21,7 +21,6 @@ from claude_monitor.api import (
     AppStateProtocol,
     generate_health_response,
     generate_screenshot_png,
-    generate_screenshot_svg,
 )
 from claude_monitor.settings import load_settings
 
