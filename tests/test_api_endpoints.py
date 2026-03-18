@@ -145,3 +145,67 @@ class TestAPIEndpoints:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(f"http://127.0.0.1:{port}/nonexistent")
             assert resp.status_code == 404
+
+
+class TestAPIHelpers:
+    """Unit tests for standalone helper functions extracted from MonitorHTTPHandler.
+
+    These tests are intentionally written before the helpers exist (TDD).
+    They will fail with ImportError until generate_health_response,
+    app_state_snapshot, generate_screenshot_svg, and generate_screenshot_png
+    are extracted as module-level functions in claude_monitor/api.py.
+    """
+
+    def test_generate_health_response_imports(self):
+        from claude_monitor.api import generate_health_response  # noqa: F401
+
+    def test_generate_health_response_structure(self):
+        from claude_monitor.api import generate_health_response
+
+        result = generate_health_response(start_time=1000.0, now=1060.0)
+        assert isinstance(result, dict)
+        assert result["status"] == "ok"
+        assert "version" in result
+        assert result["uptime"] == 60
+
+    def test_generate_health_response_zero_uptime_when_no_start(self):
+        from claude_monitor.api import generate_health_response
+
+        result = generate_health_response(start_time=None, now=1000.0)
+        assert result["uptime"] == 0
+
+    def test_app_state_snapshot_imports(self):
+        from claude_monitor.api import app_state_snapshot  # noqa: F401
+
+    def test_app_state_snapshot_shape(self):
+        from claude_monitor.api import app_state_snapshot
+
+        class FakeApp:
+            def get_state_snapshot(self):
+                return {"global_mode": "auto", "sessions": []}
+
+            def call_from_thread(self, fn):
+                return fn()
+
+        result = app_state_snapshot(app=FakeApp(), start_time=1000.0, now=1010.0)
+        assert isinstance(result, dict)
+        assert "global_mode" in result
+        assert "sessions" in result
+        assert "uptime" in result
+        assert result["uptime"] == 10
+
+    def test_generate_screenshot_svg_imports(self):
+        from claude_monitor.api import generate_screenshot_svg  # noqa: F401
+
+    def test_generate_screenshot_svg_callable(self):
+        from claude_monitor.api import generate_screenshot_svg
+
+        assert callable(generate_screenshot_svg)
+
+    def test_generate_screenshot_png_imports(self):
+        from claude_monitor.api import generate_screenshot_png  # noqa: F401
+
+    def test_generate_screenshot_png_callable(self):
+        from claude_monitor.api import generate_screenshot_png
+
+        assert callable(generate_screenshot_png)
