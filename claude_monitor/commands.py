@@ -7,17 +7,15 @@ class MonitorCommands(Provider):
     """Command palette provider exposing all TUI actions."""
 
     COMMANDS_LIST = [
-        ("Toggle Auto/Manual (global)", "toggle_pause"),
-        ("Show Choices Log", "show_choices"),
-        ("Show Questions Log", "show_questions"),
-        ("Refresh Layout", "refresh_layout"),
-        ("Open Settings", "open_settings"),
-        ("Show Help", "show_help"),
-        ("Dashboard: Grow", "grow_dashboard"),
-        ("Dashboard: Shrink", "shrink_dashboard"),
         ("Next Tab", "next_tab"),
+        ("Open Settings", "open_settings"),
         ("Previous Tab", "prev_tab"),
         ("Quit", "quit"),
+        ("Refresh Layout", "refresh_layout"),
+        ("Show Choices Log", "show_choices"),
+        ("Show Help", "show_help"),
+        ("Show Questions Log", "show_questions"),
+        ("Toggle Auto/Manual (global)", "toggle_pause"),
     ]
 
     async def startup(self) -> None:
