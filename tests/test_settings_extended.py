@@ -143,3 +143,22 @@ class TestWidgetId:
 
     def test_no_underscores(self):
         assert _widget_id("theme") == "field-theme"
+
+
+class TestWebLanAccess:
+    def test_default_is_false(self):
+        s = Settings()
+        assert s.web_lan_access is False
+
+    def test_persistence(self, isolated_state):
+        s = Settings(web_lan_access=True)
+        save_settings(s)
+        loaded = load_settings()
+        assert loaded.web_lan_access is True
+
+    def test_persistence_false(self, isolated_state):
+        s = Settings(web_lan_access=False)
+        save_settings(s)
+        with open(isolated_state["config_file"]) as f:
+            data = json.load(f)
+        assert data["web_lan_access"] is False
