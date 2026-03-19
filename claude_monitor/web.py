@@ -61,7 +61,7 @@ async def _handle_http(connection: Any, request: Request) -> Response | None:
     if path == "/ws":
         return None
 
-    if path in ("/health", "/"):
+    if path == "/health":
         body = json.dumps(generate_health_response(_start_time, time.time())).encode()
         return _make_response(200, "OK", "application/json", body)
 
@@ -98,7 +98,7 @@ async def _handle_http(connection: Any, request: Request) -> Response | None:
             log.error(f"screenshot failed: {e}")
             return _error_response(503, str(e))
 
-    if path == "/web":
+    if path in ("/", "/web"):
         html_path = _STATIC_DIR / "index.html"
         if html_path.exists():
             body = html_path.read_bytes()
@@ -171,16 +171,18 @@ async def _handle_ws(websocket: websockets.ServerConnection) -> None:
     _clients.add(websocket)
     log.debug(f"WS connected ({len(_clients)} clients)")
     try:
-        # Send initial burst of recent events; get file position for tail
-        tail_start_pos = await _send_initial_burst(websocket)
-
-        # Send current TUI state snapshot
+        # Send current TUI state snapshot first so the client has session context
         if _app:
             try:
                 snapshot = _app.call_from_thread(_app.get_state_snapshot)
+                snapshot["uptime"] = int(time.time() - _start_time) if _start_time else 0
+                snapshot["version"] = __version__
                 await websocket.send(json.dumps({"type": "snapshot", "data": snapshot}))
             except Exception as e:
                 log.debug(f"snapshot send failed: {e}")
+
+        # Then send initial burst of recent events to populate logs
+        tail_start_pos = await _send_initial_burst(websocket)
 
         # Spawn tail task and receive control messages concurrently
         tail_task = asyncio.create_task(_tail_events(websocket, tail_start_pos))

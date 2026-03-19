@@ -449,7 +449,20 @@ class MonitorApp(App):
         Path(EVENTS_FILE).touch(exist_ok=True)
 
         with open(EVENTS_FILE, "r") as f:
-            f.seek(0, 2)  # seek to end — only process new events
+            # Replay recent events to restore state after restart
+            lines = f.readlines()
+            recent = lines[-50:] if len(lines) > 50 else lines
+            for line in recent:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        data["_replay"] = True
+                        self.post_message(HookEvent(data))
+                    except json.JSONDecodeError:
+                        pass
+
+            # Now tail for new events from current position
             while not self._stop_event.is_set():
                 line = f.readline()
                 if line:

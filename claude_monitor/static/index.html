@@ -151,6 +151,8 @@
             overflow-y: auto;
             flex: 1;
             padding: 20px;
+            display: flex;
+            flex-direction: column;
         }
 
         .stats-row {
@@ -159,6 +161,7 @@
             gap: 20px;
             margin-bottom: 30px;
             max-width: 1200px;
+            flex-shrink: 0;
         }
 
         .stat-item {
@@ -183,10 +186,16 @@
         }
 
         .sessions-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+            display: flex;
+            flex-wrap: wrap;
             gap: 15px;
-            max-width: 1400px;
+            flex: 1;
+            align-items: stretch;
+            align-content: stretch;
+        }
+
+        .sessions-grid.single-session .session-card {
+            max-width: 520px;
         }
 
         .session-card {
@@ -196,7 +205,13 @@
             border-radius: 4px;
             padding: 15px;
             animation: slideIn 0.3s ease-out backwards;
+            flex: 1 1 380px;
+            min-width: 0;
+            max-width: 700px;
+            display: flex;
+            flex-direction: column;
         }
+
 
         .session-card:hover {
             background-color: var(--bg-card-hover);
@@ -265,11 +280,11 @@
         }
 
         .event-log {
-            max-height: 200px;
             overflow-y: auto;
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.75rem;
             min-height: 40px;
+            flex: 1;
         }
 
         .event-line {
@@ -413,8 +428,9 @@
         }
 
         @media (max-width: 768px) {
-            .sessions-grid {
-                grid-template-columns: 1fr;
+            .sessions-grid .session-card {
+                flex: 1 1 100%;
+                max-width: none;
             }
 
             .stats-row {
@@ -534,7 +550,7 @@
                 const response = await fetch('/text');
                 if (response.ok) {
                     const data = await response.json();
-                    state = data;
+                    state = normalizeState(data);
                     updateUI();
                     connectWebSocket();
                 } else {
@@ -563,8 +579,7 @@
                     const msg = JSON.parse(event.data);
 
                     if (msg.type === 'snapshot') {
-                        state = msg.data;
-                        sessionLogs = {};
+                        state = normalizeState(msg.data);
                         updateUI();
                     } else if (msg.type === 'event') {
                         const evt = msg.data;
@@ -607,11 +622,39 @@
             }
         }
 
+        function normalizeState(data) {
+            // Normalize snapshot format to match what updateUI expects
+            const s = Object.assign({}, data);
+
+            // Usage: snapshot has {five_hour: {utilization}, seven_day: {utilization}}
+            // UI expects {hourly, daily} as percentages
+            if (s.usage && s.usage.five_hour && !('hourly' in s.usage)) {
+                s.usage = {
+                    hourly: Math.round(s.usage.five_hour.utilization || 0),
+                    daily: Math.round(s.usage.seven_day?.utilization || 0),
+                    five_hour: s.usage.five_hour,
+                    seven_day: s.usage.seven_day
+                };
+            }
+
+            // Stats: snapshot has dashboard.total_accepted, UI expects allowed_count
+            if (s.dashboard && !('allowed_count' in s)) {
+                s.allowed_count = s.dashboard.total_accepted || 0;
+            }
+
+            // Global mode: snapshot has global_mode, UI checks global_paused
+            if ('global_mode' in s && !('global_paused' in s)) {
+                s.global_paused = s.global_mode === 'manual';
+            }
+
+            return s;
+        }
+
         function updateUI() {
             document.getElementById('version').textContent = 'v' + (state.version || '—');
             document.getElementById('sessionCount').textContent = String(state.sessions?.length || 0);
-            document.getElementById('agentCount').textContent = String(state.sessions?.reduce((sum, s) => sum + (s.agent_count || 0), 0) || 0);
-            document.getElementById('allowedCount').textContent = String(state.allowed_count || 0);
+            document.getElementById('agentCount').textContent = String(state.sessions?.reduce((sum, s) => sum + (s.active_agents || s.agent_count || 0), 0) || 0);
+            document.getElementById('allowedCount').textContent = String(state.allowed_count || state.dashboard?.total_accepted || 0);
             document.getElementById('uptime').textContent = formatUptime(state.uptime || 0);
 
             const hourlyUsage = state.usage?.hourly || 0;
@@ -642,6 +685,16 @@
                 return;
             }
 
+            // Remove empty-state placeholder if present
+            const emptyState = grid.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+
+            // Adapt layout based on session count
+            grid.classList.toggle('single-session', state.sessions.length === 1);
+
+            // Detect single-row after DOM update (cards not yet wrapping)
+            requestAnimationFrame(() => updateGridLayout());
+
             const sessionIds = state.sessions.map((_, i) => i);
             const existingIds = new Set(Array.from(grid.children).filter(el => el.id && el.id.startsWith('session-')).map(el => parseInt(el.id.split('-')[1])));
             const newIds = new Set(sessionIds);
@@ -666,6 +719,21 @@
             });
         }
 
+        function updateGridLayout() {
+            const grid = document.getElementById('sessionsGrid');
+            const cards = grid.querySelectorAll('.session-card');
+            if (cards.length <= 1) {
+                grid.classList.add('single-row');
+                return;
+            }
+            // Check if all cards share the same top offset (single row)
+            const firstTop = cards[0].offsetTop;
+            const isSingleRow = Array.from(cards).every(c => c.offsetTop === firstTop);
+            grid.classList.toggle('single-row', isSingleRow);
+        }
+
+        window.addEventListener('resize', updateGridLayout);
+
         function updateSessionCard(idOrIndex) {
             let idx;
             if (typeof idOrIndex === 'number') {
@@ -680,10 +748,10 @@
             const card = document.getElementById('session-' + idx);
             if (!card) return;
 
-            const isPaused = (state.paused_sessions && state.paused_sessions.includes(session._iterm_session_id)) || (state.paused_claude_sessions && state.paused_claude_sessions.includes(session.id));
+            const isPaused = (state.paused_sessions && state.paused_sessions.includes(session._iterm_session_id)) || (state.paused_claude_sessions && state.paused_claude_sessions.includes(session.id)) || session.mode === 'manual';
             const mode = isPaused ? 'MANUAL' : 'AUTO';
-            const isActive = session.active !== false;
-            const agentCount = session.agent_count || 0;
+            const isActive = session.state ? session.state === 'active' : session.active !== false;
+            const agentCount = session.active_agents || session.agent_count || 0;
 
             const logs = sessionLogs[session.id || session._iterm_session_id] || [];
 
@@ -696,7 +764,7 @@
             header.className = 'session-header';
             const name = document.createElement('div');
             name.className = 'session-name';
-            name.textContent = session.cwd || 'Unknown';
+            name.textContent = session.title || session.cwd || 'Unknown';
             header.appendChild(name);
             card.appendChild(header);
 
@@ -722,7 +790,7 @@
 
             const eventLog = document.createElement('div');
             eventLog.className = 'event-log';
-            logs.slice(-10).forEach(evt => {
+            logs.slice(-50).forEach(evt => {
                 eventLog.appendChild(createEventElement(evt));
             });
             card.appendChild(eventLog);
@@ -737,17 +805,33 @@
         }
 
         function createEventElement(evt) {
-            const time = evt.timestamp ? new Date(evt.timestamp * 1000).toLocaleTimeString() : '—:—:—';
-            let badgeClass = 'badge-idle';
+            const ts = evt.timestamp || evt._timestamp;
+            const time = ts ? new Date(ts * 1000).toLocaleTimeString() : '—:—:—';
+
+            // Derive event type from raw hook data or pre-formatted data
             let label = evt.event_type || '?';
+            if (label === '?') {
+                if (evt.hook_event_name === 'PermissionRequest') {
+                    label = (evt._decision || 'allowed').toUpperCase();
+                } else if (evt.hook_event_name === 'Notification') {
+                    label = 'NOTIFY';
+                } else if (evt.hook_event_name === 'SubagentStart') {
+                    label = 'AGENT+';
+                } else if (evt.hook_event_name === 'SubagentStop') {
+                    label = 'AGENT-';
+                } else if (evt.hook_event_name) {
+                    label = evt.hook_event_name.toUpperCase();
+                }
+            }
 
-            if (evt.event_type === 'ALLOWED') badgeClass = 'badge-allowed';
-            else if (evt.event_type === 'PAUSED') badgeClass = 'badge-paused';
-            else if (evt.event_type === 'DEFERRED') badgeClass = 'badge-deferred';
-            else if (evt.event_type === 'TIMEOUT') badgeClass = 'badge-timeout';
-            else if (evt.event_type && evt.event_type.includes('AGENT')) badgeClass = 'badge-agent';
+            let badgeClass = 'badge-idle';
+            if (label === 'ALLOWED') badgeClass = 'badge-allowed';
+            else if (label === 'PAUSED' || label === 'DEFERRED') badgeClass = 'badge-deferred';
+            else if (label === 'TIMEOUT') badgeClass = 'badge-timeout';
+            else if (label.includes('AGENT')) badgeClass = 'badge-agent';
+            else if (label === 'NOTIFY') badgeClass = 'badge-idle';
 
-            const detail = evt.detail || evt.tool_name || '—';
+            const detail = evt.detail || evt.tool_name || evt.message || '—';
 
             const line = document.createElement('div');
             line.className = 'event-line';

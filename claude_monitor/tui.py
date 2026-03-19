@@ -196,7 +196,7 @@ class AutoAcceptTUI(MonitorApp):
         Binding("c", "show_choices", "Choices", show=False),
         Binding("u", "show_questions", "Questions", show=False),
         Binding("r", "refresh_layout", "Refresh", show=False),
-        Binding("s", "open_settings", "Settings", show=False),
+        Binding("s", "open_settings", "Settings"),
         Binding("d", "toggle_dashboard", "Dashboard", show=False),
         Binding("D", "toggle_dashboard_tab", "Dashboard Tab", show=False),
         Binding("equals_sign", "grow_dashboard", "Dash+", show=False),
@@ -704,7 +704,8 @@ class AutoAcceptTUI(MonitorApp):
                         )
                     else:
                         panel.accept_count += 1
-                        self._send_approve(iterm_sid)
+                        if not data.get("_replay"):
+                            self._send_approve(iterm_sid)
 
         elif event_name == "PostToolUse":
             # Clear pending timeout when AskUserQuestion completes (user answered manually)
