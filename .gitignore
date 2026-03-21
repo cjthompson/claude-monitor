@@ -9,3 +9,5 @@ build/
 .idea/
 .claude/settings.local.json
 .superpowers/
+.coverage
+.playwright-mcp
