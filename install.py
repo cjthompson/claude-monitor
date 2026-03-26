@@ -35,6 +35,12 @@ HOOKS_CONFIG = {
     "SubagentStop": [
         {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
     ],
+    "PostToolUse": [
+        {
+            "matcher": "AskUserQuestion",
+            "hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}],
+        }
+    ],
 }
 
 
@@ -43,29 +49,65 @@ def run(cmd, **kwargs):
     subprocess.check_call(cmd, **kwargs)
 
 
+def has_uv():
+    """Check if uv is available on PATH."""
+    import shutil as _shutil
+
+    return _shutil.which("uv") is not None
+
+
 def setup_venv():
     venv_python = VENV_DIR / "bin" / "python"
-    # Recreate venv if missing or broken (e.g. Python was upgraded)
-    if VENV_DIR.exists():
-        try:
-            subprocess.check_call(
-                [str(venv_python), "-c", "import pip"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            print(f"venv already exists at {VENV_DIR}")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print(f"venv at {VENV_DIR} is broken, recreating ...")
+
+    if has_uv():
+        # uv handles venv creation and editable installs reliably
+        if not VENV_DIR.exists():
+            print(f"Creating venv at {VENV_DIR} (using uv) ...")
+            run(["uv", "venv", str(VENV_DIR), "--python", ">=3.12"])
+        elif not venv_python.exists():
+            print(f"venv at {VENV_DIR} is broken, recreating (using uv) ...")
             import shutil
 
             shutil.rmtree(VENV_DIR)
-            run([sys.executable, "-m", "venv", str(VENV_DIR)])
-    else:
-        print(f"Creating venv at {VENV_DIR} ...")
-        run([sys.executable, "-m", "venv", str(VENV_DIR)])
+            run(["uv", "venv", str(VENV_DIR), "--python", ">=3.12"])
+        else:
+            print(f"venv already exists at {VENV_DIR}")
 
-    print("Installing claude-monitor in editable mode ...")
-    run([str(venv_python), "-m", "pip", "install", "-e", str(REPO_DIR)])
+        print("Installing claude-monitor in editable mode (using uv) ...")
+        run(["uv", "pip", "install", "-e", str(REPO_DIR), "--python", str(venv_python)])
+    else:
+        # Fallback to pip — requires Python 3.12+
+        if sys.version_info < (3, 12):
+            print(f"Error: Python {sys.version_info.major}.{sys.version_info.minor} detected, but 3.12+ is required.")
+            print()
+            print("Install uv (recommended) and re-run — it will fetch the right Python automatically:")
+            print("  Install with Homebrew:  brew install uv")
+            print("  Or install from shell:  curl -LsSf https://astral.sh/uv/install.sh | sh")
+            print()
+            print("Or install Python 3.12+ manually and re-run with:")
+            print("  python3.12 install.py")
+            sys.exit(1)
+
+        if VENV_DIR.exists():
+            try:
+                subprocess.check_call(
+                    [str(venv_python), "-c", "import pip"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                print(f"venv already exists at {VENV_DIR}")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print(f"venv at {VENV_DIR} is broken, recreating ...")
+                import shutil
+
+                shutil.rmtree(VENV_DIR)
+                run([sys.executable, "-m", "venv", str(VENV_DIR)])
+        else:
+            print(f"Creating venv at {VENV_DIR} ...")
+            run([sys.executable, "-m", "venv", str(VENV_DIR)])
+
+        print("Installing claude-monitor in editable mode ...")
+        run([str(venv_python), "-m", "pip", "install", "-e", str(REPO_DIR)])
 
     if not IS_MACOS:
         print()
@@ -96,6 +138,7 @@ def configure_hooks():
     print("  - Notification       (log idle/permission prompts)")
     print("  - SubagentStart      (track agent spawns)")
     print("  - SubagentStop       (track agent completions)")
+    print("  - PostToolUse        (capture AskUserQuestion answers)")
     print()
     print(f"Hook command: {HOOK_COMMAND}")
     print()

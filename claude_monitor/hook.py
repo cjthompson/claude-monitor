@@ -8,10 +8,25 @@ Auto-allows PermissionRequest unless paused.
 
 import json
 import os
+import socket
 import sys
 import time
 
-from claude_monitor import SIGNAL_DIR, EVENTS_FILE, extract_iterm_session_id, read_state
+from claude_monitor import SIGNAL_DIR, EVENTS_FILE, API_PORT_FILE, extract_iterm_session_id, read_state
+
+
+def _tui_is_running() -> bool:
+    """Check if the TUI is running by attempting a TCP connect to its API port."""
+    try:
+        with open(API_PORT_FILE) as f:
+            port = int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
 
 
 def decide_permission(state: dict, event: dict) -> tuple[str, int]:
@@ -67,24 +82,30 @@ def main():
 
     ask_timeout = 0
 
+    tui_running = _tui_is_running()
+
     if event_name == "PermissionRequest":
-        state = read_state()
-        decision, ask_timeout = decide_permission(state, data)
-        data["_decision"] = decision
-        if decision == "deferred":
-            tool_name = data.get("tool_name", "")
-            excluded = state.get("excluded_tools", [])
-            if tool_name and tool_name in excluded:
-                data["_excluded_tool"] = True
-        elif decision == "timeout":
-            data["_ask_timeout"] = ask_timeout
+        if not tui_running:
+            # TUI not running — don't auto-accept, let the user decide
+            data["_decision"] = "no_monitor"
+        else:
+            state = read_state()
+            decision, ask_timeout = decide_permission(state, data)
+            data["_decision"] = decision
+            if decision == "deferred":
+                tool_name = data.get("tool_name", "")
+                excluded = state.get("excluded_tools", [])
+                if tool_name and tool_name in excluded:
+                    data["_excluded_tool"] = True
+            elif decision == "timeout":
+                data["_ask_timeout"] = ask_timeout
 
     # Log the event
     with open(EVENTS_FILE, "a") as f:
         f.write(json.dumps(data) + "\n")
 
-    # Only auto-allow for PermissionRequest when not paused
-    if event_name != "PermissionRequest" or data.get("_decision") == "deferred":
+    # Only auto-allow for PermissionRequest when monitor is running and not paused
+    if event_name != "PermissionRequest" or data.get("_decision") in ("deferred", "no_monitor"):
         return
 
     # AskUserQuestion with timeout: sleep then auto-allow
