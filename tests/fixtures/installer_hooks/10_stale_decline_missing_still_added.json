@@ -1,0 +1,30 @@
+{
+  "description": "PermissionRequest has stale hook (user declines replace), four others absent — stale left alone, missing ones still added",
+  "initial_settings": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 300}]}
+      ]
+    }
+  },
+  "user_inputs": ["y", "n"],
+  "expected": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 300}]}
+      ],
+      "Notification": [
+        {"matcher": "permission_prompt|idle_prompt", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStart": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStop": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PostToolUse": [
+        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ]
+    }
+  }
+}

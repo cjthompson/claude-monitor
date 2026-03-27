@@ -1,0 +1,31 @@
+{
+  "description": "Notification already has a hook with a different matcher — our group (different matcher) is added as a separate entry, not merged",
+  "initial_settings": {
+    "hooks": {
+      "Notification": [
+        {"matcher": "some_other_event", "hooks": [{"type": "command", "command": "/other/tool", "timeout": 10}]}
+      ]
+    }
+  },
+  "user_inputs": ["y"],
+  "expected": {
+    "hooks": {
+      "Notification": [
+        {"matcher": "some_other_event", "hooks": [{"type": "command", "command": "/other/tool", "timeout": 10}]},
+        {"matcher": "permission_prompt|idle_prompt", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 300}]}
+      ],
+      "SubagentStart": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStop": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PostToolUse": [
+        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ]
+    }
+  }
+}

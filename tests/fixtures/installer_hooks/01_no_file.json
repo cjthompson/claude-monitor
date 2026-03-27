@@ -1,0 +1,24 @@
+{
+  "description": "No settings file exists — creates the file with all five event types",
+  "initial_settings": null,
+  "user_inputs": ["y"],
+  "expected": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 300}]}
+      ],
+      "Notification": [
+        {"matcher": "permission_prompt|idle_prompt", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStart": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStop": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PostToolUse": [
+        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ]
+    }
+  }
+}

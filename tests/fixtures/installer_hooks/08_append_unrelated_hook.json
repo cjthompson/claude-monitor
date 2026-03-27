@@ -1,0 +1,33 @@
+{
+  "description": "PermissionRequest already has an unrelated hook (no matcher) — claude-monitor hook merged into the same group since both have no matcher",
+  "initial_settings": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/some/other/tool", "timeout": 10}]}
+      ]
+    }
+  },
+  "user_inputs": ["y"],
+  "expected": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [
+          {"type": "command", "command": "/some/other/tool", "timeout": 10},
+          {"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 300}
+        ]}
+      ],
+      "Notification": [
+        {"matcher": "permission_prompt|idle_prompt", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStart": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStop": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PostToolUse": [
+        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ]
+    }
+  }
+}

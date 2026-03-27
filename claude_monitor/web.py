@@ -171,7 +171,10 @@ async def _handle_ws(websocket: websockets.ServerConnection) -> None:
     _clients.add(websocket)
     log.debug(f"WS connected ({len(_clients)} clients)")
     try:
-        # Send current TUI state snapshot first so the client has session context
+        # Send initial burst of recent events first, then snapshot so clients
+        # can use the snapshot as a "history complete" marker
+        tail_start_pos = await _send_initial_burst(websocket)
+
         if _app:
             try:
                 snapshot = _app.call_from_thread(_app.get_state_snapshot)
@@ -180,9 +183,6 @@ async def _handle_ws(websocket: websockets.ServerConnection) -> None:
                 await websocket.send(json.dumps({"type": "snapshot", "data": snapshot}))
             except Exception as e:
                 log.debug(f"snapshot send failed: {e}")
-
-        # Then send initial burst of recent events to populate logs
-        tail_start_pos = await _send_initial_burst(websocket)
 
         # Spawn tail task and receive control messages concurrently
         tail_task = asyncio.create_task(_tail_events(websocket, tail_start_pos))

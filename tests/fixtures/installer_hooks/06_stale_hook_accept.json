@@ -1,0 +1,42 @@
+{
+  "description": "All events have claude-monitor-hook at an old path — user accepts replacement — all commands updated to new path",
+  "initial_settings": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 300}]}
+      ],
+      "Notification": [
+        {"matcher": "permission_prompt|idle_prompt", "hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStart": [
+        {"hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStop": [
+        {"hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PostToolUse": [
+        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "/old/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ]
+    }
+  },
+  "user_inputs": ["y", "y"],
+  "expected": {
+    "hooks": {
+      "PermissionRequest": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 300}]}
+      ],
+      "Notification": [
+        {"matcher": "permission_prompt|idle_prompt", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStart": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "SubagentStop": [
+        {"hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ],
+      "PostToolUse": [
+        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "/new/venv/bin/claude-monitor-hook", "timeout": 5}]}
+      ]
+    }
+  }
+}

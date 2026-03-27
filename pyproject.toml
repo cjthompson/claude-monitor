@@ -23,7 +23,7 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 timeout = 15
-addopts = "--cov=claude_monitor --cov-report=term-missing"
+addopts = "--cov=claude_monitor --cov=install --cov-report=term-missing"
 
 [tool.coverage.run]
 omit = [
@@ -31,7 +31,6 @@ omit = [
     ".venv/*",
     "claude_monitor/iterm2_layout.py",
     "claude_monitor/tui.py",
-    "install.py",
 ]
 
 [project.scripts]
