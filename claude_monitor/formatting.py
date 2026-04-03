@@ -190,4 +190,35 @@ def format_event(
         agent_type = data.get("agent_type", "?")
         return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
 
+    elif event_name == "SessionStart":
+        return f"[bold green]{'SESSION+':<8}[/]", f"{_ag}session started"
+
+    elif event_name == "SessionEnd":
+        return f"[dim]{'SESSION-':<8}[/]", f"{_ag}session ended"
+
+    elif event_name == "StopFailure":
+        error = data.get("error", {})
+        if isinstance(error, dict):
+            msg = error.get("message", "API error")
+        else:
+            msg = str(error) if error else "API error"
+        return f"[bold red]{'FAIL':<8}[/]", f"{_ag}{oneline(msg, 80)}"
+
+    elif event_name == "PermissionDenied":
+        tool = data.get("tool_name", "?")
+        reason = data.get("reason", "")
+        detail = f"{tool}  [dim]{reason}[/]" if reason else tool
+        return f"[bold red]{'DENIED':<8}[/]", f"{_ag}{detail}"
+
+    elif event_name == "PostCompact":
+        return f"[dim]{'COMPACT':<8}[/]", f"{_ag}context compacted"
+
+    elif event_name == "TaskCreated":
+        subject = data.get("subject") or data.get("description") or "?"
+        return f"[bold blue]{'TASK+':<8}[/]", f"{_ag}{oneline(subject, 80)}"
+
+    elif event_name == "CwdChanged":
+        cwd = data.get("cwd") or data.get("new_cwd") or "?"
+        return f"[dim]{'CWD':<8}[/]", f"{_ag}{cwd}"
+
     return None, None

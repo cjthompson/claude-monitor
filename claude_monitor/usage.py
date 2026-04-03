@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from claude_monitor import fmt_duration
+from claude_monitor import fmt_duration, RATE_LIMITS_CACHE_FILE
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,8 @@ class UsageData:
 
 
 def _parse_window(w: dict) -> WindowUsage:
-    util = w.get("utilization", 0)
+    # API uses "utilization"; statusline cache uses "used_percentage" (CC 2.1.80+)
+    util = w.get("utilization") if w.get("utilization") is not None else w.get("used_percentage", 0)
     if isinstance(util, str):
         util = float(util)
     elif util is None:
@@ -206,6 +207,15 @@ def _load_disk_cache() -> dict:
     """Load usage cache from disk. Returns empty dict if missing/corrupt."""
     try:
         with open(USAGE_CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _load_rate_limits_cache() -> dict:
+    """Load rate-limits cache written by the statusline handler. Returns empty dict if missing/corrupt."""
+    try:
+        with open(RATE_LIMITS_CACHE_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
@@ -575,6 +585,17 @@ class UsageManager:
         now = time.time()
         if self._usage_cache and (now - self._usage_cache.get("fetched_at", 0)) < USAGE_MAX_AGE:
             return self._usage_cache.get("data")
+
+        # Check rate-limits cache (pushed by statusline handler — more current than API)
+        if not self._usage_cache:
+            rl = _load_rate_limits_cache()
+            if rl:
+                result = _usage_from_disk(rl)
+                if result:
+                    data, fetched_at = result
+                    if (now - fetched_at) < USAGE_MAX_AGE:
+                        self._usage_cache = {"data": data, "fetched_at": fetched_at}
+                        return data
 
         # Check disk cache before hitting the API
         if not self._usage_cache:

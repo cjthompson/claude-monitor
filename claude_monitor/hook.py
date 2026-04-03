@@ -135,5 +135,46 @@ def main():
     )
 
 
+def statusline_main():
+    """Entry point called by Claude Code as a statusLine script.
+
+    Reads JSON from stdin (which includes ``rate_limits`` from CC 2.1.80+),
+    writes a cache file for the TUI, and outputs a compact usage summary.
+    """
+    import sys
+
+    from claude_monitor import SIGNAL_DIR, RATE_LIMITS_CACHE_FILE
+
+    try:
+        data = json.load(sys.stdin)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    rate_limits = data.get("rate_limits")
+    if not rate_limits:
+        return
+
+    os.makedirs(SIGNAL_DIR, exist_ok=True)
+
+    payload = {
+        "fetched_at": time.time(),
+        "five_hour": rate_limits.get("five_hour", {}),
+        "seven_day": rate_limits.get("seven_day", {}),
+    }
+
+    try:
+        with open(RATE_LIMITS_CACHE_FILE, "w") as f:
+            json.dump(payload, f)
+    except OSError:
+        pass
+
+    # Output a compact rate-limit summary for Claude Code's status bar.
+    fh = rate_limits.get("five_hour", {})
+    sd = rate_limits.get("seven_day", {})
+    fh_pct = fh.get("used_percentage", 0) or 0
+    sd_pct = sd.get("used_percentage", 0) or 0
+    print(f"5h:{fh_pct:.0f}% 7d:{sd_pct:.0f}%", end="")
+
+
 if __name__ == "__main__":
     main()

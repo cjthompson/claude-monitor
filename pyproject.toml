@@ -1,6 +1,6 @@
 [project]
 name = "claude-monitor"
-version = "1.0.34"
+version = "1.0.35"
 description = "Monitor and auto-accept Claude Code permission prompts"
 requires-python = ">=3.12"
 dependencies = [
@@ -36,6 +36,7 @@ omit = [
 [project.scripts]
 claude-monitor = "claude_monitor.tui:main"
 claude-monitor-hook = "claude_monitor.hook:main"
+claude-monitor-statusline = "claude_monitor.hook:statusline_main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

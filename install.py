@@ -18,6 +18,7 @@ LOCAL_BIN = Path.home() / ".local" / "bin"
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
 HOOK_COMMAND = str(VENV_DIR / "bin" / "claude-monitor-hook")
+STATUSLINE_COMMAND = str(VENV_DIR / "bin" / "claude-monitor-statusline")
 
 HOOKS_CONFIG = {
     "PermissionRequest": [
@@ -40,6 +41,29 @@ HOOKS_CONFIG = {
             "matcher": "AskUserQuestion",
             "hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}],
         }
+    ],
+    # New hooks (CC 2.1.62+)
+    "SessionStart": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
+    "SessionEnd": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
+    # New hooks (CC 2.1.70+)
+    "StopFailure": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
+    "PostCompact": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
+    "TaskCreated": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
+    "PermissionDenied": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
+    "CwdChanged": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
     ],
 }
 
@@ -119,7 +143,7 @@ def setup_venv():
 def symlink_to_path():
     print()
     LOCAL_BIN.mkdir(parents=True, exist_ok=True)
-    for name in ("claude-monitor", "claude-monitor-hook"):
+    for name in ("claude-monitor", "claude-monitor-hook", "claude-monitor-statusline"):
         src = VENV_DIR / "bin" / name
         dst = LOCAL_BIN / name
         if dst.is_symlink() or dst.exists():
@@ -261,6 +285,53 @@ def configure_hooks():
     print(f"\nHooks written to {SETTINGS_FILE}")
 
 
+def configure_statusline():
+    """Configure claude-monitor-statusline as Claude Code's statusLine provider.
+
+    Reads rate_limits data (CC 2.1.80+) from Claude Code and feeds it to the TUI.
+    NOTE: This replaces Claude Code's default status bar with a compact usage display.
+    """
+    print()
+    print("Statusline integration (optional, requires CC 2.1.80+)")
+    print("  Configures claude-monitor-statusline as Claude Code's status line provider.")
+    print("  Shows rate limit usage in Claude Code's status bar (5h/7d percentages).")
+    print("  Also feeds live rate-limit data to the TUI without polling the Anthropic API.")
+    print("  NOTE: Replaces Claude Code's default status bar display.")
+    print()
+
+    answer = input("Configure statusLine in ~/.claude/settings.json? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("Skipped.")
+        return
+
+    if SETTINGS_FILE.exists():
+        with open(SETTINGS_FILE) as f:
+            settings = json.load(f)
+    else:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        settings = {}
+
+    existing = settings.get("statusLine", "")
+    if existing == STATUSLINE_COMMAND:
+        print("  statusLine: already configured correctly, skipping")
+        return
+
+    if existing and "claude-monitor-statusline" not in existing:
+        print(f"  Existing statusLine: {existing!r}")
+        ans = input("  Overwrite? [y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("  Skipped.")
+            return
+
+    settings["statusLine"] = STATUSLINE_COMMAND
+
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+
+    print(f"  statusLine written to {SETTINGS_FILE}")
+
+
 def main():
     print("=== claude-monitor setup ===")
     print()
@@ -269,6 +340,7 @@ def main():
 
     symlink_to_path()
     configure_hooks()
+    configure_statusline()
 
     print()
     if IS_MACOS:
