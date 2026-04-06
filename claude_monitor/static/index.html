@@ -544,6 +544,60 @@
             usage: { hourly: 0, daily: 0 }
         };
         let sessionLogs = {};
+        // Maps iTerm UUID <-> Claude UUID for cross-referencing
+        let idMap = {};  // itermSid -> claudeSid and claudeSid -> itermSid
+        let pendingRender = null;  // debounce rapid event updates
+
+        function storeEvent(evt) {
+            const itermSid = evt._iterm_session_id;
+            const claudeSid = evt.session_id;
+
+            // Build bidirectional ID mapping
+            if (itermSid && claudeSid && itermSid !== claudeSid) {
+                idMap[itermSid] = claudeSid;
+                idMap[claudeSid] = itermSid;
+            }
+
+            // Find existing array for any of this session's IDs, or create one
+            const primary = itermSid || claudeSid;
+            if (!primary) return;
+
+            const arr = sessionLogs[itermSid] || sessionLogs[claudeSid] || [];
+
+            // Point all known IDs to the same shared array
+            if (itermSid) sessionLogs[itermSid] = arr;
+            if (claudeSid) sessionLogs[claudeSid] = arr;
+
+            arr.push(evt);
+            if (arr.length > 100) arr.shift();
+        }
+
+        function findSessionIndex(sid) {
+            if (!state.sessions) return -1;
+            // Direct match on session id
+            let idx = state.sessions.findIndex(s => s.id === sid);
+            if (idx >= 0) return idx;
+            // Try mapped ID (e.g. event has iTerm UUID but session.id is Claude UUID, or vice versa)
+            const mapped = idMap[sid];
+            if (mapped) {
+                idx = state.sessions.findIndex(s => s.id === mapped);
+                if (idx >= 0) return idx;
+            }
+            return -1;
+        }
+
+        function getLogsForSession(session) {
+            // Try session.id directly
+            let logs = sessionLogs[session.id];
+            if (logs && logs.length > 0) return logs;
+            // Try mapped ID
+            const mapped = idMap[session.id];
+            if (mapped) {
+                logs = sessionLogs[mapped];
+                if (logs && logs.length > 0) return logs;
+            }
+            return [];
+        }
 
         async function fetchInitialState() {
             try {
@@ -583,11 +637,19 @@
                         updateUI();
                     } else if (msg.type === 'event') {
                         const evt = msg.data;
-                        const sid = evt.session_id || evt._iterm_session_id;
-                        if (!sessionLogs[sid]) sessionLogs[sid] = [];
-                        sessionLogs[sid].push(evt);
-                        if (sessionLogs[sid].length > 100) sessionLogs[sid].shift();
-                        updateSessionCard(sid);
+                        storeEvent(evt);
+                        // Debounce rapid event updates (e.g. initial burst)
+                        const primarySid = evt._iterm_session_id || evt.session_id;
+                        if (!pendingRender) {
+                            pendingRender = new Set();
+                            requestAnimationFrame(() => {
+                                for (const sid of pendingRender) {
+                                    updateSessionCard(sid);
+                                }
+                                pendingRender = null;
+                            });
+                        }
+                        if (primarySid) pendingRender.add(primarySid);
                     } else if (msg.type === 'state') {
                         state = Object.assign(state, msg.data);
                         updateUI();
@@ -645,6 +707,18 @@
             // Global mode: snapshot has global_mode, UI checks global_paused
             if ('global_mode' in s && !('global_paused' in s)) {
                 s.global_paused = s.global_mode === 'manual';
+            }
+
+            // Build ID map from snapshot session data
+            if (s.sessions) {
+                for (const sess of s.sessions) {
+                    if (sess.claude_session_ids) {
+                        for (const csid of sess.claude_session_ids) {
+                            idMap[sess.id] = csid;
+                            idMap[csid] = sess.id;
+                        }
+                    }
+                }
             }
 
             return s;
@@ -739,7 +813,7 @@
             if (typeof idOrIndex === 'number') {
                 idx = idOrIndex;
             } else {
-                idx = state.sessions.findIndex(s => (s.id || s._iterm_session_id) === idOrIndex);
+                idx = findSessionIndex(idOrIndex);
             }
 
             if (idx < 0) return;
@@ -753,7 +827,7 @@
             const isActive = session.state ? session.state === 'active' : session.active !== false;
             const agentCount = session.active_agents || session.agent_count || 0;
 
-            const logs = sessionLogs[session.id || session._iterm_session_id] || [];
+            const logs = getLogsForSession(session);
 
             card.className = 'session-card ' + (isActive ? '' : 'idle ') + (isPaused ? 'manual' : '');
 

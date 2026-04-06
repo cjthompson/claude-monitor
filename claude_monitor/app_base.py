@@ -134,9 +134,17 @@ class MonitorApp(App):
         panels_snapshot = list(self.panels.items())
         panels_values = [p for _, p in panels_snapshot]
 
+        # Build reverse mapping: panel_id -> list of Claude session IDs
+        # _iterm_to_panel maps claude_sid -> panel_id (iTerm sid)
+        iterm_to_panel = getattr(self, "_iterm_to_panel", {})
+        panel_to_claude: dict[str, list[str]] = {}
+        for claude_sid, panel_id in iterm_to_panel.items():
+            if claude_sid != panel_id:  # skip self-mappings from fallback panels
+                panel_to_claude.setdefault(panel_id, []).append(claude_sid)
+
         sessions = []
         for sid, panel in panels_snapshot:
-            sessions.append({
+            sess_data: dict[str, object] = {
                 "id": sid,
                 "title": panel.border_title,
                 "state": panel.state,
@@ -144,7 +152,12 @@ class MonitorApp(App):
                 "active_agents": len(panel.active_agents),
                 "completed_agents": panel.total_agents_completed,
                 "accept_count": panel.accept_count,
-            })
+            }
+            # Include Claude session IDs mapped to this panel
+            claude_sids = panel_to_claude.get(sid, [])
+            if claude_sids:
+                sess_data["claude_session_ids"] = claude_sids
+            sessions.append(sess_data)
 
         dashboard_data = None
         if self.dashboard:
