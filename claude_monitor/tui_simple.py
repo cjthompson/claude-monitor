@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from textual import events
+from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -31,6 +31,7 @@ from textual.widgets._tabbed_content import ContentTab
 
 from claude_monitor import (
     SIGNAL_DIR,
+    EVENTS_FILE,
     STATE_FILE,
     LOG_FILE,
     read_state,
@@ -212,6 +213,10 @@ class SimpleTUI(MonitorApp):
         self._dashboard_height: int = max(MIN_DASHBOARD_HEIGHT, self.settings.dashboard_height)
         # Stored height to restore to after minimize (None = not minimized via toggle)
         self._stored_dashboard_height: int | None = None
+        # Sessions that ended during replay (should not be restored)
+        self._replay_closed_sessions: set[str] = set()
+        # Last event timestamp per session during replay (for stale detection)
+        self._session_last_ts: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Abstract method implementations
@@ -324,6 +329,71 @@ class SimpleTUI(MonitorApp):
                     self.call_later(self._remove_session, sid)
 
     # ------------------------------------------------------------------
+    # Background workers
+    # ------------------------------------------------------------------
+
+    @work(thread=True, exit_on_error=False)
+    def watch_events(self) -> None:
+        """Tail ``events.jsonl`` and post ``HookEvent`` messages to the app.
+
+        Pre-scans replay events to identify closed and stale sessions so they
+        are not restored on startup.
+        """
+        os.makedirs(SIGNAL_DIR, exist_ok=True)
+        Path(EVENTS_FILE).touch(exist_ok=True)
+
+        with open(EVENTS_FILE, "r") as f:
+            lines = f.readlines()
+            recent = lines[-50:] if len(lines) > 50 else lines
+
+            # Pre-scan: identify sessions with SessionEnd and track last event time
+            self._replay_closed_sessions = set()
+            self._session_last_ts = {}
+            stale_cutoff = time.time() - 86400  # 24 hours ago
+            for line in recent:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                sid = data.get("session_id", "")
+                if not sid:
+                    continue
+                ts = data.get("_timestamp", 0)
+                if ts:
+                    self._session_last_ts[sid] = ts
+                if data.get("hook_event_name") == "SessionEnd":
+                    self._replay_closed_sessions.add(sid)
+
+            # Now post events for replay
+            for line in recent:
+                line = line.strip()
+                if line:
+                    try:
+                        data = json.loads(line)
+                        data["_replay"] = True
+                        self.post_message(HookEvent(data))
+                    except json.JSONDecodeError:
+                        pass
+
+            # Tail for new events
+            while not self._stop_event.is_set():
+                line = f.readline()
+                if line:
+                    line = line.strip()
+                    if line:
+                        try:
+                            evt_data = json.loads(line)
+                            self.post_message(HookEvent(evt_data))
+                        except json.JSONDecodeError:
+                            log.debug(f"watch_events: failed to parse JSON: {line[:100]}")
+                else:
+                    self._stop_event.wait(0.2)
+        log.debug("watch_events: stopped")
+
+    # ------------------------------------------------------------------
     # Session / tab management
     # ------------------------------------------------------------------
 
@@ -344,6 +414,14 @@ class SimpleTUI(MonitorApp):
         # Already known
         if claude_sid in self.panels:
             return self.panels[claude_sid]
+
+        # During replay: skip sessions that ended or are older than 24 hours
+        if data.get("_replay"):
+            if claude_sid in self._replay_closed_sessions:
+                return None
+            last_ts = self._session_last_ts.get(claude_sid, 0)
+            if last_ts > 0 and last_ts < (time.time() - 86400):
+                return None
 
         # New session — create a tab for it
         cwd = data.get("cwd", "")
@@ -405,6 +483,10 @@ class SimpleTUI(MonitorApp):
 
         panel.touch()
         self._apply_event(panel, data, event_name)
+        # Track active timeout for status bar countdown
+        if data.get("_decision") == "timeout" and data.get("_ask_timeout"):
+            panel._pending_timeout = data["_timestamp"] + data["_ask_timeout"]
+            panel._timeout_origin = data["_timestamp"]
         label, detail = self._format_event(data, event_name)
         if label:
             panel.write(f"[{t}] {label} {detail}")
@@ -461,6 +543,10 @@ class SimpleTUI(MonitorApp):
         elif event_name == "SubagentStop":
             panel.active_agents.pop(data.get("agent_id", "?"), None)
             panel.total_agents_completed += 1
+
+        elif event_name == "SessionEnd":
+            if self.settings.tab_close_mode == "immediate" and not data.get("_replay"):
+                self.call_later(self._remove_session, panel.session_id)
 
     def _format_event(self, data: dict, event_name: str):
         """Format a hook event into display text. Delegates to shared formatter."""
