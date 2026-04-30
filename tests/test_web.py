@@ -27,13 +27,12 @@ def _get_free_port():
 async def web_server(isolated_state, monkeypatch):
     """Start web.py server on a free port with a mock app.
 
-    Patches EVENTS_FILE, STATE_FILE, and API_PORT_FILE in the web module
-    to use isolated temp-dir paths from the isolated_state fixture.
+    Patches EVENTS_FILE and STATE_FILE in the web module to use isolated
+    temp-dir paths from the isolated_state fixture.
     """
     import claude_monitor.web as web_mod
     monkeypatch.setattr(web_mod, "EVENTS_FILE", isolated_state["events_file"])
     monkeypatch.setattr(web_mod, "STATE_FILE", isolated_state["state_file"])
-    monkeypatch.setattr(web_mod, "API_PORT_FILE", isolated_state["api_port_file"])
 
     port = _get_free_port()
 

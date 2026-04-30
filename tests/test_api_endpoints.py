@@ -16,14 +16,13 @@ def _get_free_port():
 
 
 def _patch_api_port(monkeypatch, isolated_state, port):
-    """Patch start_web_server to use a specific port + isolated port file."""
+    """Patch start_web_server to use a specific port for test isolation."""
     import claude_monitor.web as web_mod
     import claude_monitor.app_base as app_base_mod
 
     original_start = web_mod.start_web_server
 
     async def patched_start(app, port=port, stop_event=None):
-        web_mod.API_PORT_FILE = isolated_state["api_port_file"]
         await original_start(app, port=port, stop_event=stop_event)
 
     monkeypatch.setattr("claude_monitor.web.start_web_server", patched_start)

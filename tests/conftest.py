@@ -20,7 +20,6 @@ def isolated_state(tmp_path, monkeypatch):
     events_file = os.path.join(signal_dir, "events.jsonl")
     state_file = os.path.join(signal_dir, "state.json")
     log_file = os.path.join(signal_dir, "tui-debug.log")
-    api_port_file = os.path.join(signal_dir, "api-port")
 
     config_dir = str(tmp_path / "config")
     config_file = os.path.join(config_dir, "config.json")
@@ -32,7 +31,6 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_monitor, "EVENTS_FILE", events_file)
     monkeypatch.setattr(claude_monitor, "STATE_FILE", state_file)
     monkeypatch.setattr(claude_monitor, "LOG_FILE", log_file)
-    monkeypatch.setattr(claude_monitor, "API_PORT_FILE", api_port_file)
 
     # Patch in every module that imports these at the top level
     import claude_monitor.tui_simple as tui_simple
@@ -44,7 +42,6 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(app_base, "SIGNAL_DIR", signal_dir)
     monkeypatch.setattr(app_base, "EVENTS_FILE", events_file)
     monkeypatch.setattr(app_base, "STATE_FILE", state_file)
-    monkeypatch.setattr(app_base, "API_PORT_FILE", api_port_file)
 
     import claude_monitor.hook as hook
     monkeypatch.setattr(hook, "SIGNAL_DIR", signal_dir)
@@ -58,14 +55,12 @@ def isolated_state(tmp_path, monkeypatch):
     import claude_monitor.web as web_mod
     monkeypatch.setattr(web_mod, "EVENTS_FILE", events_file)
     monkeypatch.setattr(web_mod, "STATE_FILE", state_file)
-    monkeypatch.setattr(web_mod, "API_PORT_FILE", api_port_file)
 
     return {
         "signal_dir": signal_dir,
         "events_file": events_file,
         "state_file": state_file,
         "log_file": log_file,
-        "api_port_file": api_port_file,
         "config_dir": config_dir,
         "config_file": config_file,
         "tmp_path": tmp_path,

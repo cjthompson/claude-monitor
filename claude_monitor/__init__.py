@@ -1,6 +1,6 @@
 """claude-monitor: shared constants and utilities."""
 
-__version__ = "1.0.35"
+__version__ = "1.0.36"
 
 import json
 import os
@@ -10,7 +10,6 @@ EVENTS_FILE = os.path.join(SIGNAL_DIR, "events.jsonl")
 STATE_FILE = os.path.join(SIGNAL_DIR, "state.json")
 LOG_FILE = os.path.join(SIGNAL_DIR, "tui-debug.log")
 API_PORT = 17233
-API_PORT_FILE = os.path.join(SIGNAL_DIR, "api-port")
 RATE_LIMITS_CACHE_FILE = os.path.join(SIGNAL_DIR, "rate-limits-cache.json")
 
 _DEFAULT_STATE = {"global_paused": False, "paused_sessions": [], "paused_claude_sessions": [], "excluded_tools": [], "ask_user_timeout": 0}

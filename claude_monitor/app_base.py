@@ -41,7 +41,6 @@ from claude_monitor import (
     EVENTS_FILE,
     STATE_FILE,
     API_PORT,
-    API_PORT_FILE,
     read_state,
 )
 from claude_monitor.messages import HookEvent
@@ -541,8 +540,4 @@ class MonitorApp(App):
             log.error(f"serve_api: failed to start: {e}")
         finally:
             loop.close()
-            try:
-                os.remove(API_PORT_FILE)
-            except OSError:
-                log.debug("serve_api: failed to remove API port file")
             log.debug("serve_api: stopped")

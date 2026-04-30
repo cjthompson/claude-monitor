@@ -12,18 +12,16 @@ import socket
 import sys
 import time
 
-from claude_monitor import SIGNAL_DIR, EVENTS_FILE, API_PORT_FILE, extract_iterm_session_id, read_state
+from claude_monitor import SIGNAL_DIR, EVENTS_FILE, API_PORT, extract_iterm_session_id, read_state
 
 
 def _tui_is_running() -> bool:
-    """Check if the TUI is running by attempting a TCP connect to its API port."""
+    """Check if the TUI is running by probing its API port.
+
+    Only one process can hold the port, so a successful connect is proof of life.
+    """
     try:
-        with open(API_PORT_FILE) as f:
-            port = int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return False
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+        with socket.create_connection(("127.0.0.1", API_PORT), timeout=0.1):
             return True
     except OSError:
         return False
