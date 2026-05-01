@@ -171,10 +171,16 @@ def app_fixture(isolated_state, monkeypatch):
     monkeypatch.setattr("claude_monitor.app_base.MonitorApp.serve_api", lambda self: None)
     monkeypatch.setattr("claude_monitor.app_base.MonitorApp.watch_events", lambda self: None)
     monkeypatch.setattr("claude_monitor.app_base.MonitorApp.poll_usage", lambda self: None)
+    # SimpleTUI overrides watch_events with its own @work(thread=True) method, so
+    # patching MonitorApp.watch_events alone is not enough — Python MRO finds
+    # SimpleTUI.watch_events first. Without this patch, the thread starts, ignores
+    # the MonitorApp patch, and blocks pytest from exiting if _stop_event is never set.
+    monkeypatch.setattr("claude_monitor.tui_simple.SimpleTUI.watch_events", lambda self: None)
 
     from claude_monitor.tui_simple import SimpleTUI
     app = SimpleTUI()
     yield app
+    app._stop_event.set()  # safety net: unblock any thread that slipped through
 
 
 @pytest.fixture

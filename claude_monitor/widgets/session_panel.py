@@ -108,6 +108,7 @@ class SessionPanel(Static):
         self._event_log: list[str] = []  # stored for replay after rebuild
         self._pending_timeout: float | None = None  # epoch when timeout expires
         self._timeout_origin: float | None = None  # origin timestamp of the timeout event
+        self._pending_deferred_at: float | None = None  # ts of last deferred PermissionRequest — suppresses next permission_prompt keystroke
 
     def compose(self) -> ComposeResult:
         yield RichLog(markup=True, wrap=False)
