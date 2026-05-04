@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import errno
 import json
 import logging
 import os
+import signal
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -41,11 +44,10 @@ from claude_monitor import (
     EVENTS_FILE,
     STATE_FILE,
     API_PORT,
-    API_PORT_FILE,
     read_state,
 )
 from claude_monitor.messages import HookEvent
-from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen
+from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen, ConfirmKillScreen
 from claude_monitor.widgets import SessionPanel, DashboardPanel
 from claude_monitor.web import start_web_server
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
@@ -58,6 +60,67 @@ from claude_monitor.usage import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _find_port_holder(port: int) -> int | None:
+    """Return the PID of the process listening on ``port``, or None."""
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    if not out:
+        return None
+    try:
+        return int(out.splitlines()[0])
+    except ValueError:
+        return None
+
+
+def _process_cmdline(pid: int) -> str | None:
+    """Return the full command line for ``pid``, or None if unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return out or None
+
+
+def _kill_pid(pid: int) -> bool:
+    """SIGTERM then SIGKILL ``pid``. Returns True if the process is gone."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    for _ in range(20):  # up to 2s
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    time.sleep(0.2)
+    try:
+        os.kill(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
 
 
 class MonitorApp(App):
@@ -515,7 +578,11 @@ class MonitorApp(App):
 
     @work(thread=True, exit_on_error=False)
     def serve_api(self) -> None:
-        """Run the unified HTTP+WebSocket server in a background thread."""
+        """Run the unified HTTP+WebSocket server in a background thread.
+
+        On EADDRINUSE, identify the holder; if it's another claude-monitor,
+        ask the user (via a modal) whether to kill it and retry.
+        """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         stop_event = asyncio.Event()
@@ -533,16 +600,72 @@ class MonitorApp(App):
         watcher.start()
 
         try:
-            log.debug("serve_api: starting")
-            loop.run_until_complete(
-                start_web_server(self, port=API_PORT, stop_event=stop_event)
-            )
-        except OSError as e:
-            log.error(f"serve_api: failed to start: {e}")
+            while not self._stop_event.is_set():
+                try:
+                    log.debug("serve_api: starting")
+                    loop.run_until_complete(
+                        start_web_server(self, port=API_PORT, stop_event=stop_event)
+                    )
+                    break  # clean shutdown via stop_event
+                except OSError as e:
+                    if e.errno != errno.EADDRINUSE:
+                        log.error(f"serve_api: failed to start: {e}")
+                        break
+                    if not self._handle_port_in_use(API_PORT):
+                        break
+                    # Holder killed; loop and retry the bind
         finally:
             loop.close()
-            try:
-                os.remove(API_PORT_FILE)
-            except OSError:
-                log.debug("serve_api: failed to remove API port file")
             log.debug("serve_api: stopped")
+
+    def _handle_port_in_use(self, port: int) -> bool:
+        """Return True if the holder was killed and the bind should be retried.
+
+        Identifies the listening PID; if it's another claude-monitor, prompts the
+        user via a modal and (on confirmation) kills it.
+        """
+        pid = _find_port_holder(port)
+        if pid is None:
+            log.error(f"serve_api: port {port} in use but holder PID not found")
+            return False
+        if pid == os.getpid():
+            log.error(f"serve_api: port {port} appears held by self (pid {pid})")
+            return False
+        cmdline = _process_cmdline(pid)
+        if not cmdline or "claude-monitor" not in cmdline:
+            log.error(
+                f"serve_api: port {port} held by pid {pid} ({cmdline!r}); "
+                "not a claude-monitor, refusing to kill"
+            )
+            return False
+
+        result: dict[str, bool] = {"answer": False}
+        done = threading.Event()
+
+        def on_response(answer: bool | None) -> None:
+            result["answer"] = bool(answer)
+            done.set()
+
+        try:
+            self.call_from_thread(
+                self.push_screen,
+                ConfirmKillScreen(pid, port, cmdline),
+                on_response,
+            )
+        except RuntimeError:
+            log.debug("serve_api: app loop unavailable, cannot prompt for kill")
+            return False
+
+        if not done.wait(timeout=120):
+            log.warning("serve_api: kill prompt timed out without user response")
+            return False
+        if not result["answer"]:
+            log.info(f"serve_api: user declined to kill pid {pid}")
+            return False
+
+        log.info(f"serve_api: killing stale claude-monitor pid {pid}")
+        if not _kill_pid(pid):
+            log.error(f"serve_api: failed to kill pid {pid}")
+            return False
+        time.sleep(0.3)  # let the kernel release the port
+        return True

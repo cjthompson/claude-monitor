@@ -634,6 +634,11 @@ class AutoAcceptTUI(MonitorApp):
         if data.get("_decision") == "timeout" and data.get("_ask_timeout"):
             panel._pending_timeout = data["_timestamp"] + data["_ask_timeout"]
             panel._timeout_origin = data["_timestamp"]
+        # Track deferred PermissionRequests so we don't auto-press Enter on the
+        # follow-up permission_prompt Notification (which would defeat the
+        # exclusion by selecting the first option of an AskUserQuestion menu).
+        if event_name == "PermissionRequest" and data.get("_decision") == "deferred":
+            panel._pending_deferred_at = data.get("_timestamp", time.time())
         label, detail = self._format_event(data, event_name)
         if label:
             panel.write(f"[{t}] {label} {detail}")
@@ -698,10 +703,19 @@ class AutoAcceptTUI(MonitorApp):
                 ):
                     # Skip auto-approve if panel has a pending AskUserQuestion timeout
                     pending = getattr(panel, "_pending_timeout", None)
+                    pending_def = getattr(panel, "_pending_deferred_at", None)
                     if pending and pending > time.time():
                         log.debug(
                             f"Skipping auto-approve: AskUserQuestion timeout pending for {iterm_sid}"
                         )
+                    elif pending_def and time.time() - pending_def < 30:
+                        # The hook deferred the preceding PermissionRequest
+                        # (excluded_tools, paused, etc.). Don't press Enter —
+                        # the user must confirm manually.
+                        log.debug(
+                            f"Skipping auto-approve: deferred PermissionRequest for {iterm_sid}"
+                        )
+                        panel._pending_deferred_at = None
                     else:
                         panel.accept_count += 1
                         if not data.get("_replay"):

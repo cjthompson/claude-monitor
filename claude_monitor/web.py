@@ -16,7 +16,7 @@ import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from claude_monitor import __version__, API_PORT, API_PORT_FILE, EVENTS_FILE, STATE_FILE, read_state
+from claude_monitor import __version__, API_PORT, EVENTS_FILE, STATE_FILE, read_state
 from claude_monitor.api import (
     AppStateProtocol,
     generate_health_response,
@@ -146,11 +146,6 @@ async def start_web_server(
 
     if stop_event is None:
         stop_event = asyncio.Event()
-
-    # Write port file for discovery
-    os.makedirs(os.path.dirname(API_PORT_FILE), exist_ok=True)
-    with open(API_PORT_FILE, "w") as f:
-        f.write(str(port))
 
     async with websockets.serve(
         _handle_ws,
