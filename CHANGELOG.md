@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-05-05
+
+### Fixes
+- Log view timestamps should all be the same width (#ui)
+
 ## 2026-03-17
 
 ### Features
