@@ -1,6 +1,6 @@
 """claude-monitor: shared constants and utilities."""
 
-__version__ = "1.0.37"
+__version__ = "1.0.37-beta.1"
 
 import json
 import os

@@ -287,7 +287,13 @@ class MonitorApp(App):
         """Format a timestamp according to the current ``timestamp_style`` setting."""
         style = self.settings.timestamp_style
         if style == "12hr":
-            return ts.strftime("%-I:%M:%S%p").lower()
+            result = ts.strftime("%-I:%M:%S%p").lower()
+            # %-I omits leading zero on single-digit hours (e.g. "9:..."),
+            # but always produces two digits on double-digit hours (e.g. "10:...").
+            # Pad to a uniform 10-character width so log timestamps align.
+            if len(result) == 9:
+                return " " + result
+            return result
         if style == "date_time":
             return ts.strftime("%Y-%m-%d %H:%M:%S")
         # "24hr" and "auto"
