@@ -222,6 +222,10 @@ class AutoAcceptTUI(MonitorApp):
         self._tab_session_ids: dict[str, set[str]] = {}
         self._tab_title_lock = threading.Lock()
         self._tab_title_pending = False
+        # iTerm2 session IDs currently in the layout (from WidgetTreeBuilder)
+        self._layout_session_ids: set[str] = set()
+        # iTerm2 session IDs removed in the most recent layout rebuild
+        self._removed_iterm_sids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Abstract method implementations (required by MonitorApp)
@@ -296,6 +300,8 @@ class AutoAcceptTUI(MonitorApp):
             await self._mount_tabs(root, _layout_tabs, _self_session_id)
             self._current_structure_fp = LayoutFingerprint.structure(_layout_tabs)
             self._current_size_fp = LayoutFingerprint.size(_layout_tabs)
+            for _, _, tree in _layout_tabs:
+                self._layout_session_ids |= collect_session_ids(tree)
             log.debug(
                 f"on_mount(): panels={list(self.panels.keys())}, "
                 f"dashboard={self.dashboard is not None}"
@@ -498,6 +504,14 @@ class AutoAcceptTUI(MonitorApp):
             self._current_structure_fp = LayoutFingerprint.structure(msg.tabs)
             self._current_size_fp = LayoutFingerprint.size(msg.tabs)
 
+            # Track which iTerm2 sessions were removed in this rebuild.
+            # Late-arriving events for these sessions must not create phantom panels.
+            new_layout_sids: set[str] = set()
+            for _, _, tree in msg.tabs:
+                new_layout_sids |= collect_session_ids(tree)
+            self._removed_iterm_sids = self._layout_session_ids - new_layout_sids
+            self._layout_session_ids = new_layout_sids
+
             # Preserve iterm→panel mappings for sessions that still exist
             self._iterm_to_panel = {
                 k: v for k, v in self._iterm_to_panel.items()
@@ -571,6 +585,16 @@ class AutoAcceptTUI(MonitorApp):
         if iterm_sid and iterm_sid in self.panels:
             self._iterm_to_panel[claude_sid] = iterm_sid
             return self.panels[iterm_sid]
+
+        # Don't create phantom panels for:
+        # 1. Replay events on startup — the pane may no longer exist.
+        # 2. Events for iTerm2 sessions removed in the last layout rebuild —
+        #    a late-arriving SessionEnd (or similar) after the pane was closed.
+        if data.get("_replay"):
+            return None
+        if iterm_sid and iterm_sid in self._removed_iterm_sids:
+            log.debug(f"_resolve_panel: dropping event for removed pane {iterm_sid[:8]}")
+            return None
 
         # No match — create a fallback panel
         cwd = data.get("cwd", "")
