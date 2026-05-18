@@ -1,6 +1,5 @@
 from claude_monitor.formatting import format_event
 
-
 def test_subagent_stop_shows_last_assistant_message():
     data = {
         "agent_id": "abcdefgh-1234",
