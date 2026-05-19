@@ -65,6 +65,9 @@ HOOKS_CONFIG = {
     "CwdChanged": [
         {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
     ],
+    "PostToolUseFailure": [
+        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    ],
 }
 
 
@@ -173,6 +176,7 @@ def configure_hooks():
     print("  - SubagentStart      (track agent spawns)")
     print("  - SubagentStop       (track agent completions)")
     print("  - PostToolUse        (capture AskUserQuestion answers)")
+    print("  - PostToolUseFailure (log tool failures)")
     print()
     print(f"Hook command: {HOOK_COMMAND}")
     print()

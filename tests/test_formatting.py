@@ -58,7 +58,7 @@ def test_post_tool_use_failure_formats_error():
     oneline = lambda s, n=0: s
 
     label, detail = format_event(data, "PostToolUseFailure", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline)
-    assert label == "[bold red]TOOLFAIL [/]", f"unexpected label: {label!r}"
+    assert label == "[bold red]TOOLFAIL[/]", f"unexpected label: {label!r}"
     assert "Bash" in detail, f"tool_name missing from detail: {detail!r}"
     assert "rm -rf" in detail, f"error message missing: {detail!r}"
 
@@ -73,7 +73,7 @@ def test_post_tool_use_failure_string_error():
     oneline = lambda s, n=0: s
 
     label, detail = format_event(data, "PostToolUseFailure", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline)
-    assert label == "[bold red]TOOLFAIL [/]", f"unexpected label: {label!r}"
+    assert label == "[bold red]TOOLFAIL[/]", f"unexpected label: {label!r}"
     assert "Connection refused" in detail, f"string error missing: {detail!r}"
 
 
@@ -90,4 +90,8 @@ def test_post_tool_use_failure_oneline_truncation():
         return s[:n] if n else s
 
     label, detail = format_event(data, "PostToolUseFailure", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline)
-    assert len(detail) < len(long_msg) + 20, f"message should be truncated: {detail!r}"
+    # oneline is called with max_len=80, so detail should be <= len("Edit  -> ")+80
+    arrow_len = len("  -> ")
+    detail_msg = detail.split("  -> ", 1)[1] if "  -> " in detail else ""
+    assert len(detail_msg) <= 80, f"message not truncated to 80: got {len(detail_msg)} chars in {detail_msg!r}"
+    assert len(long_msg) > 80, "test setup: message must be longer than 80 chars"

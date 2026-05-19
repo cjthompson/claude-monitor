@@ -230,6 +230,6 @@ def format_event(
             msg = error.get("message", "unknown error")
         else:
             msg = str(error) if error else "unknown error"
-        return f"[bold red]{'TOOLFAIL '}[/]", f"{tool}  -> {oneline(msg, 80)}"
+        return f"[bold red]{'TOOLFAIL':<8}[/]", f"{tool}  -> {oneline(msg, 80)}"
 
     return None, None
