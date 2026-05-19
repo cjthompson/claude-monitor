@@ -223,4 +223,13 @@ def format_event(
         cwd = data.get("cwd") or data.get("new_cwd") or "?"
         return f"[dim]{'CWD':<8}[/]", f"{_ag}{cwd}"
 
+    elif event_name == "PostToolUseFailure":
+        tool = data.get("tool_name", "?")
+        error = data.get("error", {})
+        if isinstance(error, dict):
+            msg = error.get("message", "unknown error")
+        else:
+            msg = str(error) if error else "unknown error"
+        return f"[bold red]{'TOOLFAIL '}[/]", f"{tool}  -> {oneline(msg, 80)}"
+
     return None, None

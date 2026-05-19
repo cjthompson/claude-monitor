@@ -46,3 +46,48 @@ def test_subagent_stop_message_truncated_at_100():
     # Message should be truncated to 100 chars + "  -> " prefix (7 chars) = 107 extra chars
     # detail ends with "  -> " + 100 x's
     assert detail.endswith("  -> " + ("x" * 100)), f"truncation failed: {detail[-20:]!r}"
+
+
+def test_post_tool_use_failure_formats_error():
+    data = {
+        "tool_name": "Bash",
+        "error": {"message": "Command exited with code 1: rm -rf /"},
+    }
+    is_paused = lambda sid: False
+    get_panel = lambda d: None
+    oneline = lambda s, n=0: s
+
+    label, detail = format_event(data, "PostToolUseFailure", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline)
+    assert label == "[bold red]TOOLFAIL [/]", f"unexpected label: {label!r}"
+    assert "Bash" in detail, f"tool_name missing from detail: {detail!r}"
+    assert "rm -rf" in detail, f"error message missing: {detail!r}"
+
+
+def test_post_tool_use_failure_string_error():
+    data = {
+        "tool_name": "WebFetch",
+        "error": "Connection refused",
+    }
+    is_paused = lambda sid: False
+    get_panel = lambda d: None
+    oneline = lambda s, n=0: s
+
+    label, detail = format_event(data, "PostToolUseFailure", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline)
+    assert label == "[bold red]TOOLFAIL [/]", f"unexpected label: {label!r}"
+    assert "Connection refused" in detail, f"string error missing: {detail!r}"
+
+
+def test_post_tool_use_failure_oneline_truncation():
+    long_msg = "This is a very long error message that definitely exceeds the eighty character limit and should be truncated"
+    data = {
+        "tool_name": "Edit",
+        "error": {"message": long_msg},
+    }
+    is_paused = lambda sid: False
+    get_panel = lambda d: None
+
+    def oneline(s, n=0):
+        return s[:n] if n else s
+
+    label, detail = format_event(data, "PostToolUseFailure", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline)
+    assert len(detail) < len(long_msg) + 20, f"message should be truncated: {detail!r}"
