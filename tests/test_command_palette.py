@@ -1,7 +1,5 @@
 """Tests for command palette."""
 
-import pytest
-
 from claude_monitor.commands import MonitorCommands
 
 
@@ -24,6 +22,10 @@ class TestCommandPalette:
         """Every command's action should be a plausible method name."""
         for name, action in MonitorCommands.COMMANDS_LIST:
             # action should be a valid Python identifier
-            assert action.isidentifier(), f"Action {action!r} for {name!r} is not a valid identifier"
+            assert action.isidentifier(), (
+                f"Action {action!r} for {name!r} is not a valid identifier"
+            )
             # Should correspond to action_{action} method pattern
-            assert not action.startswith("action_"), f"Action should not include 'action_' prefix: {action}"
+            assert not action.startswith("action_"), (
+                f"Action should not include 'action_' prefix: {action}"
+            )

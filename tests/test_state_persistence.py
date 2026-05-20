@@ -3,9 +3,7 @@
 import json
 import os
 
-import pytest
-
-from claude_monitor.settings import Settings, save_settings, load_settings
+from claude_monitor.settings import Settings, load_settings, save_settings
 
 
 class TestStatePersistence:

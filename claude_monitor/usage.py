@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from claude_monitor import fmt_duration, RATE_LIMITS_CACHE_FILE
+from claude_monitor import RATE_LIMITS_CACHE_FILE, fmt_duration
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,8 @@ def _read_keychain() -> dict | None:
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True, timeout=5,
+            capture_output=True,
+            timeout=5,
         )
         if result.returncode != 0 or not result.stdout:
             log.debug("No credentials found in Keychain")
@@ -152,22 +153,33 @@ def _write_keychain(data: dict) -> bool:
         # Get the account name from the existing entry
         result = subprocess.run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
-            capture_output=True, timeout=5,
+            capture_output=True,
+            timeout=5,
         )
         account = None
         if result.returncode == 0:
             for line in result.stdout.decode("utf-8", errors="replace").splitlines():
-                if '"acct"' in line and '<blob>=' in line:
-                    account = line.split('<blob>=')[1].strip().strip('"')
+                if '"acct"' in line and "<blob>=" in line:
+                    account = line.split("<blob>=")[1].strip().strip('"')
                     break
         if not account:
             log.debug("Could not determine keychain account name")
             return False
 
         result = subprocess.run(
-            ["security", "add-generic-password", "-U",
-             "-a", account, "-s", KEYCHAIN_SERVICE, "-w", payload],
-            capture_output=True, timeout=5,
+            [
+                "security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+                payload,
+            ],
+            capture_output=True,
+            timeout=5,
         )
         if result.returncode != 0:
             log.debug(f"Keychain write failed: {result.stderr.decode()}")
@@ -213,7 +225,10 @@ def _load_disk_cache() -> dict:
 
 
 def _load_rate_limits_cache() -> dict:
-    """Load rate-limits cache written by the statusline handler. Returns empty dict if missing/corrupt."""
+    """Load rate-limits cache written by the statusline handler.
+
+    Returns empty dict if missing/corrupt.
+    """
     try:
         with open(RATE_LIMITS_CACHE_FILE) as f:
             return json.load(f)
@@ -228,11 +243,15 @@ def _save_disk_cache(data: UsageData, fetched_at: float) -> None:
             "fetched_at": fetched_at,
             "five_hour": {
                 "utilization": data.five_hour.utilization,
-                "resets_at": data.five_hour.resets_at.isoformat() if data.five_hour.resets_at else None,
+                "resets_at": data.five_hour.resets_at.isoformat()
+                if data.five_hour.resets_at
+                else None,
             },
             "seven_day": {
                 "utilization": data.seven_day.utilization,
-                "resets_at": data.seven_day.resets_at.isoformat() if data.seven_day.resets_at else None,
+                "resets_at": data.seven_day.resets_at.isoformat()
+                if data.seven_day.resets_at
+                else None,
             },
         }
         with open(USAGE_CACHE_FILE, "w") as f:
@@ -258,14 +277,14 @@ def _usage_from_disk(entry: dict) -> tuple[UsageData, float] | None:
 
 _THEME = {
     "running": {
-        "fill": "#50c878",    # bright emerald bar fill
-        "empty": "#284130",   # dark green-gray empty
-        "pct": "#c8f0d5",     # light mint percentage text
+        "fill": "#50c878",  # bright emerald bar fill
+        "empty": "#284130",  # dark green-gray empty
+        "pct": "#c8f0d5",  # light mint percentage text
     },
     "paused": {
-        "fill": "#dc7832",    # rust-orange bar fill
-        "empty": "#482d1e",   # dark brown empty
-        "pct": "#ebc8af",     # warm cream percentage text
+        "fill": "#dc7832",  # rust-orange bar fill
+        "empty": "#482d1e",  # dark brown empty
+        "pct": "#ebc8af",  # warm cream percentage text
     },
 }
 
@@ -330,7 +349,9 @@ def _strip_markup(s: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", s)
 
 
-def _quota(w: WindowUsage, label: str, bar_width: int | None, reset: str, mode: str = "running") -> str:
+def _quota(
+    w: WindowUsage, label: str, bar_width: int | None, reset: str, mode: str = "running"
+) -> str:
     """Format a single quota window."""
     pct_color = _THEME.get(mode, _THEME["running"])["pct"]
     s = f"[bold]{label}[/] [{pct_color}]{w.utilization:.0f}%[/]"
@@ -355,29 +376,56 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
     h5_local = _format_local_time(h5.resets_at)
     d7_full = _format_local_time(d7.resets_at)
 
-    h5_full_reset = f"{h5_countdown} ({h5_local})" if h5_countdown and h5_local else h5_countdown or h5_local
+    h5_full_reset = (
+        f"{h5_countdown} ({h5_local})" if h5_countdown and h5_local else h5_countdown or h5_local
+    )
 
     tiers = [
-        lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_full_reset, mode),
-            _quota(d7, "7d", 12, d7_full, mode),
-        ])),
-        lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_local, mode),
-            _quota(d7, "7d", 12, d7_full, mode),
-        ])),
-        lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 12, h5_local, mode),
-            _quota(d7, "7d", 12, "", mode),
-        ])),
-        lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", 8, h5_local, mode),
-            _quota(d7, "7d", None, "", mode),
-        ])),
-        lambda: SEP.join(filter(None, [
-            _quota(h5, "5h", None, h5_local, mode),
-            _quota(d7, "7d", None, "", mode),
-        ])),
+        lambda: SEP.join(
+            filter(
+                None,
+                [
+                    _quota(h5, "5h", 12, h5_full_reset, mode),
+                    _quota(d7, "7d", 12, d7_full, mode),
+                ],
+            )
+        ),
+        lambda: SEP.join(
+            filter(
+                None,
+                [
+                    _quota(h5, "5h", 12, h5_local, mode),
+                    _quota(d7, "7d", 12, d7_full, mode),
+                ],
+            )
+        ),
+        lambda: SEP.join(
+            filter(
+                None,
+                [
+                    _quota(h5, "5h", 12, h5_local, mode),
+                    _quota(d7, "7d", 12, "", mode),
+                ],
+            )
+        ),
+        lambda: SEP.join(
+            filter(
+                None,
+                [
+                    _quota(h5, "5h", 8, h5_local, mode),
+                    _quota(d7, "7d", None, "", mode),
+                ],
+            )
+        ),
+        lambda: SEP.join(
+            filter(
+                None,
+                [
+                    _quota(h5, "5h", None, h5_local, mode),
+                    _quota(d7, "7d", None, "", mode),
+                ],
+            )
+        ),
         lambda: _quota(h5, "5h", 8, h5_local, mode),
         lambda: _quota(h5, "5h", None, "", mode),
     ]
@@ -395,6 +443,7 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
 # ---------------------------------------------------------------------------
 # UsageManager — encapsulates all mutable state
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class UsageManager:
@@ -441,16 +490,20 @@ class UsageManager:
             return None
 
         try:
-            payload = json.dumps({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": CLIENT_ID,
-            }).encode()
+            payload = json.dumps(
+                {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": CLIENT_ID,
+                }
+            ).encode()
 
             log.debug(
                 "Token refresh request: POST %s body={grant_type=refresh_token, "
                 "refresh_token=%s, client_id=%s}",
-                TOKEN_URL, _mask_token(refresh_token), CLIENT_ID,
+                TOKEN_URL,
+                _mask_token(refresh_token),
+                CLIENT_ID,
             )
 
             req = Request(
@@ -464,8 +517,7 @@ class UsageManager:
                 data = json.loads(resp.read())
 
             log.debug(
-                "Token refresh response: status=%d access_token=%s "
-                "refresh_token=%s expires_in=%s",
+                "Token refresh response: status=%d access_token=%s refresh_token=%s expires_in=%s",
                 status,
                 _mask_token(data.get("access_token", "")),
                 _mask_token(data.get("refresh_token", "")),
@@ -495,20 +547,31 @@ class UsageManager:
 
             # Update _settings_oauth_json so subsequent token lookups use refreshed values
             if self._settings_oauth_json:
-                self._settings_oauth_json = json.dumps({
-                    "access_token": new_access,
-                    "refresh_token": new_refresh,
-                    "expires_at": new_expires_at,
-                })
+                self._settings_oauth_json = json.dumps(
+                    {
+                        "access_token": new_access,
+                        "refresh_token": new_refresh,
+                        "expires_at": new_expires_at,
+                    }
+                )
 
             if self._on_token_refreshed:
                 try:
                     self._on_token_refreshed(new_access, new_refresh, new_expires_at)
-                except Exception as e:  # Callback is user-supplied; catch all to avoid breaking token refresh
+                except (
+                    Exception
+                ) as e:  # Callback is user-supplied; catch all to avoid breaking token refresh
                     log.debug(f"Token refresh callback failed: {e}")
 
             return new_access, new_refresh, new_expires_at
-        except (URLError, OSError, subprocess.SubprocessError, json.JSONDecodeError, KeyError, ValueError) as e:
+        except (
+            URLError,
+            OSError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+            KeyError,
+            ValueError,
+        ) as e:
             log.debug(f"Token refresh failed: {e}")
             return None
 
@@ -534,7 +597,11 @@ class UsageManager:
             result = self._refresh_access_token(cached_refresh)
             if result:
                 token, new_refresh, expires_at = result
-                self._token_cache = {"token": token, "refresh_token": new_refresh, "expires_at": expires_at}
+                self._token_cache = {
+                    "token": token,
+                    "refresh_token": new_refresh,
+                    "expires_at": expires_at,
+                }
                 return token
 
         # Try each source in resolution order
@@ -553,14 +620,22 @@ class UsageManager:
             return None
 
         token, refresh_token, expires_at = result
-        self._token_cache = {"token": token, "refresh_token": refresh_token, "expires_at": expires_at}
+        self._token_cache = {
+            "token": token,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at,
+        }
 
         # If the token is already expired/near-expiry, try refreshing
         if now >= expires_at - TOKEN_EXPIRY_BUFFER and refresh_token:
             refreshed = self._refresh_access_token(refresh_token)
             if refreshed:
                 token, new_refresh, expires_at = refreshed
-                self._token_cache = {"token": token, "refresh_token": new_refresh, "expires_at": expires_at}
+                self._token_cache = {
+                    "token": token,
+                    "refresh_token": new_refresh,
+                    "expires_at": expires_at,
+                }
                 return token
 
         return token
@@ -616,12 +691,22 @@ class UsageManager:
 
         try:
             result = subprocess.run(
-                ["curl", "-s", "-4", "--max-time", "15",
-                 USAGE_API_URL,
-                 "-H", f"Authorization: Bearer {token}",
-                 "-H", "anthropic-beta: oauth-2025-04-20",
-                 "-H", "User-Agent: claude-code/statusline"],
-                capture_output=True, timeout=20,
+                [
+                    "curl",
+                    "-s",
+                    "-4",
+                    "--max-time",
+                    "15",
+                    USAGE_API_URL,
+                    "-H",
+                    f"Authorization: Bearer {token}",
+                    "-H",
+                    "anthropic-beta: oauth-2025-04-20",
+                    "-H",
+                    "User-Agent: claude-code/statusline",
+                ],
+                capture_output=True,
+                timeout=20,
             )
             if result.returncode != 0 or not result.stdout:
                 raise OSError(f"curl failed: {result.returncode}")
@@ -629,7 +714,10 @@ class UsageManager:
 
             # Reject error responses and empty/bogus data
             if "error" in data or "five_hour" not in data:
-                raise OSError(f"API returned error or missing data: {data.get('error', {}).get('message', 'unknown')}")
+                raise OSError(
+                    "API returned error or missing data: "
+                    f"{data.get('error', {}).get('message', 'unknown')}"
+                )
 
             usage = UsageData(
                 five_hour=_parse_window(data["five_hour"]),

@@ -1,13 +1,10 @@
 """Extended tests for tui_simple.py — uncovered branches and edge cases."""
 
-import json
 import time
 
-import pytest
-
 from tests.conftest import (
-    _make_permission_event,
     _make_notification_event,
+    _make_permission_event,
     _make_subagent_event,
 )
 
@@ -128,8 +125,10 @@ class TestApplyEvent:
             await pilot.pause()
 
             start = _make_subagent_event(
-                start_or_stop="start", agent_id="ag1",
-                session_id="agent-sess", agent_type="general_purpose",
+                start_or_stop="start",
+                agent_id="ag1",
+                session_id="agent-sess",
+                agent_type="general_purpose",
             )
             await inject_message(start)
             await pilot.pause()
@@ -139,7 +138,8 @@ class TestApplyEvent:
             assert "ag1" in panel.active_agents
 
             stop = _make_subagent_event(
-                start_or_stop="stop", agent_id="ag1",
+                start_or_stop="stop",
+                agent_id="ag1",
                 session_id="agent-sess",
             )
             await inject_message(stop)
@@ -253,19 +253,16 @@ class TestAskPauseToggle:
         async with app_fixture.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             from claude_monitor.widgets.session_panel import SessionPanel
+
             event = _make_permission_event(session_id="ask-sess")
             await inject_message(event)
             await pilot.pause()
             await pilot.pause()
 
             assert not app_fixture.is_ask_paused("ask-sess")
-            app_fixture.on_session_panel_ask_pause_toggle(
-                SessionPanel.AskPauseToggle("ask-sess")
-            )
+            app_fixture.on_session_panel_ask_pause_toggle(SessionPanel.AskPauseToggle("ask-sess"))
             assert app_fixture.is_ask_paused("ask-sess")
-            app_fixture.on_session_panel_ask_pause_toggle(
-                SessionPanel.AskPauseToggle("ask-sess")
-            )
+            app_fixture.on_session_panel_ask_pause_toggle(SessionPanel.AskPauseToggle("ask-sess"))
             assert not app_fixture.is_ask_paused("ask-sess")
 
 
@@ -278,6 +275,7 @@ class TestDashboardActions:
             app_fixture.action_toggle_dashboard()
             # Should minimize to MIN_DASHBOARD_HEIGHT
             from claude_monitor.tui_simple import MIN_DASHBOARD_HEIGHT
+
             assert app_fixture._dashboard_height == MIN_DASHBOARD_HEIGHT
             assert app_fixture._stored_dashboard_height == original_height
 
@@ -297,6 +295,7 @@ class TestDashboardActions:
         async with app_fixture.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             from claude_monitor.tui_simple import MIN_DASHBOARD_HEIGHT
+
             app_fixture._dashboard_height = MIN_DASHBOARD_HEIGHT
             app_fixture.action_shrink_dashboard()
             assert app_fixture._dashboard_height == MIN_DASHBOARD_HEIGHT

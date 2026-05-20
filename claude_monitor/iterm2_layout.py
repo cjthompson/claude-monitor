@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING
 
 try:
     import iterm2
-    from iterm2.session import Splitter, Session
+    from iterm2.session import Session, Splitter
+
     ITERM2_AVAILABLE = True
 except ImportError:
     iterm2 = None  # type: ignore[assignment]
@@ -38,7 +39,7 @@ from claude_monitor.formatting import _safe_css_id
 
 if TYPE_CHECKING:
     from claude_monitor.settings import Settings
-    from claude_monitor.widgets import SessionPanel, DashboardPanel
+    from claude_monitor.widgets import DashboardPanel, SessionPanel
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ _iterm2_ready = threading.Event()
 
 def start_persistent_connection() -> None:
     """Launch a daemon thread that holds a persistent iTerm2 websocket."""
+
     def _run() -> None:
         global _iterm2_loop, _iterm2_app
         conn = iterm2.Connection()
@@ -97,6 +99,7 @@ def _iterm2_call(coro_func, timeout: int = 10):
 # LayoutFetcher
 # ---------------------------------------------------------------------------
 
+
 class LayoutFetcher:
     """Fetch iTerm2 pane layout via the persistent websocket connection."""
 
@@ -110,6 +113,7 @@ class LayoutFetcher:
         Returns ``(tabs, self_session_id, window_groups)`` where *tabs* is a
         list of ``(tab_id, tab_name, root_splitter)`` tuples.
         """
+
         async def _do(app: "iterm2.App") -> "tuple[list, dict]":  # type: ignore[name-defined]
             tabs = []
             window_groups: dict[str, list[str]] = {}
@@ -150,6 +154,7 @@ class LayoutFetcher:
 # LayoutFingerprint
 # ---------------------------------------------------------------------------
 
+
 class LayoutFingerprint:
     """Compute structure and size fingerprints from iTerm2 layout data."""
 
@@ -161,8 +166,7 @@ class LayoutFingerprint:
         Tab names are excluded to avoid spurious rebuilds from dynamic titles.
         """
         return tuple(
-            (tab_id, LayoutFingerprint._structure_node(root))
-            for tab_id, _tab_name, root in tabs
+            (tab_id, LayoutFingerprint._structure_node(root)) for tab_id, _tab_name, root in tabs
         )
 
     @staticmethod
@@ -198,9 +202,7 @@ class LayoutFingerprint:
             try:
                 return node.frame.size.width, node.frame.size.height
             except Exception:
-                log.debug(
-                    f"_get_node_size: failed to get frame size for session {node.session_id}"
-                )
+                log.debug(f"_get_node_size: failed to get frame size for session {node.session_id}")
                 return 0, 0
         elif isinstance(node, Splitter):
             if not node.children:
@@ -221,6 +223,7 @@ def _get_frame_size(node) -> "tuple[float, float]":
 # ---------------------------------------------------------------------------
 # WidgetTreeBuilder
 # ---------------------------------------------------------------------------
+
 
 class WidgetTreeBuilder:
     """Convert an iTerm2 Splitter tree into a Textual widget tree."""
@@ -243,7 +246,7 @@ class WidgetTreeBuilder:
         Returns ``(root_widget, dashboard_or_None)``.
         """
         # Defer imports to avoid circular dependencies at module load time.
-        from claude_monitor.widgets import SessionPanel, DashboardPanel
+        from claude_monitor.widgets import DashboardPanel, SessionPanel
 
         indent = "  " * depth
 
@@ -265,15 +268,14 @@ class WidgetTreeBuilder:
                     panel._current_bucket_count = old_dashboard._current_bucket_count
                     panel._event_log = list(old_dashboard._event_log)
                 log.debug(
-                    f"{indent}Session {node.session_id[:8]} (SELF/TUI) -> DashboardPanel id={css_id}"
+                    f"{indent}Session {node.session_id[:8]} (SELF/TUI)"
+                    f" -> DashboardPanel id={css_id}"
                 )
                 return panel, panel
             else:
                 name = node.name or "Session"
                 sid_short = node.session_id[:8]
-                sp: SessionPanel = SessionPanel(
-                    node.session_id, f"{name} [{sid_short}]", id=css_id
-                )
+                sp: SessionPanel = SessionPanel(node.session_id, f"{name} [{sid_short}]", id=css_id)
                 if old_panels and node.session_id in old_panels:
                     old = old_panels[node.session_id]
                     sp.active_agents = dict(old.active_agents)
@@ -338,6 +340,7 @@ class WidgetTreeBuilder:
 # KeystrokeSender
 # ---------------------------------------------------------------------------
 
+
 class KeystrokeSender:
     """Send keystrokes to iTerm2 sessions via the persistent websocket."""
 
@@ -348,6 +351,7 @@ class KeystrokeSender:
         Returns ``True`` on success, ``False`` if the session was not found
         or the connection is unavailable.
         """
+
         async def _do(app: "iterm2.App") -> bool:  # type: ignore[name-defined]
             session = app.get_session_by_id(session_id)
             if session:
@@ -371,6 +375,7 @@ class KeystrokeSender:
 # Tab title helpers
 # ---------------------------------------------------------------------------
 
+
 def set_tab_titles(tab_titles: "dict[str, str]") -> None:
     """Set iTerm2 tab titles using the persistent connection."""
     if not tab_titles:
@@ -383,9 +388,7 @@ def set_tab_titles(tab_titles: "dict[str, str]") -> None:
                     try:
                         await tab.async_set_title(tab_titles[tab.tab_id])
                     except Exception:
-                        log.debug(
-                            f"set_tab_titles: failed to set title for tab {tab.tab_id}"
-                        )
+                        log.debug(f"set_tab_titles: failed to set title for tab {tab.tab_id}")
 
     _iterm2_call(_do)
 
@@ -393,6 +396,7 @@ def set_tab_titles(tab_titles: "dict[str, str]") -> None:
 # ---------------------------------------------------------------------------
 # Scope filtering
 # ---------------------------------------------------------------------------
+
 
 def collect_session_ids(node) -> set:
     """Extract all session IDs from an iTerm2 Splitter/Session tree."""

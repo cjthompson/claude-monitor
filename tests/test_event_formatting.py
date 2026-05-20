@@ -1,10 +1,6 @@
 """Tests for event formatting logic."""
 
-import time
-
-import pytest
-
-from claude_monitor.formatting import _oneline, _format_ask_user_question_inline
+from claude_monitor.formatting import _oneline
 
 
 class TestEventFormatting:
@@ -80,6 +76,7 @@ class TestEventFormatting:
     async def test_timestamp_24hr_format(self, app_fixture, inject_message):
         """Default 24hr timestamp format."""
         from datetime import datetime
+
         ts = datetime(2024, 3, 15, 14, 30, 45)
         result = app_fixture._format_ts(ts)
         assert "14:30:45" in result
@@ -88,6 +85,7 @@ class TestEventFormatting:
         """12hr timestamp format."""
         app_fixture.settings.timestamp_style = "12hr"
         from datetime import datetime
+
         ts = datetime(2024, 3, 15, 14, 30, 45)
         result = app_fixture._format_ts(ts)
         assert "pm" in result.lower() or "PM" in result

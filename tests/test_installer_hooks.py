@@ -20,21 +20,15 @@ OLD_CMD = "/old/venv/bin/claude-monitor-hook"
 
 # A HOOKS_CONFIG built around NEW_CMD (mirrors install.HOOKS_CONFIG structure)
 NEW_HOOKS_CONFIG = {
-    "PermissionRequest": [
-        {"hooks": [{"type": "command", "command": NEW_CMD, "timeout": 300}]}
-    ],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": NEW_CMD, "timeout": 300}]}],
     "Notification": [
         {
             "matcher": "permission_prompt|idle_prompt",
             "hooks": [{"type": "command", "command": NEW_CMD, "timeout": 5}],
         }
     ],
-    "SubagentStart": [
-        {"hooks": [{"type": "command", "command": NEW_CMD, "timeout": 5}]}
-    ],
-    "SubagentStop": [
-        {"hooks": [{"type": "command", "command": NEW_CMD, "timeout": 5}]}
-    ],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": NEW_CMD, "timeout": 5}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": NEW_CMD, "timeout": 5}]}],
     "PostToolUse": [
         {
             "matcher": "AskUserQuestion",
@@ -57,6 +51,7 @@ def _stale_config():
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def _run(sf: Path, inputs: list[str]) -> None:
     """Patch install globals and run configure_hooks() with simulated input."""
@@ -85,12 +80,14 @@ def _all_commands(hooks_block: dict) -> list[str]:
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def sf(tmp_path):
     return tmp_path / "settings.json"
 
 
 # ── user declines ─────────────────────────────────────────────────────────────
+
 
 class TestUserDeclines:
     def test_no_skips_file_creation(self, sf):
@@ -108,6 +105,7 @@ class TestUserDeclines:
 
 
 # ── no existing file ──────────────────────────────────────────────────────────
+
 
 class TestNoExistingFile:
     def test_creates_file_with_all_event_types(self, sf):
@@ -134,6 +132,7 @@ class TestNoExistingFile:
 
 # ── empty / partial hooks section ─────────────────────────────────────────────
 
+
 class TestEmptyOrPartialHooks:
     def test_empty_hooks_dict_adds_all(self, sf):
         sf.write_text(json.dumps({"hooks": {}}))
@@ -155,6 +154,7 @@ class TestEmptyOrPartialHooks:
 
 # ── exact match (already configured) ─────────────────────────────────────────
 
+
 class TestExactMatch:
     def test_all_exact_no_file_change_content(self, sf):
         sf.write_text(json.dumps({"hooks": NEW_HOOKS_CONFIG}))
@@ -174,11 +174,9 @@ class TestExactMatch:
 
     def test_partial_exact_match_adds_missing(self, sf):
         # Only PermissionRequest is already correct; others are absent
-        sf.write_text(json.dumps({
-            "hooks": {
-                "PermissionRequest": NEW_HOOKS_CONFIG["PermissionRequest"]
-            }
-        }))
+        sf.write_text(
+            json.dumps({"hooks": {"PermissionRequest": NEW_HOOKS_CONFIG["PermissionRequest"]}})
+        )
         _run(sf, ["y"])
         hooks = _load(sf)["hooks"]
         assert set(hooks) == set(NEW_HOOKS_CONFIG)
@@ -187,6 +185,7 @@ class TestExactMatch:
 
 
 # ── stale claude-monitor hook (different path) ────────────────────────────────
+
 
 class TestStaleHook:
     def test_user_accepts_replaces_all_commands(self, sf):
@@ -228,13 +227,17 @@ class TestStaleHook:
         assert call_count[0] == 2
 
     def test_stale_single_event_replaced_others_added(self, sf):
-        sf.write_text(json.dumps({
-            "hooks": {
-                "PermissionRequest": [
-                    {"hooks": [{"type": "command", "command": OLD_CMD, "timeout": 300}]}
-                ]
-            }
-        }))
+        sf.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PermissionRequest": [
+                            {"hooks": [{"type": "command", "command": OLD_CMD, "timeout": 300}]}
+                        ]
+                    }
+                }
+            )
+        )
         _run(sf, ["y", "y"])
         hooks = _load(sf)["hooks"]
         # Replaced
@@ -256,33 +259,40 @@ class TestStaleHook:
 
 # ── appending to existing unrelated hooks ─────────────────────────────────────
 
+
 class TestAppendToExisting:
     def test_unrelated_hook_preserved(self, sf):
-        sf.write_text(json.dumps({
-            "hooks": {
-                "PermissionRequest": [
-                    {"hooks": [{"type": "command", "command": "/unrelated/tool"}]}
-                ]
-            }
-        }))
+        sf.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PermissionRequest": [
+                            {"hooks": [{"type": "command", "command": "/unrelated/tool"}]}
+                        ]
+                    }
+                }
+            )
+        )
         _run(sf, ["y"])
         pr_cmds = [
-            h["command"]
-            for g in _load(sf)["hooks"]["PermissionRequest"]
-            for h in g["hooks"]
+            h["command"] for g in _load(sf)["hooks"]["PermissionRequest"] for h in g["hooks"]
         ]
         assert "/unrelated/tool" in pr_cmds
         assert NEW_CMD in pr_cmds
 
     def test_monitor_hook_merged_into_existing_group(self, sf):
         # Same matcher (none) → hooks merged into one group, not two groups
-        sf.write_text(json.dumps({
-            "hooks": {
-                "SubagentStart": [
-                    {"hooks": [{"type": "command", "command": "/other/hook"}]}
-                ]
-            }
-        }))
+        sf.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SubagentStart": [
+                            {"hooks": [{"type": "command", "command": "/other/hook"}]}
+                        ]
+                    }
+                }
+            )
+        )
         _run(sf, ["y"])
         groups = _load(sf)["hooks"]["SubagentStart"]
         assert len(groups) == 1  # merged into single group
@@ -301,6 +311,7 @@ class TestAppendToExisting:
 
 # ── mixed scenario ────────────────────────────────────────────────────────────
 
+
 class TestMixedScenario:
     def test_exact_stale_unrelated_missing_all_handled(self, sf):
         initial = {
@@ -310,9 +321,7 @@ class TestMixedScenario:
                 # stale → replace (if accepted)
                 "Notification": _stale_config()["Notification"],
                 # unrelated hook → append
-                "SubagentStart": [
-                    {"hooks": [{"type": "command", "command": "/unrelated"}]}
-                ],
+                "SubagentStart": [{"hooks": [{"type": "command", "command": "/unrelated"}]}],
                 # SubagentStop and PostToolUse absent → create
             }
         }
@@ -372,6 +381,7 @@ class TestMixedScenario:
 #                       (null = file should not exist, e.g. user declined)
 #
 # Open any .json file to read the scenario; run this test to verify it.
+
 
 def _fixture_files():
     return sorted(_FIXTURES_DIR.glob("*.json"))

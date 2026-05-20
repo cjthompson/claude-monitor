@@ -41,9 +41,17 @@ def _detect_monospace_font():
     if _PNG_FONT is not None:
         return _PNG_FONT
     # Preference order: Fira Code (Textual default), JetBrains Mono, Menlo, Courier New
-    preferred = ["Fira Code", "JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Menlo", "Courier New"]
+    preferred = [
+        "Fira Code",
+        "JetBrainsMono Nerd Font Mono",
+        "JetBrains Mono",
+        "Menlo",
+        "Courier New",
+    ]
     try:
-        result = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["fc-list", ":", "family"], capture_output=True, text=True, timeout=5
+        )
         installed = set(f.strip() for f in result.stdout.split("\n") if f.strip())
         for font in preferred:
             if any(font in f for f in installed):
@@ -73,9 +81,10 @@ def generate_screenshot_svg(app) -> str:
 
 def generate_screenshot_png(svg_text: str) -> bytes:
     """Convert an SVG string to optimised PNG bytes (256-color quantised)."""
+    from io import BytesIO
+
     import cairosvg
     from PIL import Image
-    from io import BytesIO
 
     font = _detect_monospace_font()
     if font != "Fira Code":

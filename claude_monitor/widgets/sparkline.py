@@ -11,11 +11,10 @@ class FixedWidthSparkline(Sparkline):
     """
 
     def render(self):
-        from fractions import Fraction
         from rich.color import Color
+        from rich.color_triplet import ColorTriplet
         from rich.segment import Segment
         from rich.style import Style
-        from rich.color_triplet import ColorTriplet
 
         width = self.size.width
         height = self.size.height
@@ -72,7 +71,9 @@ class FixedWidthSparkline(Sparkline):
                     segs.append(Segment(ch, _blend(val)))
             lines.append(segs)
 
-        from rich.console import ConsoleOptions, RenderResult as RR, Console
+        from rich.console import Console, ConsoleOptions
+        from rich.console import RenderResult as RR
+
         class _Renderable:
             def __rich_console__(self_r, console: Console, options: ConsoleOptions) -> RR:
                 for i, line in enumerate(lines):

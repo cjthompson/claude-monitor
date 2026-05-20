@@ -30,25 +30,33 @@ from textual.widgets import Footer, Static, Tab, TabbedContent, TabPane
 from textual.widgets._tabbed_content import ContentTab
 
 from claude_monitor import (
-    SIGNAL_DIR,
     EVENTS_FILE,
-    STATE_FILE,
     LOG_FILE,
+    SIGNAL_DIR,
+    STATE_FILE,
     read_state,
 )
-from claude_monitor.messages import HookEvent
+from claude_monitor.app_base import MonitorApp
 from claude_monitor.commands import MonitorCommands
-from claude_monitor.widgets import SessionPanel, DashboardPanel
-from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen, PaneContextMenu  # noqa: F401
+from claude_monitor.formatting import (
+    _oneline as _oneline_fn,
+)
 from claude_monitor.formatting import (
     _safe_css_id,
     _safe_tab_css_id,
-    _format_ask_user_question_inline,
-    _oneline as _oneline_fn,
+)
+from claude_monitor.formatting import (
     format_event as _format_event_shared,
 )
-from claude_monitor.app_base import MonitorApp
-from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
+from claude_monitor.messages import HookEvent
+from claude_monitor.screens import (  # noqa: F401
+    ChoicesScreen,
+    HelpScreen,
+    PaneContextMenu,
+    QuestionsScreen,
+)
+from claude_monitor.settings import SettingsScreen, save_settings
+from claude_monitor.widgets import DashboardPanel, SessionPanel
 
 os.makedirs(SIGNAL_DIR, exist_ok=True)
 logging.basicConfig(
@@ -66,8 +74,8 @@ for _noisy in ("websockets", "asyncio"):
 # Dashboard display mode constants
 # ---------------------------------------------------------------------------
 
-DASH_TAB = "tab"             # dashboard as a tab in TabbedContent
-MIN_DASHBOARD_HEIGHT = 3     # minimum height in lines for the dashboard area
+DASH_TAB = "tab"  # dashboard as a tab in TabbedContent
+MIN_DASHBOARD_HEIGHT = 3  # minimum height in lines for the dashboard area
 
 
 class DraggableDashboard(DashboardPanel):
@@ -75,6 +83,7 @@ class DraggableDashboard(DashboardPanel):
 
     class DragDelta(Message):
         """Posted during border drag. delta is signed integer lines."""
+
         def __init__(self, delta: int) -> None:
             super().__init__()
             self.delta = delta
@@ -349,7 +358,6 @@ class SimpleTUI(MonitorApp):
             # Pre-scan: identify sessions with SessionEnd and track last event time
             self._replay_closed_sessions = set()
             self._session_last_ts = {}
-            stale_cutoff = time.time() - 86400  # 24 hours ago
             for line in recent:
                 line = line.strip()
                 if not line:
@@ -518,7 +526,10 @@ class SimpleTUI(MonitorApp):
                     self.call_later(self._remove_session, panel.session_id)
             elif ntype == "ask_timeout_complete":
                 origin = data.get("_timeout_origin")
-                if panel._pending_timeout is not None and getattr(panel, "_timeout_origin", None) == origin:
+                if (
+                    panel._pending_timeout is not None
+                    and getattr(panel, "_timeout_origin", None) == origin
+                ):
                     panel._pending_timeout = None
                     panel._timeout_origin = None
                     data["_auto_accepted"] = True
@@ -527,7 +538,10 @@ class SimpleTUI(MonitorApp):
                 if not self.is_pane_paused(claude_sid):
                     pending = getattr(panel, "_pending_timeout", None)
                     if pending and pending > time.time():
-                        log.debug(f"Skipping auto-approve: AskUserQuestion timeout pending for {claude_sid[:8]}")
+                        log.debug(
+                            f"Skipping auto-approve: AskUserQuestion "
+                            f"timeout pending for {claude_sid[:8]}"
+                        )
                     else:
                         panel.accept_count += 1
 
@@ -589,7 +603,9 @@ class SimpleTUI(MonitorApp):
                 tab.label = f"⏸ {base}"
             else:
                 tab.label = base
-        except Exception:  # Textual raises NoMatches or AttributeError for widget/attribute access failures
+        except (
+            Exception
+        ):  # Textual raises NoMatches or AttributeError for widget/attribute access failures
             log.debug(f"_update_tab_label: failed for {claude_sid[:8]}")
 
     # ------------------------------------------------------------------
@@ -746,11 +762,15 @@ class SimpleTUI(MonitorApp):
                 if new_dash._event_log:
                     try:
                         from textual.widgets import RichLog
+
                         rl = new_dash.query_one(RichLog)
                         for line in new_dash._event_log:
                             rl.write(line)
                     except Exception:
-                        log.debug("action_toggle_dashboard_tab: failed to replay event log into tab dashboard")
+                        log.debug(
+                            "action_toggle_dashboard_tab: "
+                            "failed to replay event log into tab dashboard"
+                        )
             else:
                 # Tab mode → restore bottom panel
                 self._dashboard_in_tab = False
@@ -776,12 +796,16 @@ class SimpleTUI(MonitorApp):
                     self.dashboard._event_log = tab_event_log
                     try:
                         from textual.widgets import RichLog
+
                         rl = self.dashboard.query_one(RichLog)
                         rl.clear()
                         for line in tab_event_log:
                             rl.write(line)
                     except Exception:
-                        log.debug("action_toggle_dashboard_tab: failed to replay event log into pane dashboard")
+                        log.debug(
+                            "action_toggle_dashboard_tab: "
+                            "failed to replay event log into pane dashboard"
+                        )
 
                 # Apply current height and arrow
                 self._apply_dashboard_height()
@@ -798,9 +822,7 @@ class SimpleTUI(MonitorApp):
         if self._global_paused:
             # Exit global manual: pause all except clicked
             self._global_paused = False
-            self._paused_claude_sessions = {
-                sid for sid in self.panels if sid != claude_sid
-            }
+            self._paused_claude_sessions = {sid for sid in self.panels if sid != claude_sid}
         elif claude_sid in self._paused_claude_sessions:
             self._paused_claude_sessions.discard(claude_sid)
         else:

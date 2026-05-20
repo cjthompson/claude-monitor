@@ -6,13 +6,11 @@ until web.py is created (Task 4 Step 3).
 """
 
 import asyncio
+import json as _json
 import socket
 
 import httpx
 import pytest
-
-import json as _json
-
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -31,6 +29,7 @@ async def web_server(isolated_state, monkeypatch):
     temp-dir paths from the isolated_state fixture.
     """
     import claude_monitor.web as web_mod
+
     monkeypatch.setattr(web_mod, "EVENTS_FILE", isolated_state["events_file"])
     monkeypatch.setattr(web_mod, "STATE_FILE", isolated_state["state_file"])
 
@@ -50,9 +49,8 @@ async def web_server(isolated_state, monkeypatch):
     stop_event = asyncio.Event()
 
     from claude_monitor.web import start_web_server
-    server_task = asyncio.create_task(
-        start_web_server(app, port=port, stop_event=stop_event)
-    )
+
+    server_task = asyncio.create_task(start_web_server(app, port=port, stop_event=stop_event))
     await asyncio.sleep(0.3)  # let server bind and start accepting
 
     yield {"port": port, "app": app, "stop_event": stop_event}
@@ -287,8 +285,10 @@ class TestWebSocket:
         """Both clients should receive a state broadcast when one sends toggle_global_pause."""
         port = web_server["port"]
 
-        async with websockets.connect(f"ws://127.0.0.1:{port}/ws") as ws1, \
-                   websockets.connect(f"ws://127.0.0.1:{port}/ws") as ws2:
+        async with (
+            websockets.connect(f"ws://127.0.0.1:{port}/ws") as ws1,
+            websockets.connect(f"ws://127.0.0.1:{port}/ws") as ws2,
+        ):
 
             async def drain(ws):
                 for _ in range(20):

@@ -6,7 +6,6 @@ Claude Code hooks in ~/.claude/settings.json.
 """
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,12 +29,8 @@ HOOKS_CONFIG = {
             "hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}],
         }
     ],
-    "SubagentStart": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
-    "SubagentStop": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     "PostToolUse": [
         {
             "matcher": "AskUserQuestion",
@@ -43,28 +38,15 @@ HOOKS_CONFIG = {
         }
     ],
     # New hooks (CC 2.1.62+)
-    "SessionStart": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
-    "SessionEnd": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
+    "SessionStart": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     # New hooks (CC 2.1.70+)
-    "StopFailure": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
-    "PostCompact": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
-    "TaskCreated": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
-    "PermissionDenied": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
-    "CwdChanged": [
-        {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
-    ],
+    "StopFailure": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "PostCompact": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "TaskCreated": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "PermissionDenied": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "CwdChanged": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
 }
 
 
@@ -102,9 +84,15 @@ def setup_venv():
     else:
         # Fallback to pip — requires Python 3.12+
         if sys.version_info < (3, 12):
-            print(f"Error: Python {sys.version_info.major}.{sys.version_info.minor} detected, but 3.12+ is required.")
+            print(
+                f"Error: Python {sys.version_info.major}.{sys.version_info.minor} "
+                "detected, but 3.12+ is required."
+            )
             print()
-            print("Install uv (recommended) and re-run — it will fetch the right Python automatically:")
+            print(
+                "Install uv (recommended) and re-run — "
+                "it will fetch the right Python automatically:"
+            )
             print("  Install with Homebrew:  brew install uv")
             print("  Or install from shell:  curl -LsSf https://astral.sh/uv/install.sh | sh")
             print()
@@ -154,7 +142,7 @@ def symlink_to_path():
 
 
 def _find_monitor_hooks(groups):
-    """Return (group_idx, hook_idx, hook) for every hook whose command contains claude-monitor-hook."""
+    """Find hooks whose command contains claude-monitor-hook."""
     results = []
     for gi, group in enumerate(groups):
         for hi, hook in enumerate(group.get("hooks", [])):
@@ -173,6 +161,7 @@ def configure_hooks():
     print("  - SubagentStart      (track agent spawns)")
     print("  - SubagentStop       (track agent completions)")
     print("  - PostToolUse        (capture AskUserQuestion answers)")
+    print("  - PostToolUseFailure (log tool failures)")
     print()
     print(f"Hook command: {HOOK_COMMAND}")
     print()
@@ -194,9 +183,9 @@ def configure_hooks():
         settings["hooks"] = {}
 
     # Analyse what needs to happen for each event type (two-pass to ask once)
-    to_skip = []    # already configured correctly
-    to_add = []     # (event_type, desired_groups, existing_groups_or_None)
-    to_replace = [] # (event_type, existing_groups, stale_list, desired_groups)
+    to_skip = []  # already configured correctly
+    to_add = []  # (event_type, desired_groups, existing_groups_or_None)
+    to_replace = []  # (event_type, existing_groups, stale_list, desired_groups)
 
     for event_type, desired_groups in HOOKS_CONFIG.items():
         existing_groups = settings["hooks"].get(event_type)

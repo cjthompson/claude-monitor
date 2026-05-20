@@ -2,9 +2,7 @@
 
 import time
 
-import pytest
-
-from tests.conftest import _make_permission_event, _make_notification_event, _make_subagent_event
+from tests.conftest import _make_notification_event, _make_permission_event, _make_subagent_event
 
 
 class TestSessionLifecycle:

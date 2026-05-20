@@ -87,6 +87,7 @@ HelpScreen #help-footer {
 
     def compose(self) -> ComposeResult:
         from textual.containers import ScrollableContainer
+
         with Vertical(id="help-dialog"):
             yield Static("Keyboard Shortcuts", id="help-title")
             with ScrollableContainer(id="help-scroll"):
@@ -95,21 +96,41 @@ HelpScreen #help-footer {
                     with Vertical(classes="help-col"):
                         yield Static("GLOBAL", classes="help-section-header")
                         yield Static("\u2500" * 20, classes="help-section-rule")
-                        yield RichLog(markup=True, id="help-log-global", classes="help-section-log", highlight=False)
+                        yield RichLog(
+                            markup=True,
+                            id="help-log-global",
+                            classes="help-section-log",
+                            highlight=False,
+                        )
                     with Vertical(classes="help-col"):
                         yield Static("INSTANCE", classes="help-section-header")
                         yield Static("\u2500" * 20, classes="help-section-rule")
-                        yield RichLog(markup=True, id="help-log-instance", classes="help-section-log", highlight=False)
+                        yield RichLog(
+                            markup=True,
+                            id="help-log-instance",
+                            classes="help-section-log",
+                            highlight=False,
+                        )
                 # Narrow layout: stacked
                 with Vertical(id="help-body-narrow"):
                     with Vertical(classes="help-col"):
                         yield Static("GLOBAL", classes="help-section-header")
                         yield Static("\u2500" * 20, classes="help-section-rule")
-                        yield RichLog(markup=True, id="help-log-global-narrow", classes="help-section-log", highlight=False)
+                        yield RichLog(
+                            markup=True,
+                            id="help-log-global-narrow",
+                            classes="help-section-log",
+                            highlight=False,
+                        )
                     with Vertical(classes="help-col"):
                         yield Static("INSTANCE", classes="help-section-header")
                         yield Static("\u2500" * 20, classes="help-section-rule")
-                        yield RichLog(markup=True, id="help-log-instance-narrow", classes="help-section-log", highlight=False)
+                        yield RichLog(
+                            markup=True,
+                            id="help-log-instance-narrow",
+                            classes="help-section-log",
+                            highlight=False,
+                        )
             yield Static("[dim]ESC to close[/]", id="help-footer")
 
     # Map internal Textual key names to readable display names
@@ -175,8 +196,12 @@ HelpScreen #help-footer {
         else:
             wide_body.display = False
             narrow_body.display = True
-            self._populate_rl(self.query_one("#help-log-global-narrow", RichLog), self._global_pairs)
-            self._populate_rl(self.query_one("#help-log-instance-narrow", RichLog), self._instance_pairs)
+            self._populate_rl(
+                self.query_one("#help-log-global-narrow", RichLog), self._global_pairs
+            )
+            self._populate_rl(
+                self.query_one("#help-log-instance-narrow", RichLog), self._instance_pairs
+            )
 
     def action_dismiss(self) -> None:
         self.app.pop_screen()

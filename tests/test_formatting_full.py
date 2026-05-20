@@ -4,18 +4,18 @@ import time
 from unittest.mock import MagicMock
 
 from claude_monitor.formatting import (
+    _format_ask_user_question_detail,
+    _format_ask_user_question_inline,
+    _oneline,
     _safe_css_id,
     _safe_tab_css_id,
-    _oneline,
-    _format_ask_user_question_inline,
-    _format_ask_user_question_detail,
     format_event,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pure helper functions
 # ---------------------------------------------------------------------------
+
 
 class TestSafeCssId:
     def test_basic(self):
@@ -63,6 +63,7 @@ class TestOneline:
 # ---------------------------------------------------------------------------
 # AskUserQuestion formatting
 # ---------------------------------------------------------------------------
+
 
 class TestFormatAskUserQuestionInline:
     def test_simple_question(self):
@@ -217,6 +218,7 @@ class TestFormatAskUserQuestionDetail:
 # format_event — all event types
 # ---------------------------------------------------------------------------
 
+
 def _mock_panel(session_id="test-sess"):
     panel = MagicMock()
     panel.session_id = session_id
@@ -237,32 +239,56 @@ class TestFormatEvent:
     """Test format_event with all event types and edge cases."""
 
     def test_permission_allowed(self):
-        data = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s1", "_decision": "allowed"}
+        data = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "session_id": "s1",
+            "_decision": "allowed",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "ALLOWED" in label
         assert "Bash" in detail
         assert "ls" in detail
 
     def test_permission_deferred(self):
-        data = {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x"}, "session_id": "s1", "_decision": "deferred"}
+        data = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x"},
+            "session_id": "s1",
+            "_decision": "deferred",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "DEFERRED" in label
 
     def test_permission_timeout(self):
-        data = {"tool_name": "AskUserQuestion", "tool_input": {"question": "Go?"}, "session_id": "s1",
-                "_decision": "timeout", "_ask_timeout": 30}
+        data = {
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"question": "Go?"},
+            "session_id": "s1",
+            "_decision": "timeout",
+            "_ask_timeout": 30,
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "TIMEOUT" in label
         assert "30" in detail
@@ -271,8 +297,11 @@ class TestFormatEvent:
         data = {"tool_name": "Bash", "tool_input": {}, "session_id": "s1", "_excluded_tool": True}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "MANUAL" in label
 
@@ -280,35 +309,62 @@ class TestFormatEvent:
         data = {"tool_name": "Bash", "tool_input": {}, "session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_always_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_always_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "PAUSED" in label
 
     def test_permission_edit_tool(self):
-        data = {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/test.py"}, "session_id": "s1", "_decision": "allowed"}
+        data = {
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/test.py"},
+            "session_id": "s1",
+            "_decision": "allowed",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "/tmp/test.py" in detail
 
     def test_permission_write_tool(self):
-        data = {"tool_name": "Write", "tool_input": {"file_path": "/tmp/new.txt"}, "session_id": "s1", "_decision": "allowed"}
+        data = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/new.txt"},
+            "session_id": "s1",
+            "_decision": "allowed",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "/tmp/new.txt" in detail
 
     def test_permission_webfetch_tool(self):
-        data = {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com"}, "session_id": "s1", "_decision": "allowed"}
+        data = {
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "session_id": "s1",
+            "_decision": "allowed",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "https://example.com" in detail
 
@@ -321,8 +377,11 @@ class TestFormatEvent:
         }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "Continue?" in detail
 
@@ -331,8 +390,11 @@ class TestFormatEvent:
         panel = _mock_panel("s1")
         panel.active_agents = {"a1": "gp", "a2": "gp"}
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "ag2" in detail
 
@@ -344,8 +406,11 @@ class TestFormatEvent:
         }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PostToolUse",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PostToolUse",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "ANSWER" in label
         assert "Yes" in detail
@@ -358,8 +423,11 @@ class TestFormatEvent:
         }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PostToolUse",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PostToolUse",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert label is None
 
@@ -367,26 +435,44 @@ class TestFormatEvent:
         data = {"tool_name": "Bash", "session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "PostToolUse",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "PostToolUse",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert label is None
 
     def test_notification_idle(self):
-        data = {"notification_type": "idle_prompt", "message": "Session is idle", "session_id": "s1"}
+        data = {
+            "notification_type": "idle_prompt",
+            "message": "Session is idle",
+            "session_id": "s1",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "IDLE" in label
 
     def test_notification_ask_timeout_complete_auto(self):
-        data = {"notification_type": "ask_timeout_complete", "message": "Auto", "session_id": "s1", "_auto_accepted": True}
+        data = {
+            "notification_type": "ask_timeout_complete",
+            "message": "Auto",
+            "session_id": "s1",
+            "_auto_accepted": True,
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "AUTO" in label
 
@@ -394,8 +480,11 @@ class TestFormatEvent:
         data = {"notification_type": "ask_timeout_complete", "message": "...", "session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert label is None
 
@@ -403,8 +492,11 @@ class TestFormatEvent:
         data = {"notification_type": "permission_prompt", "message": "Approved", "session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "APPROVED" in label
 
@@ -412,17 +504,27 @@ class TestFormatEvent:
         data = {"notification_type": "permission_prompt", "message": "...", "session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_always_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_always_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "NOTIFY" in label
 
     def test_notification_permission_prompt_self_sid(self):
-        data = {"notification_type": "permission_prompt", "message": "...", "session_id": "self-sid"}
+        data = {
+            "notification_type": "permission_prompt",
+            "message": "...",
+            "session_id": "self-sid",
+        }
         panel = _mock_panel("self-sid")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
             self_sid="self-sid",
         )
         assert label is None
@@ -432,8 +534,11 @@ class TestFormatEvent:
         panel = _mock_panel("s1")
         panel._pending_timeout = time.time() + 100  # still pending
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert label is None
 
@@ -441,28 +546,45 @@ class TestFormatEvent:
         data = {"notification_type": "something_else", "message": "Info msg", "session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "Notification",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "Notification",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "NOTIFY" in label
 
     def test_subagent_start(self):
-        data = {"agent_id": "agent-12345678-abcd", "agent_type": "general_purpose", "session_id": "s1"}
+        data = {
+            "agent_id": "agent-12345678-abcd",
+            "agent_type": "general_purpose",
+            "session_id": "s1",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "SubagentStart",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "SubagentStart",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "AGENT+" in label
         assert "general_purpose" in detail
         assert "agent-12" in detail
 
     def test_subagent_stop(self):
-        data = {"agent_id": "agent-12345678-abcd", "agent_type": "general_purpose", "session_id": "s1"}
+        data = {
+            "agent_id": "agent-12345678-abcd",
+            "agent_type": "general_purpose",
+            "session_id": "s1",
+        }
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "SubagentStop",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "SubagentStop",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert "AGENT-" in label
 
@@ -470,15 +592,21 @@ class TestFormatEvent:
         data = {"session_id": "s1"}
         panel = _mock_panel("s1")
         label, detail = format_event(
-            data, "UnknownEvent",
-            is_pane_paused=_no_pause, get_panel=lambda d: panel, oneline=_oneline,
+            data,
+            "UnknownEvent",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
         )
         assert label is None
 
     def test_no_panel(self):
         data = {"tool_name": "Bash", "tool_input": {}, "session_id": "s1", "_decision": "allowed"}
         label, detail = format_event(
-            data, "PermissionRequest",
-            is_pane_paused=_no_pause, get_panel=lambda d: None, oneline=_oneline,
+            data,
+            "PermissionRequest",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: None,
+            oneline=_oneline,
         )
         assert "ALLOWED" in label

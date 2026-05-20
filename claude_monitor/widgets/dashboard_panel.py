@@ -114,7 +114,9 @@ class DashboardPanel(Static):
         try:
             width = self.query_one(FixedWidthSparkline).size.width
         except NoMatches:
-            log.debug("Dashboard._visible_data: failed to get sparkline width, using raw data length")
+            log.debug(
+                "Dashboard._visible_data: failed to get sparkline width, using raw data length"
+            )
             width = len(raw)
         return raw[-width:] if len(raw) > width else raw
 

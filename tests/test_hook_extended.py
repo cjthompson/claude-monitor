@@ -1,7 +1,5 @@
 """Extended tests for hook.py — decide_permission edge cases."""
 
-import pytest
-
 from claude_monitor.hook import decide_permission
 
 
@@ -27,14 +25,22 @@ class TestDecidePermission:
         assert decide_permission(state, event) == ("deferred", 0)
 
     def test_excluded_tool(self):
-        state = {"global_paused": False, "paused_sessions": [], "paused_claude_sessions": [], "excluded_tools": ["Bash"]}
+        state = {
+            "global_paused": False,
+            "paused_sessions": [],
+            "paused_claude_sessions": [],
+            "excluded_tools": ["Bash"],
+        }
         event = {"tool_name": "Bash"}
         assert decide_permission(state, event) == ("deferred", 0)
 
     def test_ask_user_question_timeout(self):
         state = {
-            "global_paused": False, "paused_sessions": [], "paused_claude_sessions": [],
-            "excluded_tools": [], "ask_user_timeout": 30,
+            "global_paused": False,
+            "paused_sessions": [],
+            "paused_claude_sessions": [],
+            "excluded_tools": [],
+            "ask_user_timeout": 30,
         }
         event = {"tool_name": "AskUserQuestion", "_iterm_session_id": "uuid1"}
         decision, timeout = decide_permission(state, event)
@@ -43,16 +49,22 @@ class TestDecidePermission:
 
     def test_ask_user_question_paused(self):
         state = {
-            "global_paused": False, "paused_sessions": [], "paused_claude_sessions": [],
-            "excluded_tools": [], "ask_paused_sessions": ["uuid1"],
+            "global_paused": False,
+            "paused_sessions": [],
+            "paused_claude_sessions": [],
+            "excluded_tools": [],
+            "ask_paused_sessions": ["uuid1"],
         }
         event = {"tool_name": "AskUserQuestion", "_iterm_session_id": "uuid1"}
         assert decide_permission(state, event) == ("deferred", 0)
 
     def test_ask_user_question_no_timeout(self):
         state = {
-            "global_paused": False, "paused_sessions": [], "paused_claude_sessions": [],
-            "excluded_tools": [], "ask_user_timeout": 0,
+            "global_paused": False,
+            "paused_sessions": [],
+            "paused_claude_sessions": [],
+            "excluded_tools": [],
+            "ask_user_timeout": 0,
         }
         event = {"tool_name": "AskUserQuestion"}
         assert decide_permission(state, event) == ("allowed", 0)

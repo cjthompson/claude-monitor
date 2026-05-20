@@ -71,7 +71,9 @@ class QuestionsScreen(ModalScreen):
         for entry in entries:
             rl.write(entry)
         rl.scroll_end(animate=False)
-        self.query_one("#questions-log", RichLog).horizontal_scrollbar.renderer = HorizontalScrollBarRender
+        self.query_one(
+            "#questions-log", RichLog
+        ).horizontal_scrollbar.renderer = HorizontalScrollBarRender
 
     def _load_questions(self) -> list[str]:
         """Load AskUserQuestion events from events.jsonl, merging answers from PostToolUse."""

@@ -1,8 +1,6 @@
 """Tests for event routing in SimpleTUI."""
 
-import pytest
-
-from tests.conftest import _make_permission_event, _make_notification_event, _make_subagent_event
+from tests.conftest import _make_permission_event
 
 
 class TestEventRouting:

@@ -22,10 +22,10 @@ import pytest
 from claude_monitor.tui import AutoAcceptTUI
 from claude_monitor.widgets import SessionPanel
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def app(monkeypatch):
@@ -35,14 +35,14 @@ def app(monkeypatch):
     We call _resolve_panel directly — no run_test() lifecycle needed.
     """
     import claude_monitor.tui as tui_mod
+
     monkeypatch.setattr(tui_mod, "_layout_tabs", [])
     monkeypatch.setattr(tui_mod, "_self_session_id", None)
     monkeypatch.setattr("claude_monitor.app_base.fetch_usage", lambda: None)
     return AutoAcceptTUI()
 
 
-def _mk_event(claude_sid="claude-abc", iterm_sid="iterm-xyz",
-               replay=False, cwd="/tmp/proj"):
+def _mk_event(claude_sid="claude-abc", iterm_sid="iterm-xyz", replay=False, cwd="/tmp/proj"):
     """Build a minimal hook event dict."""
     data = {
         "session_id": claude_sid,
@@ -72,8 +72,8 @@ def _patched_resolve(app, data):
 # Bug 1: startup replay events must not create phantom panels
 # ---------------------------------------------------------------------------
 
-class TestReplayEventPhantomPrevention:
 
+class TestReplayEventPhantomPrevention:
     def test_replay_for_closed_pane_returns_none(self, app):
         """A replayed event for a now-closed pane must return None, not a panel."""
         data = _mk_event(claude_sid="c-1", iterm_sid="iterm-closed", replay=True)
@@ -108,8 +108,8 @@ class TestReplayEventPhantomPrevention:
 # Bug 2: late-arriving events after layout rebuild must not create phantoms
 # ---------------------------------------------------------------------------
 
-class TestRemovedPanePhantomPrevention:
 
+class TestRemovedPanePhantomPrevention:
     def test_event_for_removed_pane_returns_none(self, app):
         """A non-replay event for a recently-removed pane must return None."""
         app._removed_iterm_sids = {"iterm-gone"}
@@ -149,8 +149,8 @@ class TestRemovedPanePhantomPrevention:
 # Layout session tracking: _layout_session_ids / _removed_iterm_sids state
 # ---------------------------------------------------------------------------
 
-class TestLayoutSessionTracking:
 
+class TestLayoutSessionTracking:
     def test_removed_sids_populated_when_pane_closes(self, app):
         """Sessions in the old layout but absent from the new one appear in _removed_iterm_sids."""
         app._layout_session_ids = {"iterm-A", "iterm-B"}

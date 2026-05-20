@@ -1,16 +1,13 @@
 """Tests for claude_monitor/__init__.py — utilities and state functions."""
 
 import json
-import os
-
-import pytest
 
 from claude_monitor import (
+    _DEFAULT_STATE,
     __version__,
-    read_state,
     extract_iterm_session_id,
     fmt_duration,
-    _DEFAULT_STATE,
+    read_state,
 )
 
 

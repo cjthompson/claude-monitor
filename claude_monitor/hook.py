@@ -12,7 +12,7 @@ import socket
 import sys
 import time
 
-from claude_monitor import SIGNAL_DIR, EVENTS_FILE, API_PORT, extract_iterm_session_id, read_state
+from claude_monitor import API_PORT, EVENTS_FILE, SIGNAL_DIR, extract_iterm_session_id, read_state
 
 
 def _tui_is_running() -> bool:
@@ -141,7 +141,7 @@ def statusline_main():
     """
     import sys
 
-    from claude_monitor import SIGNAL_DIR, RATE_LIMITS_CACHE_FILE
+    from claude_monitor import RATE_LIMITS_CACHE_FILE, SIGNAL_DIR
 
     try:
         data = json.load(sys.stdin)

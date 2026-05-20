@@ -60,7 +60,9 @@ class Settings:
     oauth_json: str = ""  # JSON with access_token (required), refresh_token, expires_at (optional)
     dashboard_height: int = 12  # dashboard pane height in lines (simple mode, expanded)
     tab_close_mode: str = "none"  # none / idle / immediate
-    tab_idle_timeout_secs: int = 300  # seconds of idle before closing tab (when tab_close_mode="idle")
+    tab_idle_timeout_secs: int = (
+        300  # seconds of idle before closing tab (when tab_close_mode="idle")
+    )
     web_lan_access: bool = False  # bind HTTP API to 0.0.0.0 instead of localhost
 
     def __post_init__(self) -> None:
@@ -139,30 +141,58 @@ TAB_CLOSE_OPTIONS = [
 
 # --- Declarative field definitions ---
 
+
 class FieldDef(TypedDict, total=False):
-    name: str            # Settings dataclass field name
-    label: str           # Human-readable label shown in the UI
-    widget_type: str     # "switch" | "select" | "input" | "textarea"
-    options: list[tuple[str, str]] | None   # For select widgets
-    description: str | None                 # Hint text shown below the row
-    placeholder: str | None                 # For input widgets
-    input_type: str | None                  # Textual Input type (e.g. "integer")
-    simple_mode_hidden: bool                # Hide this field when simple_mode=True
+    name: str  # Settings dataclass field name
+    label: str  # Human-readable label shown in the UI
+    widget_type: str  # "switch" | "select" | "input" | "textarea"
+    options: list[tuple[str, str]] | None  # For select widgets
+    description: str | None  # Hint text shown below the row
+    placeholder: str | None  # For input widgets
+    input_type: str | None  # Textual Input type (e.g. "integer")
+    simple_mode_hidden: bool  # Hide this field when simple_mode=True
 
 
 FIELD_DEFS: list[FieldDef] = [
-    {"name": "default_mode",    "label": "Default mode",    "widget_type": "select",   "options": MODE_OPTIONS},
-    {"name": "theme",           "label": "Theme",           "widget_type": "select",   "options": [(t, t) for t in THEMES]},
-    {"name": "iterm_scope",     "label": "iTerm scope",     "widget_type": "select",   "options": SCOPE_OPTIONS,   "simple_mode_hidden": True},
-    {"name": "timestamp_style", "label": "Timestamp",       "widget_type": "select",   "options": TIMESTAMP_OPTIONS},
-    {"name": "debug",           "label": "Debug logging",   "widget_type": "switch"},
-    {"name": "account_usage",   "label": "Account usage",   "widget_type": "switch"},
-    {"name": "web_lan_access",  "label": "LAN access",      "widget_type": "switch",   "description": "Bind HTTP API to 0.0.0.0 (all interfaces) instead of localhost only"},
+    {
+        "name": "default_mode",
+        "label": "Default mode",
+        "widget_type": "select",
+        "options": MODE_OPTIONS,
+    },
+    {
+        "name": "theme",
+        "label": "Theme",
+        "widget_type": "select",
+        "options": [(t, t) for t in THEMES],
+    },
+    {
+        "name": "iterm_scope",
+        "label": "iTerm scope",
+        "widget_type": "select",
+        "options": SCOPE_OPTIONS,
+        "simple_mode_hidden": True,
+    },
+    {
+        "name": "timestamp_style",
+        "label": "Timestamp",
+        "widget_type": "select",
+        "options": TIMESTAMP_OPTIONS,
+    },
+    {"name": "debug", "label": "Debug logging", "widget_type": "switch"},
+    {"name": "account_usage", "label": "Account usage", "widget_type": "switch"},
+    {
+        "name": "web_lan_access",
+        "label": "LAN access",
+        "widget_type": "switch",
+        "description": "Bind HTTP API to 0.0.0.0 (all interfaces) instead of localhost only",
+    },
     {
         "name": "oauth_json",
         "label": "OAuth token",
         "widget_type": "textarea",
-        "description": "JSON: access_token (required), refresh_token, expires_at (optional). Not saved to disk.",
+        "description": "JSON: access_token (required), refresh_token,"
+        " expires_at (optional). Not saved to disk.",
     },
     {
         "name": "excluded_tools",
@@ -177,7 +207,8 @@ FIELD_DEFS: list[FieldDef] = [
         "widget_type": "input",
         "placeholder": "0",
         "input_type": "integer",
-        "description": "Seconds to wait before auto-accepting AskUserQuestion (0 = instant, max 300)",
+        "description": "Seconds to wait before auto-accepting "
+        "AskUserQuestion (0 = instant, max 300)",
     },
     {
         "name": "tab_close_mode",
@@ -359,7 +390,11 @@ class SettingsScreen(ModalScreen[Settings | None]):
 
                     elif wtype == "textarea":
                         # Special case: oauth_json uses masked display + clear button
-                        display_value = self._masked_oauth if name == "oauth_json" else str(getattr(s, name) or "")
+                        display_value = (
+                            self._masked_oauth
+                            if name == "oauth_json"
+                            else str(getattr(s, name) or "")
+                        )
                         with Horizontal(classes="textarea-row"):
                             with Vertical():
                                 yield Label(label, classes="setting-label")
@@ -423,7 +458,9 @@ class SettingsScreen(ModalScreen[Settings | None]):
         """Check if current form values differ from the original settings."""
         try:
             return asdict(self._collect_settings()) != asdict(self._settings)
-        except Exception:  # _collect_settings calls query_one; Textual raises NoMatches if widgets not yet mounted
+        except (
+            Exception
+        ):  # _collect_settings calls query_one; Textual raises NoMatches if widgets not yet mounted
             return False
 
     def _refresh_save_button(self) -> None:
@@ -445,11 +482,17 @@ class SettingsScreen(ModalScreen[Settings | None]):
 
         # excluded_tools: comma-separated → list
         raw_excluded = self.query_one(f"#{_widget_id('excluded_tools')}", Input).value
-        excluded_tools = [t.strip() for t in raw_excluded.split(",") if t.strip()] if raw_excluded.strip() else []
+        excluded_tools = (
+            [t.strip() for t in raw_excluded.split(",") if t.strip()]
+            if raw_excluded.strip()
+            else []
+        )
 
         # ask_user_timeout: integer input, clamped
         try:
-            ask_timeout = min(300, max(0, int(self.query_one(f"#{_widget_id('ask_user_timeout')}", Input).value)))
+            ask_timeout = min(
+                300, max(0, int(self.query_one(f"#{_widget_id('ask_user_timeout')}", Input).value))
+            )
         except (ValueError, TypeError):
             ask_timeout = 0
 
@@ -468,7 +511,12 @@ class SettingsScreen(ModalScreen[Settings | None]):
 
         # tab_idle_timeout_secs: integer input, clamped
         try:
-            tab_idle_timeout = min(3600, max(10, int(self.query_one(f"#{_widget_id('tab_idle_timeout_secs')}", Input).value)))
+            tab_idle_timeout = min(
+                3600,
+                max(
+                    10, int(self.query_one(f"#{_widget_id('tab_idle_timeout_secs')}", Input).value)
+                ),
+            )
         except (ValueError, TypeError):
             tab_idle_timeout = 300
 
@@ -477,7 +525,9 @@ class SettingsScreen(ModalScreen[Settings | None]):
             theme=self._get_select_value(_widget_id("theme"), s.theme),
             debug=self.query_one(f"#{_widget_id('debug')}", Switch).value,
             iterm_scope=iterm_scope,
-            timestamp_style=self._get_select_value(_widget_id("timestamp_style"), s.timestamp_style),
+            timestamp_style=self._get_select_value(
+                _widget_id("timestamp_style"), s.timestamp_style
+            ),
             account_usage=self.query_one(f"#{_widget_id('account_usage')}", Switch).value,
             excluded_tools=excluded_tools,
             ask_user_timeout=ask_timeout,

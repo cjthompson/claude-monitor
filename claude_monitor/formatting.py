@@ -89,10 +89,16 @@ def _format_ask_user_question_detail(data: dict) -> str:
                     if selected and label == selected:
                         if is_auto:
                             marker = "[bold cyan]>>[/]"
-                            lines.append(f"      {marker} [bold cyan]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                            lines.append(
+                                f"      {marker} [bold cyan]{label}[/]"
+                                + (f"  [dim]{desc}[/]" if desc else "")
+                            )
                         else:
                             marker = "[bold green]>>[/]"
-                            lines.append(f"      {marker} [bold green]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                            lines.append(
+                                f"      {marker} [bold green]{label}[/]"
+                                + (f"  [dim]{desc}[/]" if desc else "")
+                            )
                     else:
                         lines.append(f"         {label}" + (f"  [dim]{desc}[/]" if desc else ""))
             if selected:
@@ -158,7 +164,10 @@ def format_event(
             if not answer_vals:
                 return None, None
             answer_text = ", ".join(answer_vals)
-            return f"[bold green]{'ANSWER':<8}[/]", f"{_ag}AskUserQuestion -> [bold]{answer_text}[/]"
+            return (
+                f"[bold green]{'ANSWER':<8}[/]",
+                f"{_ag}AskUserQuestion -> [bold]{answer_text}[/]",
+            )
         return None, None
 
     elif event_name == "Notification":
@@ -188,7 +197,9 @@ def format_event(
     elif event_name == "SubagentStop":
         agent_id = data.get("agent_id", "?")
         agent_type = data.get("agent_type", "?")
-        return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]"
+        msg = data.get("last_assistant_message", "")
+        suffix = f"  -> {msg[:100]}" if msg else ""
+        return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]{suffix}"
 
     elif event_name == "SessionStart":
         return f"[bold green]{'SESSION+':<8}[/]", f"{_ag}session started"
@@ -220,5 +231,14 @@ def format_event(
     elif event_name == "CwdChanged":
         cwd = data.get("cwd") or data.get("new_cwd") or "?"
         return f"[dim]{'CWD':<8}[/]", f"{_ag}{cwd}"
+
+    elif event_name == "PostToolUseFailure":
+        tool = data.get("tool_name", "?")
+        error = data.get("error", {})
+        if isinstance(error, dict):
+            msg = error.get("message", "unknown error")
+        else:
+            msg = str(error) if error else "unknown error"
+        return f"[bold red]{'TOOLFAIL':<8}[/]", f"{tool}  -> {oneline(msg, 80)}"
 
     return None, None
