@@ -11,3 +11,4 @@ build/
 .superpowers/
 .coverage
 .playwright-mcp
+uv.lock

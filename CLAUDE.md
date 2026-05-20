@@ -150,6 +150,9 @@ python3 install.py
 # Or run directly
 claude-monitor
 
+# Lint + auto-fix (run after each coding task, before version bump and restart)
+uv run ruff check --fix
+
 # Debug log
 tail -f /tmp/claude-auto-accept/tui-debug.log
 ```
