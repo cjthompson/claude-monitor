@@ -1,7 +1,5 @@
 """Tests for keyboard actions and bindings."""
 
-import pytest
-
 from tests.conftest import _make_permission_event
 
 
@@ -18,10 +16,19 @@ class TestKeyboardActions:
         """Verify BINDINGS list contains expected entries."""
         binding_keys = [b.key for b in app_fixture.BINDINGS]
         expected_keys = [
-            "a", "shift+tab", "c", "u", "s", "d", "D",
-            "equals_sign", "minus",
-            "right_square_bracket", "left_square_bracket",
-            "question_mark", "q",
+            "a",
+            "shift+tab",
+            "c",
+            "u",
+            "s",
+            "d",
+            "D",
+            "equals_sign",
+            "minus",
+            "right_square_bracket",
+            "left_square_bracket",
+            "question_mark",
+            "q",
         ]
         for key in expected_keys:
             assert key in binding_keys, f"Missing binding for key: {key}"
@@ -35,6 +42,7 @@ class TestKeyboardActions:
             await _inject_and_process(app_fixture, pilot, inject_message, e2)
 
             from textual.widgets import TabbedContent
+
             tc = app_fixture.query_one("#tab-content", TabbedContent)
             first_active = tc.active
 
@@ -53,6 +61,7 @@ class TestKeyboardActions:
             await _inject_and_process(app_fixture, pilot, inject_message, e2)
 
             from textual.widgets import TabbedContent
+
             tc = app_fixture.query_one("#tab-content", TabbedContent)
 
             # Go to second tab first
@@ -75,6 +84,7 @@ class TestKeyboardActions:
             await _inject_and_process(app_fixture, pilot, inject_message, e2)
 
             from textual.widgets import TabbedContent
+
             tc = app_fixture.query_one("#tab-content", TabbedContent)
             first_active = tc.active
 

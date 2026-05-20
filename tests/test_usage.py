@@ -3,39 +3,35 @@
 import json
 import os
 import time
-from datetime import datetime, timezone, timedelta
-from unittest.mock import patch, MagicMock
-
-import pytest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 from claude_monitor.usage import (
-    _mask_token,
-    _parse_window,
-    _parse_oauth_json,
-    _extract_oauth_from_code_env,
-    _extract_oauth_from_dot_env,
-    _extract_oauth_from_env,
-    _load_disk_cache,
-    _save_disk_cache,
-    _usage_from_disk,
-    _bar,
-    _format_countdown,
-    _format_local_time,
-    _strip_markup,
-    _quota,
-    format_usage_inline,
+    USAGE_MAX_AGE,
     UsageData,
     UsageManager,
     WindowUsage,
-    USAGE_CACHE_FILE,
-    USAGE_MAX_AGE,
-    TOKEN_EXPIRY_BUFFER,
+    _bar,
+    _extract_oauth_from_code_env,
+    _extract_oauth_from_dot_env,
+    _extract_oauth_from_env,
+    _format_countdown,
+    _format_local_time,
+    _load_disk_cache,
+    _mask_token,
+    _parse_oauth_json,
+    _parse_window,
+    _quota,
+    _save_disk_cache,
+    _strip_markup,
+    _usage_from_disk,
+    format_usage_inline,
 )
-
 
 # ---------------------------------------------------------------------------
 # _mask_token
 # ---------------------------------------------------------------------------
+
 
 class TestMaskToken:
     def test_empty(self):
@@ -55,6 +51,7 @@ class TestMaskToken:
 # ---------------------------------------------------------------------------
 # _parse_window
 # ---------------------------------------------------------------------------
+
 
 class TestParseWindow:
     def test_basic(self):
@@ -87,9 +84,12 @@ class TestParseWindow:
 # _parse_oauth_json
 # ---------------------------------------------------------------------------
 
+
 class TestParseOauthJson:
     def test_valid_full(self):
-        data = json.dumps({"access_token": "tok", "refresh_token": "ref", "expires_at": 1234567890.0})
+        data = json.dumps(
+            {"access_token": "tok", "refresh_token": "ref", "expires_at": 1234567890.0}
+        )
         result = _parse_oauth_json(data)
         assert result == ("tok", "ref", 1234567890.0)
 
@@ -117,9 +117,12 @@ class TestParseOauthJson:
 # _extract_oauth_from_code_env
 # ---------------------------------------------------------------------------
 
+
 class TestExtractOauthFromCodeEnv:
     def test_present(self, monkeypatch):
-        data = json.dumps({"access_token": "tok123", "refresh_token": "ref", "expires_at": 99999999999})
+        data = json.dumps(
+            {"access_token": "tok123", "refresh_token": "ref", "expires_at": 99999999999}
+        )
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", data)
         result = _extract_oauth_from_code_env()
         assert result is not None
@@ -138,12 +141,15 @@ class TestExtractOauthFromCodeEnv:
 # _extract_oauth_from_dot_env
 # ---------------------------------------------------------------------------
 
+
 class TestExtractOauthFromDotEnv:
     def test_from_file(self, tmp_path, monkeypatch):
         env_file = tmp_path / ".env"
         token_json = json.dumps({"access_token": "envtok"})
-        env_file.write_text(f'CLAUDE_CODE_OAUTH_TOKEN={token_json}\n')
-        monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / ".env") if p == "~/.env" else p)
+        env_file.write_text(f"CLAUDE_CODE_OAUTH_TOKEN={token_json}\n")
+        monkeypatch.setattr(
+            "os.path.expanduser", lambda p: str(tmp_path / ".env") if p == "~/.env" else p
+        )
         # The function checks two candidates: ~/.env and cwd/.env
         monkeypatch.chdir(tmp_path)
         result = _extract_oauth_from_dot_env()
@@ -151,14 +157,16 @@ class TestExtractOauthFromDotEnv:
         assert result[0] == "envtok"
 
     def test_no_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "nonexistent") if p == "~/.env" else p)
+        monkeypatch.setattr(
+            "os.path.expanduser", lambda p: str(tmp_path / "nonexistent") if p == "~/.env" else p
+        )
         monkeypatch.chdir(tmp_path)
         assert _extract_oauth_from_dot_env() is None
 
     def test_comment_and_empty_lines(self, tmp_path, monkeypatch):
         env_file = tmp_path / ".env"
         token_json = json.dumps({"access_token": "tok2"})
-        env_file.write_text(f'# comment\n\nOTHER_VAR=hello\nCLAUDE_CODE_OAUTH_TOKEN={token_json}\n')
+        env_file.write_text(f"# comment\n\nOTHER_VAR=hello\nCLAUDE_CODE_OAUTH_TOKEN={token_json}\n")
         monkeypatch.chdir(tmp_path)
         result = _extract_oauth_from_dot_env()
         assert result is not None
@@ -178,6 +186,7 @@ class TestExtractOauthFromDotEnv:
 # _extract_oauth_from_env
 # ---------------------------------------------------------------------------
 
+
 class TestExtractOauthFromEnv:
     def test_present(self, monkeypatch):
         data = json.dumps({"access_token": "envtok2"})
@@ -195,9 +204,12 @@ class TestExtractOauthFromEnv:
 # Disk cache
 # ---------------------------------------------------------------------------
 
+
 class TestDiskCache:
     def test_load_missing(self, monkeypatch):
-        monkeypatch.setattr("claude_monitor.usage.USAGE_CACHE_FILE", "/tmp/nonexistent-test-cache.json")
+        monkeypatch.setattr(
+            "claude_monitor.usage.USAGE_CACHE_FILE", "/tmp/nonexistent-test-cache.json"
+        )
         assert _load_disk_cache() == {}
 
     def test_save_and_load(self, tmp_path, monkeypatch):
@@ -241,6 +253,7 @@ class TestDiskCache:
 # ---------------------------------------------------------------------------
 # Pure formatting helpers
 # ---------------------------------------------------------------------------
+
 
 class TestBar:
     def test_zero(self):
@@ -377,6 +390,7 @@ class TestFormatUsageInline:
 # UsageManager
 # ---------------------------------------------------------------------------
 
+
 class TestUsageManager:
     def test_set_oauth_json_invalidates_cache(self):
         mgr = UsageManager()
@@ -401,7 +415,9 @@ class TestUsageManager:
     def test_get_token_from_settings_json(self):
         mgr = UsageManager()
         future = time.time() + 3600
-        mgr.set_oauth_json(json.dumps({"access_token": "settok", "refresh_token": "ref", "expires_at": future}))
+        mgr.set_oauth_json(
+            json.dumps({"access_token": "settok", "refresh_token": "ref", "expires_at": future})
+        )
         token = mgr.get_token()
         assert token == "settok"
 
@@ -431,16 +447,22 @@ class TestUsageManager:
     def test_get_token_expired_triggers_refresh(self, monkeypatch):
         mgr = UsageManager()
         past = time.time() - 100
-        mgr.set_oauth_json(json.dumps({"access_token": "old", "refresh_token": "ref", "expires_at": past}))
+        mgr.set_oauth_json(
+            json.dumps({"access_token": "old", "refresh_token": "ref", "expires_at": past})
+        )
         # Mock refresh to succeed
-        monkeypatch.setattr(mgr, "_refresh_access_token", lambda rt: ("newtok", "newref", time.time() + 3600))
+        monkeypatch.setattr(
+            mgr, "_refresh_access_token", lambda rt: ("newtok", "newref", time.time() + 3600)
+        )
         token = mgr.get_token()
         assert token == "newtok"
 
     def test_get_token_expired_refresh_fails_returns_old(self, monkeypatch):
         mgr = UsageManager()
         past = time.time() - 100
-        mgr.set_oauth_json(json.dumps({"access_token": "old", "refresh_token": "ref", "expires_at": past}))
+        mgr.set_oauth_json(
+            json.dumps({"access_token": "old", "refresh_token": "ref", "expires_at": past})
+        )
         monkeypatch.setattr(mgr, "_refresh_access_token", lambda rt: None)
         token = mgr.get_token()
         assert token == "old"
@@ -449,7 +471,9 @@ class TestUsageManager:
         mgr = UsageManager()
         past = time.time() - 100
         mgr._token_cache = {"token": "old", "refresh_token": "ref", "expires_at": past}
-        monkeypatch.setattr(mgr, "_refresh_access_token", lambda rt: ("refreshed", "newref", time.time() + 3600))
+        monkeypatch.setattr(
+            mgr, "_refresh_access_token", lambda rt: ("refreshed", "newref", time.time() + 3600)
+        )
         token = mgr.get_token()
         assert token == "refreshed"
 
@@ -467,7 +491,9 @@ class TestUsageManager:
         assert not os.path.exists(cache_file)
 
     def test_invalidate_cache_no_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_monitor.usage.USAGE_CACHE_FILE", str(tmp_path / "nonexistent.json"))
+        monkeypatch.setattr(
+            "claude_monitor.usage.USAGE_CACHE_FILE", str(tmp_path / "nonexistent.json")
+        )
         mgr = UsageManager()
         mgr.invalidate_cache()  # Should not raise
 
@@ -486,11 +512,14 @@ class TestUsageManager:
         monkeypatch.setattr("claude_monitor.usage.USAGE_CACHE_FILE", cache_file)
         now = time.time()
         with open(cache_file, "w") as f:
-            json.dump({
-                "fetched_at": now,
-                "five_hour": {"utilization": 42.0},
-                "seven_day": {"utilization": 20.0},
-            }, f)
+            json.dump(
+                {
+                    "fetched_at": now,
+                    "five_hour": {"utilization": 42.0},
+                    "seven_day": {"utilization": 20.0},
+                },
+                f,
+            )
 
         mgr = UsageManager()
         # Mock get_token to avoid actual token resolution
@@ -508,10 +537,12 @@ class TestUsageManager:
 
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = json.dumps({
-            "five_hour": {"utilization": 60.0, "resets_at": "2024-06-15T12:00:00Z"},
-            "seven_day": {"utilization": 25.0},
-        }).encode()
+        mock_result.stdout = json.dumps(
+            {
+                "five_hour": {"utilization": 60.0, "resets_at": "2024-06-15T12:00:00Z"},
+                "seven_day": {"utilization": 25.0},
+            }
+        ).encode()
 
         monkeypatch.setattr("claude_monitor.usage.subprocess.run", lambda *a, **kw: mock_result)
 
@@ -579,11 +610,13 @@ class TestUsageManager:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status = 200
-        mock_resp.read.return_value = json.dumps({
-            "access_token": "new_tok",
-            "refresh_token": "new_ref",
-            "expires_in": 3600,
-        }).encode()
+        mock_resp.read.return_value = json.dumps(
+            {
+                "access_token": "new_tok",
+                "refresh_token": "new_ref",
+                "expires_in": 3600,
+            }
+        ).encode()
 
         monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
         monkeypatch.setattr("claude_monitor.usage._read_keychain", lambda: None)
@@ -606,17 +639,21 @@ class TestUsageManager:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status = 200
-        mock_resp.read.return_value = json.dumps({
-            "access_token": "new_tok",
-            "expires_in": 3600,
-        }).encode()
+        mock_resp.read.return_value = json.dumps(
+            {
+                "access_token": "new_tok",
+                "expires_in": 3600,
+            }
+        ).encode()
 
         monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
 
         keychain_data = {"claudeAiOauth": {"accessToken": "old", "refreshToken": "old_ref"}}
         monkeypatch.setattr("claude_monitor.usage._read_keychain", lambda: keychain_data)
         written = []
-        monkeypatch.setattr("claude_monitor.usage._write_keychain", lambda d: written.append(d) or True)
+        monkeypatch.setattr(
+            "claude_monitor.usage._write_keychain", lambda d: written.append(d) or True
+        )
 
         result = mgr._refresh_access_token("old_ref")
         assert result is not None
@@ -638,20 +675,27 @@ class TestUsageManager:
     def test_refresh_access_token_network_error(self, monkeypatch):
         mgr = UsageManager()
         from urllib.error import URLError
-        monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: (_ for _ in ()).throw(URLError("fail")))
+
+        monkeypatch.setattr(
+            "claude_monitor.usage.urlopen",
+            lambda req, **kw: (_ for _ in ()).throw(URLError("fail")),
+        )
         assert mgr._refresh_access_token("ref") is None
 
     def test_refresh_callback_error_swallowed(self, monkeypatch):
         mgr = UsageManager()
-        mgr.set_on_token_refreshed(lambda t, r, e: 1/0)
+        mgr.set_on_token_refreshed(lambda t, r, e: 1 / 0)
 
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status = 200
-        mock_resp.read.return_value = json.dumps({
-            "access_token": "tok", "expires_in": 3600,
-        }).encode()
+        mock_resp.read.return_value = json.dumps(
+            {
+                "access_token": "tok",
+                "expires_in": 3600,
+            }
+        ).encode()
 
         monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
         monkeypatch.setattr("claude_monitor.usage._read_keychain", lambda: None)
@@ -666,11 +710,14 @@ class TestUsageManager:
         monkeypatch.setattr("claude_monitor.usage.USAGE_CACHE_FILE", cache_file)
         old_time = time.time() - USAGE_MAX_AGE - 100  # expired
         with open(cache_file, "w") as f:
-            json.dump({
-                "fetched_at": old_time,
-                "five_hour": {"utilization": 35.0},
-                "seven_day": {"utilization": 15.0},
-            }, f)
+            json.dump(
+                {
+                    "fetched_at": old_time,
+                    "five_hour": {"utilization": 35.0},
+                    "seven_day": {"utilization": 15.0},
+                },
+                f,
+            )
 
         mgr = UsageManager()
         monkeypatch.setattr(mgr, "get_token", lambda: None)

@@ -3,16 +3,13 @@
 import io
 import json
 import os
-import sys
-import time
-
-import pytest
-
-from tests.conftest import _make_permission_event, _make_notification_event, _make_subagent_event
 
 
 def _run_hook(input_data: dict, monkeypatch, env_vars=None):
-    """Run hook.main() with mocked stdin/stdout/stderr, return (stdout_data, events_file_contents)."""
+    """Run hook.main() with mocked stdin/stdout/stderr.
+
+    Returns (stdout_data, events_file_contents).
+    """
     import claude_monitor.hook as hook
 
     stdin = io.StringIO(json.dumps(input_data))
@@ -97,7 +94,9 @@ class TestHookDecisionLogic:
             "cwd": "/tmp/test",
             "tool_input": {},
         }
-        stdout, events = _run_hook(data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p0:my-iterm-uuid"})
+        stdout, events = _run_hook(
+            data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p0:my-iterm-uuid"}
+        )
         assert stdout.strip() == ""
         # Check the logged event has deferred decision
         logged = json.loads(events.strip().split("\n")[-1])
@@ -168,7 +167,9 @@ class TestHookDecisionLogic:
             "cwd": "/tmp/test",
             "tool_input": {"question": "Continue?"},
         }
-        stdout, events = _run_hook(data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p0:my-iterm-uuid"})
+        stdout, events = _run_hook(
+            data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p0:my-iterm-uuid"}
+        )
         assert stdout.strip() == ""
         logged = json.loads(events.strip().split("\n")[-1])
         assert logged["_decision"] == "deferred"
@@ -208,7 +209,9 @@ class TestHookDecisionLogic:
             "session_id": "sess-1",
             "message": "test",
         }
-        stdout, events = _run_hook(data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p5:uuid-123-456"})
+        stdout, events = _run_hook(
+            data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p5:uuid-123-456"}
+        )
         logged = json.loads(events.strip().split("\n")[-1])
         assert "_timestamp" in logged
         assert isinstance(logged["_timestamp"], float)

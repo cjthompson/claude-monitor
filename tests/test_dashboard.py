@@ -1,8 +1,6 @@
 """Tests for dashboard panel behavior."""
 
-import pytest
-
-from tests.conftest import _make_permission_event, _make_subagent_event
+from tests.conftest import _make_permission_event
 
 
 async def _inject_and_process(app, pilot, inject_message, event_data):

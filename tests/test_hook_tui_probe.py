@@ -8,11 +8,7 @@ hardcoded ``API_PORT``; the bind itself acts as the mutex.
 
 import io
 import json
-import os
 import socket
-import threading
-
-import pytest
 
 
 def _bind_free_port() -> tuple[socket.socket, int]:
@@ -40,6 +36,7 @@ class TestTuiIsRunningProbe:
         try:
             monkeypatch.setattr("claude_monitor.hook.API_PORT", port)
             from claude_monitor.hook import _tui_is_running
+
             assert _tui_is_running() is True
         finally:
             sock.close()
@@ -48,6 +45,7 @@ class TestTuiIsRunningProbe:
         port = _free_port_no_listener()
         monkeypatch.setattr("claude_monitor.hook.API_PORT", port)
         from claude_monitor.hook import _tui_is_running
+
         assert _tui_is_running() is False
 
     def test_does_not_depend_on_a_port_file(self, monkeypatch, tmp_path):
@@ -62,6 +60,7 @@ class TestTuiIsRunningProbe:
             stale_file = tmp_path / "api-port"
             assert not stale_file.exists()
             from claude_monitor.hook import _tui_is_running
+
             assert _tui_is_running() is True
         finally:
             sock.close()

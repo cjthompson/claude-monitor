@@ -108,7 +108,7 @@ class SessionPanel(Static):
         self._event_log: list[str] = []  # stored for replay after rebuild
         self._pending_timeout: float | None = None  # epoch when timeout expires
         self._timeout_origin: float | None = None  # origin timestamp of the timeout event
-        self._pending_deferred_at: float | None = None  # ts of last deferred PermissionRequest — suppresses next permission_prompt keystroke
+        self._pending_deferred_at: float | None = None  # last ts of deferred PermissionRequest
 
     def compose(self) -> ComposeResult:
         yield RichLog(markup=True, wrap=False)
@@ -157,7 +157,9 @@ class SessionPanel(Static):
                 mode += " [cyan]?\u23f8[/]"
                 mode_plain += " ?\u23f8"
         except AttributeError:
-            log.debug(f"SessionPanel._render_mode: failed to check pause state for {self.session_id}")
+            log.debug(
+                f"SessionPanel._render_mode: failed to check pause state for {self.session_id}"
+            )
             mode = ""
             mode_plain = ""
         return mode, mode_plain
@@ -205,7 +207,9 @@ class SessionPanel(Static):
 
         mode, mode_plain = self._render_mode()
         state, state_short, state_plain = self._render_state_badge()
-        agents_full, agents_full_plain, agents_count, agents_count_plain, has_agents = self._render_agents()
+        agents_full, agents_full_plain, agents_count, agents_count_plain, has_agents = (
+            self._render_agents()
+        )
         done, accepted = self._render_accepts()
         uptime = self._render_uptime()
         n = len(self.active_agents)
@@ -214,20 +218,50 @@ class SessionPanel(Static):
         try:
             w = self.size.width
         except AttributeError:
-            log.debug(f"SessionPanel._render_status: failed to get widget width for {self.session_id}, defaulting to 120")
+            log.debug(
+                f"SessionPanel._render_status: "
+                f"failed to get widget width for {self.session_id}, "
+                f"defaulting to 120"
+            )
             w = 120  # fallback to widest
 
         # SEP is ~3 visible chars (" | ")
         S = 3
 
         # Build tiers from widest to narrowest
-        # Tier 1 (>=110): AUTO | > active | Agents: XX 2 (gp:1 Ex:1) | Done: 5 | Accepted: 23 | 14m32s
+        # Tier 1 (>=110): AUTO | > active | Agents: XX 2 (gp:1 Ex:1)
+        #   | Done: 5 | Accepted: 23 | 14m32s
         if has_agents:
-            t1 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}{SEP}Done: {done}{SEP}Accepted: {accepted}{SEP}{uptime}"
-            t1_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain) + S + len(f"Done: {done}") + S + len(f"Accepted: {accepted}") + S + len(uptime)
+            t1 = (
+                f"{mode}{SEP}{state}{SEP}Agents: {agents_full}"
+                f"{SEP}Done: {done}{SEP}Accepted: {accepted}{SEP}{uptime}"
+            )
+            t1_len = (
+                len(mode_plain)
+                + S
+                + len(state_plain)
+                + S
+                + len("Agents: ")
+                + len(agents_full_plain)
+                + S
+                + len(f"Done: {done}")
+                + S
+                + len(f"Accepted: {accepted}")
+                + S
+                + len(uptime)
+            )
         else:
             t1 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}{SEP}{uptime}"
-            t1_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain) + S + len(uptime)
+            t1_len = (
+                len(mode_plain)
+                + S
+                + len(state_plain)
+                + S
+                + len("Agents: ")
+                + len(agents_full_plain)
+                + S
+                + len(uptime)
+            )
 
         if w >= t1_len:
             return t1
@@ -235,10 +269,26 @@ class SessionPanel(Static):
         # Tier 2 (>=85): AUTO | > active | Agents: XX 2 (gp:1 Ex:1) | Tasks: 5/23
         if has_agents:
             t2 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}{SEP}Tasks: {done}/{accepted}"
-            t2_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain) + S + len(f"Tasks: {done}/{accepted}")
+            t2_len = (
+                len(mode_plain)
+                + S
+                + len(state_plain)
+                + S
+                + len("Agents: ")
+                + len(agents_full_plain)
+                + S
+                + len(f"Tasks: {done}/{accepted}")
+            )
         else:
             t2 = f"{mode}{SEP}{state}{SEP}Agents: {agents_full}"
-            t2_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_full_plain)
+            t2_len = (
+                len(mode_plain)
+                + S
+                + len(state_plain)
+                + S
+                + len("Agents: ")
+                + len(agents_full_plain)
+            )
 
         if w >= t2_len:
             return t2
@@ -246,10 +296,25 @@ class SessionPanel(Static):
         # Tier 3 (>=60): AUTO | > active | Agents: XX 2 | Tasks: 5/23
         if has_agents:
             t3 = f"{mode}{SEP}{state}{SEP}Agents: {agents_count} | Tasks: {done}/{accepted}"
-            t3_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_count_plain) + len(f" | Tasks: {done}/{accepted}")
+            t3_len = (
+                len(mode_plain)
+                + S
+                + len(state_plain)
+                + S
+                + len("Agents: ")
+                + len(agents_count_plain)
+                + len(f" | Tasks: {done}/{accepted}")
+            )
         else:
             t3 = f"{mode}{SEP}{state}{SEP}Agents: {agents_count}"
-            t3_len = len(mode_plain) + S + len(state_plain) + S + len("Agents: ") + len(agents_count_plain)
+            t3_len = (
+                len(mode_plain)
+                + S
+                + len(state_plain)
+                + S
+                + len("Agents: ")
+                + len(agents_count_plain)
+            )
 
         if w >= t3_len:
             return t3
@@ -257,7 +322,9 @@ class SessionPanel(Static):
         # Tier 4 (>=48): AUTO | > active | SA: 2 | T: 5/23
         if has_agents:
             t4 = f"{mode}{SEP}{state}{SEP}SA: {n} | T: {done}/{accepted}"
-            t4_len = len(mode_plain) + S + len(state_plain) + S + len(f"SA: {n} | T: {done}/{accepted}")
+            t4_len = (
+                len(mode_plain) + S + len(state_plain) + S + len(f"SA: {n} | T: {done}/{accepted}")
+            )
         else:
             t4 = f"{mode}{SEP}{state}{SEP}SA: {n}"
             t4_len = len(mode_plain) + S + len(state_plain) + S + len(f"SA: {n}")
@@ -301,7 +368,9 @@ class SessionPanel(Static):
         try:
             self.query_one(".panel-status", Static).update(self._render_status())
         except NoMatches:
-            log.debug(f"SessionPanel._update_status: panel-status query failed for {self.session_id}")
+            log.debug(
+                f"SessionPanel._update_status: panel-status query failed for {self.session_id}"
+            )
         # Update countdown overlay and bar
         try:
             bar = self.query_one(".countdown-bar", Static)
@@ -311,7 +380,10 @@ class SessionPanel(Static):
                 if remaining > 0:
                     bar.update(f" \u23f1 AskUserQuestion auto-accept in {remaining}s")
                     bar.add_class("active")
-                    overlay.update(f" \u23f1 AskUserQuestion \u2014 auto-accept in [bold white]{remaining}s[/] ")
+                    overlay.update(
+                        f" \u23f1 AskUserQuestion \u2014 auto-accept "
+                        f"in [bold white]{remaining}s[/] "
+                    )
                     overlay.add_class("active")
                 else:
                     self._pending_timeout = None
@@ -325,15 +397,20 @@ class SessionPanel(Static):
                 overlay.update("")
                 overlay.remove_class("active")
         except NoMatches:
-            log.debug(f"SessionPanel._update_status: countdown/overlay query failed for {self.session_id}")
+            log.debug(
+                f"SessionPanel._update_status: countdown/overlay query failed for {self.session_id}"
+            )
 
     def on_click(self, event) -> None:
         """Title bar click opens context menu; status bar click toggles mode."""
         from claude_monitor.screens.context_menu import PaneContextMenu
+
         # Click on top border row (where the title is) opens context menu
         if event.screen_y == self.region.y:
             event.stop()
-            self.app.push_screen(PaneContextMenu(self.session_id, click_x=event.screen_x, click_y=event.screen_y))
+            self.app.push_screen(
+                PaneContextMenu(self.session_id, click_x=event.screen_x, click_y=event.screen_y)
+            )
             return
         try:
             status = self.query_one(".panel-status", Static)

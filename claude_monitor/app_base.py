@@ -39,17 +39,15 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from claude_monitor import (
-    __version__,
-    SIGNAL_DIR,
-    EVENTS_FILE,
-    STATE_FILE,
     API_PORT,
+    EVENTS_FILE,
+    SIGNAL_DIR,
+    STATE_FILE,
+    __version__,
     read_state,
 )
 from claude_monitor.messages import HookEvent
-from claude_monitor.screens import ChoicesScreen, QuestionsScreen, HelpScreen, ConfirmKillScreen
-from claude_monitor.widgets import SessionPanel, DashboardPanel
-from claude_monitor.web import start_web_server
+from claude_monitor.screens import ChoicesScreen, ConfirmKillScreen, HelpScreen, QuestionsScreen
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
 from claude_monitor.usage import (
     fetch_usage,
@@ -58,6 +56,8 @@ from claude_monitor.usage import (
     set_oauth_json,
     set_on_token_refreshed,
 )
+from claude_monitor.web import start_web_server
+from claude_monitor.widgets import DashboardPanel, SessionPanel
 
 log = logging.getLogger(__name__)
 
@@ -225,23 +225,15 @@ class MonitorApp(App):
         dashboard_data = None
         if self.dashboard:
             d = self.dashboard
-            total_accepted = (
-                sum(p.accept_count for p in panels_values) + d.accept_count
-            )
-            total_agents_active = (
-                sum(len(p.active_agents) for p in panels_values)
-                + len(d.active_agents)
+            total_accepted = sum(p.accept_count for p in panels_values) + d.accept_count
+            total_agents_active = sum(len(p.active_agents) for p in panels_values) + len(
+                d.active_agents
             )
             total_agents_done = (
-                sum(p.total_agents_completed for p in panels_values)
-                + d.total_agents_completed
+                sum(p.total_agents_completed for p in panels_values) + d.total_agents_completed
             )
-            active_sessions = sum(
-                1 for p in panels_values if p.state == "active"
-            )
-            idle_sessions = sum(
-                1 for p in panels_values if p.state == "idle"
-            )
+            active_sessions = sum(1 for p in panels_values if p.state == "active")
+            idle_sessions = sum(1 for p in panels_values if p.state == "idle")
             dashboard_data = {
                 "total_accepted": total_accepted,
                 "total_agents_active": total_agents_active,
@@ -257,17 +249,13 @@ class MonitorApp(App):
                 "five_hour": {
                     "utilization": u.five_hour.utilization,
                     "resets_at": (
-                        u.five_hour.resets_at.isoformat()
-                        if u.five_hour.resets_at
-                        else None
+                        u.five_hour.resets_at.isoformat() if u.five_hour.resets_at else None
                     ),
                 },
                 "seven_day": {
                     "utilization": u.seven_day.utilization,
                     "resets_at": (
-                        u.seven_day.resets_at.isoformat()
-                        if u.seven_day.resets_at
-                        else None
+                        u.seven_day.resets_at.isoformat() if u.seven_day.resets_at else None
                     ),
                 },
             }
@@ -311,12 +299,8 @@ class MonitorApp(App):
             right = self.query_one("#status-right", Static)
             SEP = "  [dim]\u2502[/]  "
 
-            n_paused = sum(
-                1 for sid in self.panels if self.is_pane_paused(sid)
-            )
-            n_ask_paused = sum(
-                1 for sid in self.panels if self.is_ask_paused(sid)
-            )
+            n_paused = sum(1 for sid in self.panels if self.is_pane_paused(sid))
+            n_ask_paused = sum(1 for sid in self.panels if self.is_ask_paused(sid))
             if self.paused:
                 mode_text = "[bold]MANUAL[/]"
                 bar.set_classes("paused")
@@ -327,9 +311,7 @@ class MonitorApp(App):
                 usage_mode = "running"
             else:
                 n_total = len(self.panels)
-                mode_text = (
-                    f"[bold]MIXED [/] [dim]{n_total - n_paused}a {n_paused}m[/]"
-                )
+                mode_text = f"[bold]MIXED [/] [dim]{n_total - n_paused}a {n_paused}m[/]"
                 bar.set_classes("paused")
                 usage_mode = "paused"
 
@@ -338,9 +320,7 @@ class MonitorApp(App):
                 left_parts.append(f"[bold cyan]? PAUSED[/] [dim]({n_ask_paused})[/]")
             if self._last_usage_data:
                 bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
-                left_parts.append(
-                    format_usage_inline(self._last_usage_data, bar_width, usage_mode)
-                )
+                left_parts.append(format_usage_inline(self._last_usage_data, bar_width, usage_mode))
             elif self.settings.account_usage:
                 if self._usage_next_fetch > 0:
                     next_dt = datetime.fromtimestamp(self._usage_next_fetch)
@@ -351,10 +331,7 @@ class MonitorApp(App):
             left.update(SEP.join(left_parts))
 
             clock = (
-                datetime.now()
-                .strftime("%-b %-d %-I:%M%p")
-                .replace("AM", "am")
-                .replace("PM", "pm")
+                datetime.now().strftime("%-b %-d %-I:%M%p").replace("AM", "am").replace("PM", "pm")
             )
             right.update(f"[dim]v{__version__}[/]{SEP}{clock}")
         except NoMatches:
@@ -391,20 +368,20 @@ class MonitorApp(App):
             self._refresh_usage()
         log.debug(f"Settings updated: {result}")
 
-    def _on_token_refreshed(
-        self, token: str, refresh_token: str, expires_at: float
-    ) -> None:
+    def _on_token_refreshed(self, token: str, refresh_token: str, expires_at: float) -> None:
         """Called from the usage module when the OAuth token is refreshed.
 
         May be called from a background thread — all mutable state changes
         are marshalled to the main thread via ``call_from_thread``.
         """
         if self.settings.oauth_json:
-            new_json = json.dumps({
-                "access_token": token,
-                "refresh_token": refresh_token,
-                "expires_at": expires_at,
-            })
+            new_json = json.dumps(
+                {
+                    "access_token": token,
+                    "refresh_token": refresh_token,
+                    "expires_at": expires_at,
+                }
+            )
 
             def _update_settings() -> None:
                 self.settings.oauth_json = new_json
@@ -414,10 +391,7 @@ class MonitorApp(App):
             self.call_from_thread(_update_settings)
         ts = self._format_ts(datetime.now().astimezone())
         expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).astimezone()
-        msg = (
-            f"[{ts}] [dim]OAuth token refreshed, "
-            f"expires {expires_dt.strftime('%H:%M:%S')}[/]"
-        )
+        msg = f"[{ts}] [dim]OAuth token refreshed, expires {expires_dt.strftime('%H:%M:%S')}[/]"
 
         def _log() -> None:
             if self.dashboard:
@@ -554,9 +528,7 @@ class MonitorApp(App):
                             data = json.loads(line)
                             self.post_message(HookEvent(data))
                         except json.JSONDecodeError:
-                            log.debug(
-                                f"watch_events: failed to parse JSON: {line[:100]}"
-                            )
+                            log.debug(f"watch_events: failed to parse JSON: {line[:100]}")
                 else:
                     self._stop_event.wait(0.2)
         log.debug("watch_events: stopped")

@@ -1,5 +1,10 @@
 """Custom half-block scrollbar renderers for claude-monitor TUI."""
 
+from math import ceil
+
+from rich.color import Color
+from rich.segment import Segment, Segments
+from rich.style import Style
 from textual.scrollbar import ScrollBarRender
 
 
@@ -7,13 +12,17 @@ class HalfBlockScrollBarRender(ScrollBarRender):
     """Base renderer that draws the thumb using the half-block glyph in bar color (no reverse)."""
 
     @classmethod
-    def render_bar(cls, size=25, virtual_size=50, window_size=20, position=0,
-                   thickness=1, vertical=True,
-                   back_color=None, bar_color=None) -> "Segments":
-        from rich.color import Color
-        from rich.segment import Segment, Segments
-        from rich.style import Style
-        from math import ceil
+    def render_bar(
+        cls,
+        size=25,
+        virtual_size=50,
+        window_size=20,
+        position=0,
+        thickness=1,
+        vertical=True,
+        back_color=None,
+        bar_color=None,
+    ) -> Segments:
         if back_color is None:
             back_color = Color.parse("#000000")
         if bar_color is None:
@@ -72,4 +81,13 @@ class HorizontalScrollBarRender(HalfBlockScrollBarRender):
 
 class VerticalScrollBarRender(HalfBlockScrollBarRender):
     BLANK_GLYPH = "\u2590"
-    VERTICAL_BARS = ["\u2590", "\u2590", "\u2590", "\u2590", "\u2590", "\u2590", "\u2590", " "]  # disable fractional end caps
+    VERTICAL_BARS = [
+        "\u2590",
+        "\u2590",
+        "\u2590",
+        "\u2590",
+        "\u2590",
+        "\u2590",
+        "\u2590",
+        " ",
+    ]  # disable fractional end caps

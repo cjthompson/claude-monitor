@@ -1,7 +1,5 @@
 """Tests for commands.py — MonitorCommands provider."""
 
-import pytest
-
 from claude_monitor.commands import MonitorCommands
 
 

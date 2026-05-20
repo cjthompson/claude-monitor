@@ -1,7 +1,5 @@
 """Tests for tab management."""
 
-import pytest
-
 from tests.conftest import _make_permission_event
 
 
@@ -45,6 +43,7 @@ class TestTabManagement:
             await _inject_and_process(app_fixture, pilot, inject_message, e)
 
             from textual.widgets import TabbedContent
+
             tc = app_fixture.query_one("#tab-content", TabbedContent)
             # Tab was added
             tab_id = app_fixture._claude_to_tab["sess-close-tab"]
@@ -61,6 +60,7 @@ class TestTabManagement:
             assert app_fixture._dashboard_tab_pane_id is not None
 
             from textual.widgets import TabbedContent
+
             tc = app_fixture.query_one("#tab-content", TabbedContent)
             # Dashboard tab should be present
             pane_ids = [p.id for p in tc.query("TabPane") if p.id]

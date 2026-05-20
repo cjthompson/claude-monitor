@@ -1,11 +1,8 @@
 """Extended tests for app_base.py — state management, settings, timestamps."""
 
 import json
-import os
 import time
 from datetime import datetime, timezone
-
-import pytest
 
 from claude_monitor.settings import Settings
 from tests.conftest import _make_permission_event
@@ -78,6 +75,7 @@ class TestApplySettings:
         async with app_fixture.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             from claude_monitor.usage import UsageData, WindowUsage
+
             app_fixture._last_usage_data = UsageData(
                 five_hour=WindowUsage(50.0, None),
                 seven_day=WindowUsage(30.0, None),
@@ -114,6 +112,7 @@ class TestGetStateSnapshot:
         async with app_fixture.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             from claude_monitor.usage import UsageData, WindowUsage
+
             resets = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
             app_fixture._last_usage_data = UsageData(
                 five_hour=WindowUsage(50.0, resets),

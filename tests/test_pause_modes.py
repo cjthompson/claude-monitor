@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from tests.conftest import _make_permission_event
 
 

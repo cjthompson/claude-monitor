@@ -70,7 +70,9 @@ class ChoicesScreen(ModalScreen):
         for entry in entries:
             rl.write(entry)
         rl.scroll_end(animate=False)
-        self.query_one("#choices-log", RichLog).horizontal_scrollbar.renderer = HorizontalScrollBarRender
+        self.query_one(
+            "#choices-log", RichLog
+        ).horizontal_scrollbar.renderer = HorizontalScrollBarRender
 
     def _load_choices(self) -> list[str]:
         """Load PermissionRequest events from events.jsonl (newest first)."""
@@ -84,7 +86,9 @@ class ChoicesScreen(ModalScreen):
                     try:
                         data = json.loads(line)
                     except json.JSONDecodeError:
-                        log.debug(f"PermissionSearchProvider: failed to parse JSON line: {line[:100]}")
+                        log.debug(
+                            f"PermissionSearchProvider: failed to parse JSON line: {line[:100]}"
+                        )
                         continue
                     if data.get("hook_event_name") != "PermissionRequest":
                         continue

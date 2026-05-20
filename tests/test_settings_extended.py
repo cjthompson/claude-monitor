@@ -3,15 +3,12 @@
 import json
 import os
 
-import pytest
-
 from claude_monitor.settings import (
     Settings,
-    load_settings,
-    save_settings,
     _mask_oauth_json,
     _widget_id,
-    THEMES,
+    load_settings,
+    save_settings,
 )
 
 
@@ -103,6 +100,7 @@ class TestSettingsPersistence:
 
     def test_save_creates_dir(self, tmp_path, monkeypatch):
         import claude_monitor.settings as settings_mod
+
         new_dir = str(tmp_path / "newdir")
         new_file = os.path.join(new_dir, "config.json")
         monkeypatch.setattr(settings_mod, "CONFIG_DIR", new_dir)

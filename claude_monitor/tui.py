@@ -18,59 +18,48 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
 
 from claude_monitor import (
-    __version__,
+    LOG_FILE,
     SIGNAL_DIR,
     STATE_FILE,
-    LOG_FILE,
     extract_iterm_session_id,
     read_state,
 )
 from claude_monitor.app_base import MonitorApp
 from claude_monitor.commands import MonitorCommands
 from claude_monitor.formatting import (
+    _oneline as _oneline_fn,
+)
+from claude_monitor.formatting import (
     _safe_css_id,
     _safe_tab_css_id,
-    _format_ask_user_question_inline,
-    _format_ask_user_question_detail,
-    _oneline as _oneline_fn,
+)
+from claude_monitor.formatting import (
     format_event as _format_event_shared,
 )
 from claude_monitor.iterm2_layout import (
-    ITERM2_AVAILABLE,
+    KeystrokeSender,
     LayoutFetcher,
     LayoutFingerprint,
     WidgetTreeBuilder,
-    KeystrokeSender,
+    _iterm2_ready,
     collect_session_ids,
     filter_tabs_by_scope,
     set_tab_titles,
     start_persistent_connection,
-    _iterm2_ready,
 )
 from claude_monitor.messages import HookEvent
-from claude_monitor.screens import (
-    PaneContextMenu,
-    ChoicesScreen,
-    QuestionsScreen,
-    HelpScreen,
-)
-from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
+from claude_monitor.settings import Settings, load_settings
 from claude_monitor.usage import (
     fetch_usage,
-    format_usage_inline,
     invalidate_usage_cache,
-    set_oauth_json,
-    set_on_token_refreshed,
 )
 from claude_monitor.widgets import (
-    HorizontalScrollBarRender,
-    VerticalScrollBarRender,
-    FixedWidthSparkline,
-    SessionPanel,
     DashboardPanel,
+    SessionPanel,
 )
 
 os.makedirs(SIGNAL_DIR, exist_ok=True)
@@ -89,11 +78,10 @@ for _noisy in ("websockets", "asyncio", "iterm2.connection"):
 
 # --- Layout change messages (iTerm2-specific) ---
 
-from textual.message import Message
-
 
 class LayoutChanged(Message):
     """Posted when iTerm2 layout structure has changed (panes added/removed/rearranged)."""
+
     def __init__(self, tabs: list, self_session_id: "str | None") -> None:
         super().__init__()
         self.tabs = tabs
@@ -102,6 +90,7 @@ class LayoutChanged(Message):
 
 class LayoutResized(Message):
     """Posted when iTerm2 pane sizes changed but structure is the same."""
+
     def __init__(self, tabs: list) -> None:
         super().__init__()
         self.tabs = tabs
@@ -121,9 +110,7 @@ def fetch_iterm_layout() -> None:
     settings = load_settings()
     _layout_tabs = filter_tabs_by_scope(tabs, self_sid, settings.iterm_scope, win_groups)
     _self_session_id = self_sid
-    log.debug(
-        f"fetch_iterm_layout done: tabs={len(_layout_tabs)}, self={_self_session_id}"
-    )
+    log.debug(f"fetch_iterm_layout done: tabs={len(_layout_tabs)}, self={_self_session_id}")
 
 
 class AutoAcceptTUI(MonitorApp):
@@ -351,7 +338,7 @@ class AutoAcceptTUI(MonitorApp):
         for tab_id, tab_name, tree in tabs:
             if tab_id not in self._tab_original_names:
                 # Strip any stacked " [N]" or " [N/N]" suffixes we may have set previously
-                clean_name = re.sub(r'( \[\d+(/\d+)?\])+$', '', tab_name)
+                clean_name = re.sub(r"( \[\d+(/\d+)?\])+$", "", tab_name)
                 self._tab_original_names[tab_id] = clean_name
             self._tab_session_ids[tab_id] = collect_session_ids(tree)
 
@@ -359,8 +346,11 @@ class AutoAcceptTUI(MonitorApp):
             # Single tab — render directly without tab wrapper
             _tab_id, _tab_name, tree = tabs[0]
             layout, dash = WidgetTreeBuilder.build(
-                tree, self_session_id, self.panels,
-                old_panels=old_panels, old_dashboard=old_dashboard,
+                tree,
+                self_session_id,
+                self.panels,
+                old_panels=old_panels,
+                old_dashboard=old_dashboard,
                 settings=self.settings,
             )
             self.dashboard = dash
@@ -371,8 +361,11 @@ class AutoAcceptTUI(MonitorApp):
             await root.mount(tc)
             for tab_id, tab_name, tree in tabs:
                 layout, dash = WidgetTreeBuilder.build(
-                    tree, self_session_id, self.panels,
-                    old_panels=old_panels, old_dashboard=old_dashboard,
+                    tree,
+                    self_session_id,
+                    self.panels,
+                    old_panels=old_panels,
+                    old_dashboard=old_dashboard,
                     settings=self.settings,
                 )
                 if dash:
@@ -429,12 +422,8 @@ class AutoAcceptTUI(MonitorApp):
                     if self._tab_original_names and not self._rebuilding
                     else None
                 )
-                tabs, self_sid, win_groups = LayoutFetcher.fetch_sync(
-                    tab_titles=pending_titles
-                )
-                tabs = filter_tabs_by_scope(
-                    tabs, self_sid, self.settings.iterm_scope, win_groups
-                )
+                tabs, self_sid, win_groups = LayoutFetcher.fetch_sync(tab_titles=pending_titles)
+                tabs = filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
                 if tabs:
                     new_struct = LayoutFingerprint.structure(tabs)
                     if new_struct != self._current_structure_fp:
@@ -480,8 +469,11 @@ class AutoAcceptTUI(MonitorApp):
             root = self.query_one("#layout-root")
             await root.remove_children()
             await self._mount_tabs(
-                root, msg.tabs, msg.self_session_id,
-                old_panels=old_panels, old_dashboard=old_dashboard,
+                root,
+                msg.tabs,
+                msg.self_session_id,
+                old_panels=old_panels,
+                old_dashboard=old_dashboard,
             )
 
             # Restore active tab and focused panel after rebuild
@@ -490,9 +482,7 @@ class AutoAcceptTUI(MonitorApp):
                     tc = self.query_one("#tab-content", TabbedContent)
                     tc.active = active_tab_id
                 except Exception:
-                    log.warning(
-                        f"on_layout_changed: failed to restore active tab {active_tab_id}"
-                    )
+                    log.warning(f"on_layout_changed: failed to restore active tab {active_tab_id}")
             if focused_session_id and focused_session_id in self.panels:
                 try:
                     self.panels[focused_session_id].focus()
@@ -514,8 +504,7 @@ class AutoAcceptTUI(MonitorApp):
 
             # Preserve iterm→panel mappings for sessions that still exist
             self._iterm_to_panel = {
-                k: v for k, v in self._iterm_to_panel.items()
-                if v in self.panels
+                k: v for k, v in self._iterm_to_panel.items() if v in self.panels
             }
         finally:
             self._rebuilding = False
@@ -535,7 +524,8 @@ class AutoAcceptTUI(MonitorApp):
 
     def _apply_sizes(self, node, parent_vertical=None) -> None:
         """Walk iTerm2 tree and update CSS sizes on matching existing widgets."""
-        from iterm2.session import Session as _Session, Splitter as _Splitter
+        from iterm2.session import Session as _Session
+        from iterm2.session import Splitter as _Splitter
 
         if isinstance(node, _Session):
             return
@@ -730,7 +720,8 @@ class AutoAcceptTUI(MonitorApp):
                     pending_def = getattr(panel, "_pending_deferred_at", None)
                     if pending and pending > time.time():
                         log.debug(
-                            f"Skipping auto-approve: AskUserQuestion timeout pending for {iterm_sid}"
+                            f"Skipping auto-approve: AskUserQuestion "
+                            f"timeout pending for {iterm_sid}"
                         )
                     elif pending_def and time.time() - pending_def < 30:
                         # The hook deferred the preceding PermissionRequest
@@ -795,11 +786,10 @@ class AutoAcceptTUI(MonitorApp):
             session_ids = self._tab_session_ids.get(tab_id, set())
             total_count = sum(1 for sid in session_ids if sid in self.panels)
             active_count = sum(
-                1 for sid in session_ids
-                if sid in self.panels and (
-                    self.panels[sid]._state == "active"
-                    or len(self.panels[sid].active_agents) > 0
-                )
+                1
+                for sid in session_ids
+                if sid in self.panels
+                and (self.panels[sid]._state == "active" or len(self.panels[sid].active_agents) > 0)
             )
             title = f"{original_name} [{active_count}/{total_count}]"
             tab_titles[tab_id] = title
@@ -834,11 +824,10 @@ class AutoAcceptTUI(MonitorApp):
             session_ids = self._tab_session_ids.get(tab_id, set())
             total_count = sum(1 for sid in session_ids if sid in self.panels)
             active_count = sum(
-                1 for sid in session_ids
-                if sid in self.panels and (
-                    self.panels[sid]._state == "active"
-                    or len(self.panels[sid].active_agents) > 0
-                )
+                1
+                for sid in session_ids
+                if sid in self.panels
+                and (self.panels[sid]._state == "active" or len(self.panels[sid].active_agents) > 0)
             )
             counts[tab_id] = (active_count, total_count)
 
@@ -853,7 +842,7 @@ class AutoAcceptTUI(MonitorApp):
             # How many chars are left for the name after the suffix and padding?
             max_name_chars = max(6, per_tab_width - len(suffix))
             if len(original_name) > max_name_chars:
-                trimmed_name = original_name[:max(6, max_name_chars - 1)] + "…"
+                trimmed_name = original_name[: max(6, max_name_chars - 1)] + "…"
             else:
                 trimmed_name = original_name
             label = f"{trimmed_name}{suffix}"
@@ -902,8 +891,7 @@ class AutoAcceptTUI(MonitorApp):
             # Exiting global manual: pause ALL except clicked
             self._global_paused = False
             self._paused_sessions = {
-                p.session_id for p in self.panels.values()
-                if p.session_id != iterm_sid
+                p.session_id for p in self.panels.values() if p.session_id != iterm_sid
             }
         elif iterm_sid in self._paused_sessions:
             self._paused_sessions.discard(iterm_sid)
@@ -964,9 +952,7 @@ class AutoAcceptTUI(MonitorApp):
         error = False
         try:
             tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
-            tabs = filter_tabs_by_scope(
-                tabs, self_sid, self.settings.iterm_scope, win_groups
-            )
+            tabs = filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
             if tabs:
                 self.post_message(LayoutChanged(tabs, self_sid))
             else:
@@ -987,9 +973,7 @@ class AutoAcceptTUI(MonitorApp):
                     )
                     self.query_one("#status-bar", Horizontal).set_classes("paused")
                 except Exception:
-                    log.warning(
-                        "_do_refresh: failed to update status bar with refresh failure"
-                    )
+                    log.warning("_do_refresh: failed to update status bar with refresh failure")
             else:
                 self._update_status_bar()
 

@@ -15,9 +15,6 @@ import os
 import socket
 import subprocess
 import sys
-import time
-
-import pytest
 
 from claude_monitor.app_base import (
     MonitorApp,
@@ -76,6 +73,7 @@ class TestKillPid:
         # masking the kill. Ignoring SIGCHLD asks the kernel to auto-reap so
         # the test environment matches production.
         import signal
+
         prev = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],

@@ -16,7 +16,7 @@ import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from claude_monitor import __version__, API_PORT, EVENTS_FILE, STATE_FILE, read_state
+from claude_monitor import API_PORT, EVENTS_FILE, STATE_FILE, __version__, read_state
 from claude_monitor.api import (
     AppStateProtocol,
     generate_health_response,
@@ -107,7 +107,7 @@ async def _handle_http(connection: Any, request: Request) -> Response | None:
         return _make_response(200, "OK", "text/html; charset=utf-8", body)
 
     if path.startswith("/static/"):
-        rel = path[len("/static/"):]
+        rel = path[len("/static/") :]
         file_path = _STATIC_DIR / rel
         try:
             resolved = file_path.resolve()
@@ -281,13 +281,15 @@ def _write_state(state: dict) -> None:
 
 async def _broadcast_state(state: dict) -> None:
     """Broadcast a state update message to all connected WebSocket clients."""
-    msg = json.dumps({
-        "type": "state",
-        "data": {
-            "global_paused": state.get("global_paused", False),
-            "paused_sessions": state.get("paused_claude_sessions", []),
-        },
-    })
+    msg = json.dumps(
+        {
+            "type": "state",
+            "data": {
+                "global_paused": state.get("global_paused", False),
+                "paused_sessions": state.get("paused_claude_sessions", []),
+            },
+        }
+    )
     await _broadcast(msg)
 
 

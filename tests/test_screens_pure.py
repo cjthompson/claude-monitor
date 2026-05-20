@@ -1,18 +1,15 @@
 """Tests for pure/static methods in screens — choices, questions, context_menu."""
 
 import json
-import os
 import time
-
-import pytest
 
 from claude_monitor.screens.choices import ChoicesScreen
 from claude_monitor.screens.questions import QuestionsScreen
 
-
 # ---------------------------------------------------------------------------
 # ChoicesScreen._format_choice (pure function, no TUI needed)
 # ---------------------------------------------------------------------------
+
 
 class TestChoicesFormatChoice:
     def _format(self, data: dict) -> str:
@@ -185,25 +182,36 @@ class TestChoicesLoadChoices:
         events_file = isolated_state["events_file"]
         # Write some events
         with open(events_file, "w") as f:
-            f.write(json.dumps({
-                "hook_event_name": "PermissionRequest",
-                "_timestamp": time.time(),
-                "tool_name": "Bash",
-                "tool_input": {"command": "ls"},
-                "session_id": "s1",
-                "cwd": "/tmp",
-                "_decision": "allowed",
-            }) + "\n")
-            f.write(json.dumps({
-                "hook_event_name": "Notification",
-                "notification_type": "idle_prompt",
-                "message": "idle",
-                "session_id": "s1",
-                "_timestamp": time.time(),
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "hook_event_name": "PermissionRequest",
+                        "_timestamp": time.time(),
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "ls"},
+                        "session_id": "s1",
+                        "cwd": "/tmp",
+                        "_decision": "allowed",
+                    }
+                )
+                + "\n"
+            )
+            f.write(
+                json.dumps(
+                    {
+                        "hook_event_name": "Notification",
+                        "notification_type": "idle_prompt",
+                        "message": "idle",
+                        "session_id": "s1",
+                        "_timestamp": time.time(),
+                    }
+                )
+                + "\n"
+            )
 
         screen = ChoicesScreen.__new__(ChoicesScreen)
         import claude_monitor.screens.choices as choices_mod
+
         # Patch EVENTS_FILE in the module
         original = choices_mod.EVENTS_FILE
         choices_mod.EVENTS_FILE = events_file
@@ -221,6 +229,7 @@ class TestChoicesLoadChoices:
 
         screen = ChoicesScreen.__new__(ChoicesScreen)
         import claude_monitor.screens.choices as choices_mod
+
         original = choices_mod.EVENTS_FILE
         choices_mod.EVENTS_FILE = events_file
         try:
@@ -236,6 +245,7 @@ class TestChoicesLoadChoices:
 
         screen = ChoicesScreen.__new__(ChoicesScreen)
         import claude_monitor.screens.choices as choices_mod
+
         original = choices_mod.EVENTS_FILE
         choices_mod.EVENTS_FILE = events_file
         try:
@@ -249,6 +259,7 @@ class TestChoicesLoadChoices:
 # QuestionsScreen._format_question and _load_questions
 # ---------------------------------------------------------------------------
 
+
 class TestQuestionsFormatQuestion:
     def _format(self, data: dict) -> str:
         screen = QuestionsScreen.__new__(QuestionsScreen)
@@ -259,7 +270,9 @@ class TestQuestionsFormatQuestion:
             "_timestamp": time.time(),
             "tool_name": "AskUserQuestion",
             "tool_input": {
-                "questions": [{"question": "Continue?", "options": [{"label": "Yes"}, {"label": "No"}]}],
+                "questions": [
+                    {"question": "Continue?", "options": [{"label": "Yes"}, {"label": "No"}]}
+                ],
             },
             "session_id": "sess-12345678",
             "cwd": "/tmp/proj",
@@ -312,28 +325,41 @@ class TestQuestionsLoadQuestions:
         events_file = isolated_state["events_file"]
         with open(events_file, "w") as f:
             # PermissionRequest
-            f.write(json.dumps({
-                "hook_event_name": "PermissionRequest",
-                "tool_name": "AskUserQuestion",
-                "tool_input": {
-                    "questions": [{"question": "Pick", "options": [{"label": "A"}, {"label": "B"}]}],
-                },
-                "session_id": "s1",
-                "cwd": "/tmp",
-                "_timestamp": time.time(),
-                "_decision": "allowed",
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "hook_event_name": "PermissionRequest",
+                        "tool_name": "AskUserQuestion",
+                        "tool_input": {
+                            "questions": [
+                                {"question": "Pick", "options": [{"label": "A"}, {"label": "B"}]}
+                            ],
+                        },
+                        "session_id": "s1",
+                        "cwd": "/tmp",
+                        "_timestamp": time.time(),
+                        "_decision": "allowed",
+                    }
+                )
+                + "\n"
+            )
             # PostToolUse with answer
-            f.write(json.dumps({
-                "hook_event_name": "PostToolUse",
-                "tool_name": "AskUserQuestion",
-                "tool_input": {"answers": {"Pick": "A"}},
-                "session_id": "s1",
-                "_timestamp": time.time(),
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "hook_event_name": "PostToolUse",
+                        "tool_name": "AskUserQuestion",
+                        "tool_input": {"answers": {"Pick": "A"}},
+                        "session_id": "s1",
+                        "_timestamp": time.time(),
+                    }
+                )
+                + "\n"
+            )
 
         screen = QuestionsScreen.__new__(QuestionsScreen)
         import claude_monitor.screens.questions as q_mod
+
         original = q_mod.EVENTS_FILE
         q_mod.EVENTS_FILE = events_file
         try:
@@ -349,6 +375,7 @@ class TestQuestionsLoadQuestions:
             f.write("")
         screen = QuestionsScreen.__new__(QuestionsScreen)
         import claude_monitor.screens.questions as q_mod
+
         original = q_mod.EVENTS_FILE
         q_mod.EVENTS_FILE = events_file
         try:
@@ -360,6 +387,7 @@ class TestQuestionsLoadQuestions:
     def test_load_file_not_found(self, isolated_state):
         screen = QuestionsScreen.__new__(QuestionsScreen)
         import claude_monitor.screens.questions as q_mod
+
         original = q_mod.EVENTS_FILE
         q_mod.EVENTS_FILE = "/tmp/nonexistent-events-file.jsonl"
         try:

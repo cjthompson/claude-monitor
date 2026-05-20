@@ -27,6 +27,7 @@ def isolated_state(tmp_path, monkeypatch):
 
     # Patch the canonical module
     import claude_monitor
+
     monkeypatch.setattr(claude_monitor, "SIGNAL_DIR", signal_dir)
     monkeypatch.setattr(claude_monitor, "EVENTS_FILE", events_file)
     monkeypatch.setattr(claude_monitor, "STATE_FILE", state_file)
@@ -34,25 +35,30 @@ def isolated_state(tmp_path, monkeypatch):
 
     # Patch in every module that imports these at the top level
     import claude_monitor.tui_simple as tui_simple
+
     monkeypatch.setattr(tui_simple, "SIGNAL_DIR", signal_dir)
     monkeypatch.setattr(tui_simple, "STATE_FILE", state_file)
     monkeypatch.setattr(tui_simple, "LOG_FILE", log_file)
 
     import claude_monitor.app_base as app_base
+
     monkeypatch.setattr(app_base, "SIGNAL_DIR", signal_dir)
     monkeypatch.setattr(app_base, "EVENTS_FILE", events_file)
     monkeypatch.setattr(app_base, "STATE_FILE", state_file)
 
     import claude_monitor.hook as hook
+
     monkeypatch.setattr(hook, "SIGNAL_DIR", signal_dir)
     monkeypatch.setattr(hook, "EVENTS_FILE", events_file)
 
     import claude_monitor.settings as settings_mod
+
     monkeypatch.setattr(settings_mod, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(settings_mod, "CONFIG_FILE", config_file)
 
     # Patch web module (the new unified HTTP+WebSocket server)
     import claude_monitor.web as web_mod
+
     monkeypatch.setattr(web_mod, "EVENTS_FILE", events_file)
     monkeypatch.setattr(web_mod, "STATE_FILE", state_file)
 
@@ -178,6 +184,7 @@ def app_fixture(isolated_state, monkeypatch):
     monkeypatch.setattr("claude_monitor.tui_simple.SimpleTUI.watch_events", lambda self: None)
 
     from claude_monitor.tui_simple import SimpleTUI
+
     app = SimpleTUI()
     yield app
     app._stop_event.set()  # safety net: unblock any thread that slipped through
@@ -206,9 +213,11 @@ async def app_fixture_with_api(isolated_state, monkeypatch):
     monkeypatch.setattr("claude_monitor.app_base.MonitorApp.poll_usage", lambda self: None)
 
     from claude_monitor.tui_simple import SimpleTUI
+
     app = SimpleTUI()
     yield app
 
     import asyncio
+
     app._stop_event.set()
     await asyncio.sleep(0.5)

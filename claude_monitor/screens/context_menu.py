@@ -59,12 +59,11 @@ class PaneContextMenu(ModalScreen):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         from claude_monitor.widgets.session_panel import SessionPanel
+
         option_id = event.option.id
         self.app.pop_screen()
         if option_id == "toggle_mode":
-            self.app.on_session_panel_pane_toggle(
-                SessionPanel.PaneToggle(self._ctx_session_id)
-            )
+            self.app.on_session_panel_pane_toggle(SessionPanel.PaneToggle(self._ctx_session_id))
         elif option_id == "choices":
             self.app.action_show_choices()
         elif option_id == "questions":

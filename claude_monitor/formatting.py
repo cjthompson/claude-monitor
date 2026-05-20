@@ -89,10 +89,16 @@ def _format_ask_user_question_detail(data: dict) -> str:
                     if selected and label == selected:
                         if is_auto:
                             marker = "[bold cyan]>>[/]"
-                            lines.append(f"      {marker} [bold cyan]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                            lines.append(
+                                f"      {marker} [bold cyan]{label}[/]"
+                                + (f"  [dim]{desc}[/]" if desc else "")
+                            )
                         else:
                             marker = "[bold green]>>[/]"
-                            lines.append(f"      {marker} [bold green]{label}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+                            lines.append(
+                                f"      {marker} [bold green]{label}[/]"
+                                + (f"  [dim]{desc}[/]" if desc else "")
+                            )
                     else:
                         lines.append(f"         {label}" + (f"  [dim]{desc}[/]" if desc else ""))
             if selected:
@@ -158,7 +164,10 @@ def format_event(
             if not answer_vals:
                 return None, None
             answer_text = ", ".join(answer_vals)
-            return f"[bold green]{'ANSWER':<8}[/]", f"{_ag}AskUserQuestion -> [bold]{answer_text}[/]"
+            return (
+                f"[bold green]{'ANSWER':<8}[/]",
+                f"{_ag}AskUserQuestion -> [bold]{answer_text}[/]",
+            )
         return None, None
 
     elif event_name == "Notification":
