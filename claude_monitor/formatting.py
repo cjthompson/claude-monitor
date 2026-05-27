@@ -198,7 +198,7 @@ def format_event(
         agent_id = data.get("agent_id", "?")
         agent_type = data.get("agent_type", "?")
         msg = data.get("last_assistant_message", "")
-        suffix = f"  -> {msg[:100]}" if msg else ""
+        suffix = f"  -> {oneline(msg, 100)}" if msg else ""
         return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]{suffix}"
 
     elif event_name == "SessionStart":

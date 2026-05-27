@@ -577,6 +577,7 @@ class TestFormatEvent:
             "agent_id": "agent-12345678-abcd",
             "agent_type": "general_purpose",
             "session_id": "s1",
+            "last_assistant_message": "Now I have a complete picture. Let me compile all findings:\n\n**Summary of findings for PR #19061:**",
         }
         panel = _mock_panel("s1")
         label, detail = format_event(
@@ -587,6 +588,10 @@ class TestFormatEvent:
             oneline=_oneline,
         )
         assert "AGENT-" in label
+        assert "general_purpose" in detail
+        assert "agent-12" in detail
+        assert "\n" not in detail
+        assert " ↵ " in detail
 
     def test_unknown_event(self):
         data = {"session_id": "s1"}
