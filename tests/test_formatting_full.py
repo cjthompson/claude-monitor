@@ -593,6 +593,42 @@ class TestFormatEvent:
         assert "\n" not in detail
         assert " ↵ " in detail
 
+    def test_task_created_uses_task_subject(self):
+        data = {
+            "session_id": "s1",
+            "task_id": "9",
+            "task_subject": "Fresh Eyes watcher: GPG-270 / PR #18971",
+            "task_description": "Sub-agent polls PR for Fresh Eyes review, returns findings.",
+        }
+        panel = _mock_panel("s1")
+        label, detail = format_event(
+            data,
+            "TaskCreated",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
+        )
+        assert "TASK+" in label
+        assert "Fresh Eyes watcher: GPG-270 / PR #18971" in detail
+        assert "?" not in detail
+
+    def test_task_created_falls_back_to_description(self):
+        data = {
+            "session_id": "s1",
+            "task_id": "10",
+            "task_description": "only description present",
+        }
+        panel = _mock_panel("s1")
+        label, detail = format_event(
+            data,
+            "TaskCreated",
+            is_pane_paused=_no_pause,
+            get_panel=lambda d: panel,
+            oneline=_oneline,
+        )
+        assert "TASK+" in label
+        assert "only description present" in detail
+
     def test_unknown_event(self):
         data = {"session_id": "s1"}
         panel = _mock_panel("s1")

@@ -225,7 +225,13 @@ def format_event(
         return f"[dim]{'COMPACT':<8}[/]", f"{_ag}context compacted"
 
     elif event_name == "TaskCreated":
-        subject = data.get("subject") or data.get("description") or "?"
+        subject = (
+            data.get("task_subject")
+            or data.get("subject")
+            or data.get("task_description")
+            or data.get("description")
+            or "?"
+        )
         return f"[bold blue]{'TASK+':<8}[/]", f"{_ag}{oneline(subject, 80)}"
 
     elif event_name == "CwdChanged":
