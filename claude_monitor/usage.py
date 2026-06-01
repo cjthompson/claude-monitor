@@ -49,9 +49,15 @@ class WindowUsage:
 class UsageData:
     five_hour: WindowUsage
     seven_day: WindowUsage
+    # Credits used on accounts that have moved off the windowed rate-limit model
+    # (Anthropic's /api/oauth/usage now returns five_hour: null / seven_day: null
+    # for these accounts and reports usage via extra_usage.used_credits instead).
+    credits_used: float | None = None
 
 
-def _parse_window(w: dict) -> WindowUsage:
+def _parse_window(w: dict | None) -> WindowUsage:
+    if not isinstance(w, dict):
+        return WindowUsage(utilization=0, resets_at=None)
     # API uses "utilization"; statusline cache uses "used_percentage" (CC 2.1.80+)
     util = w.get("utilization") if w.get("utilization") is not None else w.get("used_percentage", 0)
     if isinstance(util, str):
@@ -253,6 +259,7 @@ def _save_disk_cache(data: UsageData, fetched_at: float) -> None:
                 if data.seven_day.resets_at
                 else None,
             },
+            "credits_used": data.credits_used,
         }
         with open(USAGE_CACHE_FILE, "w") as f:
             json.dump(payload, f)
@@ -266,7 +273,13 @@ def _usage_from_disk(entry: dict) -> tuple[UsageData, float] | None:
         fetched_at = float(entry["fetched_at"])
         five_hour = _parse_window(entry["five_hour"])
         seven_day = _parse_window(entry["seven_day"])
-        return UsageData(five_hour=five_hour, seven_day=seven_day), fetched_at
+        credits = entry.get("credits_used")
+        if not isinstance(credits, (int, float)):
+            credits = None
+        return (
+            UsageData(five_hour=five_hour, seven_day=seven_day, credits_used=credits),
+            fetched_at,
+        )
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -352,7 +365,12 @@ def _strip_markup(s: str) -> str:
 def _quota(
     w: WindowUsage, label: str, bar_width: int | None, reset: str, mode: str = "running"
 ) -> str:
-    """Format a single quota window."""
+    """Format a single quota window. Returns empty string for no-data windows."""
+    # Credits-plan accounts have null windows that _parse_window normalizes to
+    # utilization=0/resets_at=None. Render nothing in that case so the segment
+    # gets dropped by the caller's filter(None, ...).
+    if w.utilization == 0 and w.resets_at is None:
+        return ""
     pct_color = _THEME.get(mode, _THEME["running"])["pct"]
     s = f"[bold]{label}[/] [{pct_color}]{w.utilization:.0f}%[/]"
     if bar_width:
@@ -360,6 +378,14 @@ def _quota(
     if reset:
         s += f" [dim]{reset}[/]"
     return s
+
+
+def _credits_segment(credits: float | None, mode: str = "running") -> str:
+    """Format the credits-used segment. Returns empty string when None."""
+    if credits is None:
+        return ""
+    pct_color = _THEME.get(mode, _THEME["running"])["pct"]
+    return f"[bold]credits[/] [{pct_color}]{credits:,.0f}[/]"
 
 
 def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "running") -> str:
@@ -371,6 +397,7 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
     SEP = " [dim]│[/] "
     h5 = data.five_hour
     d7 = data.seven_day
+    credits_seg = _credits_segment(data.credits_used, mode)
 
     h5_countdown = _format_countdown(h5.resets_at)
     h5_local = _format_local_time(h5.resets_at)
@@ -380,6 +407,8 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
         f"{h5_countdown} ({h5_local})" if h5_countdown and h5_local else h5_countdown or h5_local
     )
 
+    # Each tier appends the credits segment if present. filter(None, ...) drops
+    # empty quota segments (e.g. credits-plan accounts with null windows).
     tiers = [
         lambda: SEP.join(
             filter(
@@ -387,6 +416,7 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
                 [
                     _quota(h5, "5h", 12, h5_full_reset, mode),
                     _quota(d7, "7d", 12, d7_full, mode),
+                    credits_seg,
                 ],
             )
         ),
@@ -396,6 +426,7 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
                 [
                     _quota(h5, "5h", 12, h5_local, mode),
                     _quota(d7, "7d", 12, d7_full, mode),
+                    credits_seg,
                 ],
             )
         ),
@@ -405,6 +436,7 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
                 [
                     _quota(h5, "5h", 12, h5_local, mode),
                     _quota(d7, "7d", 12, "", mode),
+                    credits_seg,
                 ],
             )
         ),
@@ -414,6 +446,7 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
                 [
                     _quota(h5, "5h", 8, h5_local, mode),
                     _quota(d7, "7d", None, "", mode),
+                    credits_seg,
                 ],
             )
         ),
@@ -423,11 +456,13 @@ def format_usage_inline(data: UsageData, max_width: int = 999, mode: str = "runn
                 [
                     _quota(h5, "5h", None, h5_local, mode),
                     _quota(d7, "7d", None, "", mode),
+                    credits_seg,
                 ],
             )
         ),
-        lambda: _quota(h5, "5h", 8, h5_local, mode),
-        lambda: _quota(h5, "5h", None, "", mode),
+        lambda: SEP.join(filter(None, [_quota(h5, "5h", 8, h5_local, mode), credits_seg])),
+        lambda: SEP.join(filter(None, [_quota(h5, "5h", None, "", mode), credits_seg])),
+        lambda: credits_seg,  # fallback when nothing else fits but credits is set
     ]
 
     PILL_PAD = 2  # 1 space each side
@@ -712,21 +747,33 @@ class UsageManager:
                 raise OSError(f"curl failed: {result.returncode}")
             data = json.loads(result.stdout)
 
-            # Reject error responses and empty/bogus data
-            if "error" in data or "five_hour" not in data:
+            # Reject only explicit error responses. The API now returns
+            # five_hour: null / seven_day: null for credits-plan accounts;
+            # _parse_window handles None and we surface extra_usage.used_credits.
+            if "error" in data:
                 raise OSError(
-                    "API returned error or missing data: "
-                    f"{data.get('error', {}).get('message', 'unknown')}"
+                    f"API returned error: {data.get('error', {}).get('message', 'unknown')}"
                 )
 
+            extra = data.get("extra_usage") or {}
+            credits_used = extra.get("used_credits")
             usage = UsageData(
-                five_hour=_parse_window(data["five_hour"]),
-                seven_day=_parse_window(data.get("seven_day", {})),
+                five_hour=_parse_window(data.get("five_hour")),
+                seven_day=_parse_window(data.get("seven_day")),
+                credits_used=credits_used if isinstance(credits_used, (int, float)) else None,
             )
             self._usage_cache = {"data": usage, "fetched_at": now}
             _save_disk_cache(usage, now)
             return usage
-        except (URLError, json.JSONDecodeError, OSError, subprocess.SubprocessError) as e:
+        except (
+            URLError,
+            json.JSONDecodeError,
+            OSError,
+            subprocess.SubprocessError,
+            AttributeError,
+            TypeError,
+            KeyError,
+        ) as e:
             log.debug(f"Usage API fetch failed: {e}")
             # Back off for USAGE_MAX_AGE so we don't hammer the API on repeated failures
             existing_data = self._usage_cache.get("data")

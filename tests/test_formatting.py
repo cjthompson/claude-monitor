@@ -45,12 +45,11 @@ def test_subagent_stop_message_truncated_at_100():
     }
     is_paused = lambda sid: False
     get_panel = lambda d: None
-    oneline = lambda s, n=0: s
+    oneline = lambda s, n=0: s[:n] if n else s
 
     label, detail = format_event(
         data, "SubagentStop", is_pane_paused=is_paused, get_panel=get_panel, oneline=oneline
     )
-    # Message should be truncated to 100 chars + "  -> " prefix (7 chars) = 107 extra chars
     # detail ends with "  -> " + 100 x's
     assert detail.endswith("  -> " + ("x" * 100)), f"truncation failed: {detail[-20:]!r}"
 

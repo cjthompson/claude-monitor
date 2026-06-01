@@ -79,6 +79,18 @@ class TestParseWindow:
         w = _parse_window({})
         assert w.resets_at is None
 
+    def test_none_input(self):
+        """API now returns five_hour: null for credits-plan accounts — must not crash."""
+        w = _parse_window(None)
+        assert w.utilization == 0
+        assert w.resets_at is None
+
+    def test_non_dict_input(self):
+        """Defensive: any non-dict input parses as empty window without crashing."""
+        w = _parse_window("not a dict")
+        assert w.utilization == 0
+        assert w.resets_at is None
+
 
 # ---------------------------------------------------------------------------
 # _parse_oauth_json
@@ -385,6 +397,35 @@ class TestFormatUsageInline:
             result = format_usage_inline(data, max_width=width)
             assert len(result) > 0
 
+    def test_credits_fallback_when_windows_empty(self):
+        """When both windows are empty (API returned null) but credits_used is present,
+        show the credit total rather than misleading 0%/0% bars."""
+        data = UsageData(
+            five_hour=WindowUsage(utilization=0, resets_at=None),
+            seven_day=WindowUsage(utilization=0, resets_at=None),
+            credits_used=52285.0,
+        )
+        result = format_usage_inline(data, max_width=200)
+        stripped = _strip_markup(result)
+        assert "52,285" in stripped
+        assert "5h" not in stripped
+        assert "7d" not in stripped
+
+    def test_credits_appended_when_windows_have_data(self):
+        """Hybrid accounts (real windows + credits) show BOTH segments."""
+        future = datetime.now(timezone.utc) + timedelta(hours=2)
+        data = UsageData(
+            five_hour=WindowUsage(utilization=60.0, resets_at=future),
+            seven_day=WindowUsage(utilization=20.0, resets_at=future),
+            credits_used=1000.0,
+        )
+        result = format_usage_inline(data, max_width=200)
+        stripped = _strip_markup(result)
+        assert "5h" in stripped
+        assert "60%" in stripped
+        assert "credits" in stripped
+        assert "1,000" in stripped
+
 
 # ---------------------------------------------------------------------------
 # UsageManager
@@ -585,6 +626,49 @@ class TestUsageManager:
 
         result = mgr.fetch()
         assert result is None  # No stale data available
+
+    def test_fetch_null_windows_with_credits(self, tmp_path, monkeypatch):
+        """API returns null five_hour/seven_day plus extra_usage.used_credits — no crash,
+        UsageData carries credits_used."""
+        cache_file = str(tmp_path / "usage-cache.json")
+        monkeypatch.setattr("claude_monitor.usage.USAGE_CACHE_FILE", cache_file)
+
+        mgr = UsageManager()
+        mgr._token_cache = {"token": "tok", "refresh_token": "", "expires_at": time.time() + 3600}
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(
+            {
+                "five_hour": None,
+                "seven_day": None,
+                "extra_usage": {"used_credits": 52285.0, "utilization": None},
+            }
+        ).encode()
+        monkeypatch.setattr("claude_monitor.usage.subprocess.run", lambda *a, **kw: mock_result)
+
+        result = mgr.fetch()
+        assert result is not None
+        assert result.five_hour.utilization == 0
+        assert result.seven_day.utilization == 0
+        assert result.credits_used == 52285.0
+
+    def test_fetch_null_windows_no_credits(self, tmp_path, monkeypatch):
+        """API returns null windows with no extra_usage — fetch still survives."""
+        cache_file = str(tmp_path / "usage-cache.json")
+        monkeypatch.setattr("claude_monitor.usage.USAGE_CACHE_FILE", cache_file)
+
+        mgr = UsageManager()
+        mgr._token_cache = {"token": "tok", "refresh_token": "", "expires_at": time.time() + 3600}
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"five_hour": None, "seven_day": None}).encode()
+        monkeypatch.setattr("claude_monitor.usage.subprocess.run", lambda *a, **kw: mock_result)
+
+        result = mgr.fetch()
+        assert result is not None
+        assert result.credits_used is None
 
     def test_fetch_no_token_returns_stale(self, monkeypatch):
         mgr = UsageManager()
