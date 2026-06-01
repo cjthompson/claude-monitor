@@ -150,6 +150,18 @@ def statusline_main() -> int:
 
     raw = sys.stdin.read()
 
+    # One-shot capture of CC's raw stdin so we can inspect the exact schema
+    # (e.g. to check whether rate_limits ever includes credits data). Writes
+    # only if the file doesn't exist — `rm` it to re-capture.
+    _dump_path = os.path.join(SIGNAL_DIR, "cc-statusline-input.json")
+    if not os.path.exists(_dump_path):
+        try:
+            os.makedirs(SIGNAL_DIR, exist_ok=True)
+            with open(_dump_path, "w") as f:
+                f.write(raw)
+        except OSError:
+            pass
+
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):

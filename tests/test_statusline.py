@@ -127,6 +127,32 @@ def test_chain_failure_falls_back_to_builtin(tmp_path, monkeypatch):
     assert "chained command failed" in stderr.getvalue()
 
 
+def test_first_invocation_captures_raw_stdin(tmp_path, monkeypatch):
+    """The first time statusline_main runs, raw stdin is dumped for inspection."""
+    raw = json.dumps({"rate_limits": {"five_hour": {"used_percentage": 11}, "seven_day": {}}})
+    _setup(monkeypatch, tmp_path, raw)
+    dump_path = tmp_path / "cc-statusline-input.json"
+    assert not dump_path.exists()
+
+    hook.statusline_main()
+
+    assert dump_path.exists()
+    assert dump_path.read_text() == raw
+
+
+def test_subsequent_invocations_do_not_overwrite_capture(tmp_path, monkeypatch):
+    """Once the dump file exists, later runs leave it alone — `rm` to refresh."""
+    dump_path = tmp_path / "cc-statusline-input.json"
+    dump_path.write_text("FIRST RUN PAYLOAD")
+
+    raw = json.dumps({"rate_limits": {"five_hour": {"used_percentage": 99}, "seven_day": {}}})
+    _setup(monkeypatch, tmp_path, raw)
+
+    hook.statusline_main()
+
+    assert dump_path.read_text() == "FIRST RUN PAYLOAD"
+
+
 def test_chain_returncode_is_propagated(tmp_path, monkeypatch):
     """Non-zero exit from the chained command propagates to our exit code."""
     payload = {"rate_limits": {"five_hour": {}, "seven_day": {}}}
