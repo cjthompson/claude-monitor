@@ -18,6 +18,7 @@ _DEFAULT_STATE = {
     "paused_claude_sessions": [],
     "excluded_tools": [],
     "ask_user_timeout": 0,
+    "global_ask_paused": False,
 }
 
 

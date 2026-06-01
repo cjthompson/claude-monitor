@@ -193,6 +193,7 @@ class SimpleTUI(MonitorApp):
 
     BINDINGS = [
         Binding("a", "toggle_pause", "Auto/Manual"),
+        Binding("A", "toggle_ask_pause", "Q-Pause"),
         Binding("shift+tab", "toggle_pause", "Auto/Manual", show=False),
         Binding("c", "show_choices", "Choices", show=False),
         Binding("u", "show_questions", "Questions", show=False),
@@ -235,7 +236,7 @@ class SimpleTUI(MonitorApp):
         return self._global_paused or claude_sid in self._paused_claude_sessions
 
     def is_ask_paused(self, claude_sid: str) -> bool:
-        return claude_sid in self._ask_paused_sessions
+        return self._global_ask_paused or claude_sid in self._ask_paused_sessions
 
     def _session_id_from_event(self, data: dict) -> str:
         return data.get("session_id", "")
@@ -252,6 +253,7 @@ class SimpleTUI(MonitorApp):
             "excluded_tools": self.settings.excluded_tools or [],
             "ask_user_timeout": self.settings.ask_user_timeout,
             "ask_paused_sessions": list(self._ask_paused_sessions),
+            "global_ask_paused": self._global_ask_paused,
         }
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)

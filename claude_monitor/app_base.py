@@ -153,6 +153,7 @@ class MonitorApp(App):
 
         # Pause state
         self._global_paused: bool = False
+        self._global_ask_paused: bool = False
 
         # Usage polling
         self._usage_polling: bool = False
@@ -300,7 +301,12 @@ class MonitorApp(App):
             SEP = "  [dim]\u2502[/]  "
 
             n_paused = sum(1 for sid in self.panels if self.is_pane_paused(sid))
-            n_ask_paused = sum(1 for sid in self.panels if self.is_ask_paused(sid))
+            # Count only per-pane ask pauses (exclude global \u2014 shown separately)
+            n_ask_paused = sum(
+                1
+                for sid in self.panels
+                if not self._global_ask_paused and self.is_ask_paused(sid)
+            )
             if self.paused:
                 mode_text = "[bold]MANUAL[/]"
                 bar.set_classes("paused")
@@ -316,7 +322,9 @@ class MonitorApp(App):
                 usage_mode = "paused"
 
             left_parts = [mode_text]
-            if n_ask_paused > 0:
+            if self._global_ask_paused:
+                left_parts.append("[bold cyan]Q-PAUSED[/]")
+            elif n_ask_paused > 0:
                 left_parts.append(f"[bold cyan]? PAUSED[/] [dim]({n_ask_paused})[/]")
             if self._last_usage_data:
                 bar_width = (bar.size.width if bar.size.width > 0 else 120) - 40
@@ -354,6 +362,7 @@ class MonitorApp(App):
         if not settings.account_usage and self._last_usage_data:
             self._last_usage_data = None
             self._update_status_bar()
+        self._global_ask_paused = not settings.auto_answer_questions
         self._save_state()
 
     def _on_settings_closed(self, result: Settings | None) -> None:
@@ -414,6 +423,7 @@ class MonitorApp(App):
             "excluded_tools": self.settings.excluded_tools or [],
             "ask_user_timeout": self.settings.ask_user_timeout,
             "ask_paused_sessions": [],
+            "global_ask_paused": self._global_ask_paused,
         }
         try:
             with open(STATE_FILE, "w") as f:
@@ -428,6 +438,7 @@ class MonitorApp(App):
         """
         state = read_state()
         self._global_paused = state.get("global_paused", False)
+        self._global_ask_paused = state.get("global_ask_paused", False)
 
     # ------------------------------------------------------------------
     # Shared actions
@@ -440,6 +451,12 @@ class MonitorApp(App):
         Must be overridden — pause collections differ between tui.py (iTerm2
         UUID-based) and tui_simple.py (Claude session ID-based).
         """
+
+    def action_toggle_ask_pause(self) -> None:
+        """``A`` key (shift+a): toggle global AskUserQuestion pause."""
+        self._global_ask_paused = not self._global_ask_paused
+        self._save_state()
+        self._update_status_bar()
 
     def action_show_choices(self) -> None:
         """``c`` key: open the permission choices review screen."""

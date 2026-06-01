@@ -56,6 +56,7 @@ class Settings:
     account_usage: bool = False
     excluded_tools: list[str] | None = None  # tool names to skip auto-accepting
     ask_user_timeout: int = 0  # seconds to wait before auto-accepting AskUserQuestion (0 = instant)
+    auto_answer_questions: bool = True  # auto-accept AskUserQuestion by default
     sparkline_bucket_secs: int = 5  # seconds per sparkline bucket (events/Ns)
     oauth_json: str = ""  # JSON with access_token (required), refresh_token, expires_at (optional)
     dashboard_height: int = 12  # dashboard pane height in lines (simple mode, expanded)
@@ -209,6 +210,13 @@ FIELD_DEFS: list[FieldDef] = [
         "input_type": "integer",
         "description": "Seconds to wait before auto-accepting "
         "AskUserQuestion (0 = instant, max 300)",
+    },
+    {
+        "name": "auto_answer_questions",
+        "label": "Auto-answer questions",
+        "widget_type": "switch",
+        "description": "Automatically accept AskUserQuestion prompts on startup"
+        " (off = questions require manual approval)",
     },
     {
         "name": "tab_close_mode",
@@ -531,6 +539,9 @@ class SettingsScreen(ModalScreen[Settings | None]):
             account_usage=self.query_one(f"#{_widget_id('account_usage')}", Switch).value,
             excluded_tools=excluded_tools,
             ask_user_timeout=ask_timeout,
+            auto_answer_questions=self.query_one(
+                f"#{_widget_id('auto_answer_questions')}", Switch
+            ).value,
             oauth_json=oauth_json,
             sparkline_bucket_secs=s.sparkline_bucket_secs,
             dashboard_height=s.dashboard_height,

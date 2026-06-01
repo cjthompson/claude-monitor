@@ -179,6 +179,7 @@ class AutoAcceptTUI(MonitorApp):
 
     BINDINGS = [
         Binding("a", "toggle_pause", "Auto/Manual"),
+        Binding("A", "toggle_ask_pause", "Q-Pause"),
         Binding("shift+tab", "toggle_pause", "Auto/Manual", show=False),
         Binding("c", "show_choices", "Choices", show=False),
         Binding("u", "show_questions", "Questions", show=False),
@@ -222,7 +223,7 @@ class AutoAcceptTUI(MonitorApp):
         return self._global_paused or iterm_sid in self._paused_sessions
 
     def is_ask_paused(self, iterm_sid: str) -> bool:
-        return iterm_sid in self._ask_paused_sessions
+        return self._global_ask_paused or iterm_sid in self._ask_paused_sessions
 
     def action_toggle_pause(self) -> None:
         if self._global_paused or self._paused_sessions:
@@ -247,6 +248,7 @@ class AutoAcceptTUI(MonitorApp):
             "excluded_tools": self.settings.excluded_tools or [],
             "ask_user_timeout": self.settings.ask_user_timeout,
             "ask_paused_sessions": list(self._ask_paused_sessions),
+            "global_ask_paused": self._global_ask_paused,
         }
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)

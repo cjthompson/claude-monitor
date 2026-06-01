@@ -58,8 +58,10 @@ def decide_permission(state: dict, event: dict) -> tuple[str, int]:
     if tool_name and tool_name in state.get("excluded_tools", []):
         return "deferred", 0
 
-    # Per-pane AskUserQuestion pause
+    # Per-pane AskUserQuestion pause (also checks global ask pause)
     if tool_name == "AskUserQuestion":
+        if state.get("global_ask_paused", False):
+            return "deferred", 0
         if iterm_sid and iterm_sid in state.get("ask_paused_sessions", []):
             return "deferred", 0
         ask_timeout = state.get("ask_user_timeout", 0)
