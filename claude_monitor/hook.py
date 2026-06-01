@@ -9,6 +9,7 @@ Auto-allows PermissionRequest unless paused.
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -133,45 +134,65 @@ def main():
     )
 
 
-def statusline_main():
+def statusline_main() -> int:
     """Entry point called by Claude Code as a statusLine script.
 
-    Reads JSON from stdin (which includes ``rate_limits`` from CC 2.1.80+),
-    writes a cache file for the TUI, and outputs a compact usage summary.
-    """
-    import sys
+    Reads JSON from stdin (CC 2.1.80+ includes ``rate_limits``), writes a cache
+    file for the TUI, and either chains to another statusline script or emits
+    a compact built-in summary.
 
+    Chaining: if ``CLAUDE_MONITOR_STATUSLINE_NEXT`` is set, the original stdin
+    is forwarded to that command and its stdout becomes the status line.
+    Use this to keep an existing statusline script (e.g. a custom powerline)
+    while still feeding the TUI's rate-limits cache.
+    """
     from claude_monitor import RATE_LIMITS_CACHE_FILE, SIGNAL_DIR
 
-    try:
-        data = json.load(sys.stdin)
-    except (json.JSONDecodeError, OSError):
-        return
-
-    rate_limits = data.get("rate_limits")
-    if not rate_limits:
-        return
-
-    os.makedirs(SIGNAL_DIR, exist_ok=True)
-
-    payload = {
-        "fetched_at": time.time(),
-        "five_hour": rate_limits.get("five_hour", {}),
-        "seven_day": rate_limits.get("seven_day", {}),
-    }
+    raw = sys.stdin.read()
 
     try:
-        with open(RATE_LIMITS_CACHE_FILE, "w") as f:
-            json.dump(payload, f)
-    except OSError:
-        pass
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        data = None
 
-    # Output a compact rate-limit summary for Claude Code's status bar.
-    fh = rate_limits.get("five_hour", {})
-    sd = rate_limits.get("seven_day", {})
-    fh_pct = fh.get("used_percentage", 0) or 0
-    sd_pct = sd.get("used_percentage", 0) or 0
+    rate_limits = data.get("rate_limits") if isinstance(data, dict) else None
+    if rate_limits:
+        os.makedirs(SIGNAL_DIR, exist_ok=True)
+        payload = {
+            "fetched_at": time.time(),
+            "five_hour": rate_limits.get("five_hour", {}),
+            "seven_day": rate_limits.get("seven_day", {}),
+        }
+        try:
+            with open(RATE_LIMITS_CACHE_FILE, "w") as f:
+                json.dump(payload, f)
+        except OSError:
+            pass
+
+    chained = os.environ.get("CLAUDE_MONITOR_STATUSLINE_NEXT", "").strip()
+    if chained:
+        try:
+            result = subprocess.run(
+                chained,
+                shell=True,
+                input=raw,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return result.returncode
+        except (OSError, subprocess.SubprocessError) as e:
+            sys.stderr.write(f"claude-monitor-statusline: chained command failed: {e}\n")
+            # Fall through to built-in summary so CC's status bar isn't blank.
+
+    fh = (rate_limits or {}).get("five_hour") or {}
+    sd = (rate_limits or {}).get("seven_day") or {}
+    fh_pct = fh.get("used_percentage") or 0
+    sd_pct = sd.get("used_percentage") or 0
     print(f"5h:{fh_pct:.0f}% 7d:{sd_pct:.0f}%", end="")
+    return 0
 
 
 if __name__ == "__main__":
