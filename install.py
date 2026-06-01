@@ -274,18 +274,38 @@ def configure_hooks():
     print(f"\nHooks written to {SETTINGS_FILE}")
 
 
+def _shell_quote(s: str) -> str:
+    """Single-quote-escape a string for safe inclusion in a shell command."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _extract_statusline_command(value) -> "str | None":
+    """Pull the command string out of a settings.json statusLine value.
+
+    Accepts both the legacy bare-string form and the documented object form
+    ({"type": "command", "command": "..."}).
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        cmd = value.get("command")
+        return cmd if isinstance(cmd, str) else None
+    return None
+
+
 def configure_statusline():
     """Configure claude-monitor-statusline as Claude Code's statusLine provider.
 
-    Reads rate_limits data (CC 2.1.80+) from Claude Code and feeds it to the TUI.
-    NOTE: This replaces Claude Code's default status bar with a compact usage display.
+    Writes rate_limits (CC 2.1.80+) to a cache file the TUI reads. If a custom
+    statusLine is already configured, offer to chain it via
+    CLAUDE_MONITOR_STATUSLINE_NEXT so its output (e.g. a powerline) continues
+    to render while the cache write happens transparently.
     """
     print()
     print("Statusline integration (optional, requires CC 2.1.80+)")
-    print("  Configures claude-monitor-statusline as Claude Code's status line provider.")
-    print("  Shows rate limit usage in Claude Code's status bar (5h/7d percentages).")
-    print("  Also feeds live rate-limit data to the TUI without polling the Anthropic API.")
-    print("  NOTE: Replaces Claude Code's default status bar display.")
+    print("  Writes rate_limits to a cache file the TUI reads (no API polling).")
+    print("  If you already have a custom statusLine, the installer will chain")
+    print("  into it so your script keeps rendering and we just add the cache write.")
     print()
 
     answer = input("Configure statusLine in ~/.claude/settings.json? [y/N] ").strip().lower()
@@ -300,19 +320,33 @@ def configure_statusline():
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         settings = {}
 
-    existing = settings.get("statusLine", "")
-    if existing == STATUSLINE_COMMAND:
-        print("  statusLine: already configured correctly, skipping")
+    existing = settings.get("statusLine")
+    existing_cmd = _extract_statusline_command(existing)
+
+    if existing_cmd and "claude-monitor-statusline" in existing_cmd:
+        print("  statusLine: already routed through claude-monitor-statusline, skipping")
         return
 
-    if existing and "claude-monitor-statusline" not in existing:
-        print(f"  Existing statusLine: {existing!r}")
-        ans = input("  Overwrite? [y/N] ").strip().lower()
-        if ans not in ("y", "yes"):
+    if existing_cmd:
+        print(f"  Existing statusLine command: {existing_cmd!r}")
+        print("  [c]hain (recommended — keep existing + add cache write)")
+        print("  [r]eplace (use only claude-monitor-statusline's built-in 5h/7d summary)")
+        print("  [s]kip")
+        choice = input("  Choice [c/r/s] (default c): ").strip().lower()
+        if choice in ("", "c", "chain"):
+            new_cmd = (
+                f"CLAUDE_MONITOR_STATUSLINE_NEXT={_shell_quote(existing_cmd)} "
+                f"{STATUSLINE_COMMAND}"
+            )
+        elif choice in ("r", "replace"):
+            new_cmd = STATUSLINE_COMMAND
+        else:
             print("  Skipped.")
             return
+    else:
+        new_cmd = STATUSLINE_COMMAND
 
-    settings["statusLine"] = STATUSLINE_COMMAND
+    settings["statusLine"] = {"type": "command", "command": new_cmd}
 
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=2)
