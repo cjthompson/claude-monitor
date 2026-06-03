@@ -290,7 +290,7 @@ class TestFormatEvent:
             get_panel=lambda d: panel,
             oneline=_oneline,
         )
-        assert "TIMEOUT" in label
+        assert "ASKING" in label
         assert "30" in detail
 
     def test_permission_excluded_tool(self):

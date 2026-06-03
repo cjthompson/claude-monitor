@@ -151,7 +151,7 @@ def format_event(
             return f"[bold yellow]{'DEFERRED':<8}[/]", f"{_ag}{tool}{detail}"
         if decision == "timeout":
             timeout_s = data.get("_ask_timeout", "?")
-            return f"[bold cyan]{'TIMEOUT':<8}[/]", f"{_ag}{tool}{detail} ({timeout_s}s)"
+            return f"[bold cyan]{'ASKING':<8}[/]", f"{_ag}{tool}{detail} ({timeout_s}s)"
         if pause_sid and is_pane_paused(pause_sid):
             return f"[bold yellow]{'PAUSED':<8}[/]", f"{_ag}{tool}{detail}"
         return f"[bold green]{'ALLOWED':<8}[/]", f"{_ag}{tool}{detail}"

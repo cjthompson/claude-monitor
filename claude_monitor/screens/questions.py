@@ -129,7 +129,7 @@ class QuestionsScreen(ModalScreen):
         elif decision == "deferred":
             badge = "[bold yellow]DEFERRED[/]"
         elif decision == "timeout":
-            badge = "[bold cyan]TIMEOUT [/]"
+            badge = "[bold cyan]ASKING  [/]"
         else:
             badge = "[bold green]ALLOWED [/]"
 

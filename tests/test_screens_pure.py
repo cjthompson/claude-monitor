@@ -304,7 +304,7 @@ class TestQuestionsFormatQuestion:
             "_decision": "timeout",
         }
         result = self._format(data)
-        assert "TIMEOUT" in result
+        assert "ASKING" in result
 
     def test_excluded(self):
         data = {

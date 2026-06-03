@@ -285,6 +285,9 @@ class WidgetTreeBuilder:
                     sp._last_event_time = old._last_event_time
                     sp._state = old.state
                     sp._event_log = list(old._event_log)
+                    sp._pending_timeout = old._pending_timeout
+                    sp._timeout_origin = old._timeout_origin
+                    sp._pending_deferred_at = old._pending_deferred_at
                 panels[node.session_id] = sp
                 log.debug(
                     f"{indent}Session {node.session_id[:8]} {name!r} -> SessionPanel id={css_id}"
