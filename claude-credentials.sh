@@ -11,11 +11,12 @@ CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 SIMPLE_OUT=false
 DO_REFRESH=false
+OAUTH_ONLY=false
 IMPORT_PATH=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--simple] [--refresh] --import <file|->
+Usage: $(basename "$0") [--simple] [--refresh] [--oauth-only] --import <file|->
 
 Modes:
   (default)    Print raw keychain bytes for '$SERVICE' (no decoding).
@@ -25,6 +26,10 @@ Modes:
                  refresh_token: <value>
                  expires_at:    <ms since epoch>
                  expires:       <local datetime>
+
+  --oauth-only  Print only the claudeAiOauth section as JSON (omits mcpOAuth
+                and any other keys). Useful for sharing credentials between
+                machines without transferring machine-specific OAuth tokens.
 
   --refresh    Refresh the access token via OAuth, write the result back
                to the keychain, then print the result in --simple form.
@@ -38,14 +43,15 @@ Modes:
                     been run here at least once) so the account name can
                     be discovered.
 
---simple, --refresh, and --import are mutually exclusive.
+--simple, --oauth-only, --refresh, and --import are mutually exclusive.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --simple)   SIMPLE_OUT=true ;;
-    --refresh)  DO_REFRESH=true ;;
+    --simple)     SIMPLE_OUT=true ;;
+    --oauth-only) OAUTH_ONLY=true ;;
+    --refresh)    DO_REFRESH=true ;;
     --import)
       [[ $# -ge 2 ]] || { echo "Error: --import requires a path argument (use '-' for stdin)" >&2; exit 1; }
       IMPORT_PATH="$2"
@@ -58,11 +64,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 modes=0
-$SIMPLE_OUT && modes=$((modes + 1))
+$SIMPLE_OUT  && modes=$((modes + 1))
+$OAUTH_ONLY  && modes=$((modes + 1))
 $DO_REFRESH  && modes=$((modes + 1))
 [[ -n "$IMPORT_PATH" ]] && modes=$((modes + 1))
 if (( modes > 1 )); then
-  echo "Error: --simple, --refresh, and --import are mutually exclusive" >&2
+  echo "Error: --simple, --oauth-only, --refresh, and --import are mutually exclusive" >&2
   exit 1
 fi
 
@@ -101,6 +108,20 @@ if [[ -n "$IMPORT_PATH" ]]; then
 
   bytes=$(printf '%s' "$content" | wc -c | tr -d ' ')
   echo "Imported $bytes bytes to keychain service '$SERVICE' (account: $account)" >&2
+  exit 0
+fi
+
+# --oauth-only: extract and output just the claudeAiOauth section.
+if $OAUTH_ONLY; then
+  keychain_out=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
+    echo "Error: No credentials found in Keychain" >&2; exit 1
+  }
+  if [[ "$keychain_out" =~ ^\{ ]]; then
+    raw="$keychain_out"
+  else
+    raw=$(echo "$keychain_out" | xxd -r -p)
+  fi
+  echo "$raw" | jq -c '{claudeAiOauth: .claudeAiOauth}'
   exit 0
 fi
 
