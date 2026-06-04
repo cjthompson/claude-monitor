@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Export Claude Code OAuth token from macOS Keychain.
-# Usage: ./export_token.sh [--json] [--refresh]
+# Manage the Claude Code OAuth token in the macOS Keychain.
+#
+# Usage: ./claude-credentials.sh [--simple] [--refresh]
 
 set -euo pipefail
 
@@ -8,31 +9,58 @@ SERVICE="Claude Code-credentials"
 TOKEN_URL="https://platform.claude.com/v1/oauth/token"
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-JSON_OUT=false
+SIMPLE_OUT=false
 DO_REFRESH=false
 
-for arg in "$@"; do
-  case "$arg" in
-    --json) JSON_OUT=true ;;
-    --refresh) DO_REFRESH=true ;;
-    -h|--help)
-      echo "Usage: $(basename "$0") [--json] [--refresh]"
-      echo "  --json     Output as JSON"
-      echo "  --refresh  Refresh the access token via OAuth API"
-      exit 0
-      ;;
-    *) echo "Unknown option: $arg" >&2; exit 1 ;;
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--simple] [--refresh]
+
+Modes:
+  (default)    Print raw keychain bytes for '$SERVICE' (no decoding).
+
+  --simple     Print the three OAuth fields in human-readable form:
+                 access_token:  <value>
+                 refresh_token: <value>
+                 expires_at:    <ms since epoch>
+                 expires:       <local datetime>
+
+  --refresh    Refresh the access token via OAuth, write the result back
+               to the keychain, then print the result in --simple form.
+
+--simple and --refresh are mutually exclusive.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --simple)   SIMPLE_OUT=true ;;
+    --refresh)  DO_REFRESH=true ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
+  shift
 done
 
-# Read credentials from Keychain
+if $SIMPLE_OUT && $DO_REFRESH; then
+  echo "Error: --simple and --refresh are mutually exclusive" >&2
+  exit 1
+fi
+
+# Default: pass-through of `security -w` bytes, exactly as Claude Code wrote them.
+if ! $SIMPLE_OUT && ! $DO_REFRESH; then
+  security find-generic-password -s "$SERVICE" -w
+  exit $?
+fi
+
+# --simple and --refresh both need the keychain bytes parsed as JSON.
 keychain_out=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
   echo "Error: No credentials found in Keychain" >&2
   exit 1
 }
 
 # Output may be hex-encoded or raw JSON depending on macOS version
-if [[ "$keychain_out" =~ ^\{  ]]; then
+if [[ "$keychain_out" =~ ^\{ ]]; then
   raw="$keychain_out"
 else
   raw=$(echo "$keychain_out" | xxd -r -p)
@@ -92,16 +120,8 @@ if $DO_REFRESH; then
   echo "Token refreshed successfully" >&2
 fi
 
-if $JSON_OUT; then
-  jq -n \
-    --arg at "$access_token" \
-    --arg rt "$refresh_token" \
-    --argjson ea "$expires_at_ms" \
-    '{access_token: $at, refresh_token: $rt, expires_at: $ea}'
-else
-  expires_local=$(date -r $((expires_at_ms / 1000)) +"%Y-%m-%d %I:%M:%S %p %Z")
-  echo "access_token:  $access_token"
-  echo "refresh_token: $refresh_token"
-  echo "expires_at:    $expires_at_ms"
-  echo "expires:       $expires_local"
-fi
+expires_local=$(date -r $((expires_at_ms / 1000)) +"%Y-%m-%d %I:%M:%S %p %Z")
+echo "access_token:  $access_token"
+echo "refresh_token: $refresh_token"
+echo "expires_at:    $expires_at_ms"
+echo "expires:       $expires_local"
