@@ -95,9 +95,11 @@ if [[ -n "$IMPORT_PATH" ]]; then
     exit 1
   fi
 
-  security add-generic-password -U -a "$account" -s "$SERVICE" -w "$(cat "$tmpfile")"
+  content="$(cat "$tmpfile")"
+  content="$(printf '%s' "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  security add-generic-password -U -a "$account" -s "$SERVICE" -w "$content"
 
-  bytes=$(wc -c < "$tmpfile" | tr -d ' ')
+  bytes=$(printf '%s' "$content" | wc -c | tr -d ' ')
   echo "Imported $bytes bytes to keychain service '$SERVICE' (account: $account)" >&2
   exit 0
 fi
