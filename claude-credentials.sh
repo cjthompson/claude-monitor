@@ -95,9 +95,7 @@ if [[ -n "$IMPORT_PATH" ]]; then
     exit 1
   fi
 
-  # Use -X (hex) to write raw bytes without shell expansion stripping trailing newlines
-  hex=$(xxd -p "$tmpfile" | tr -d '\n')
-  security add-generic-password -U -a "$account" -s "$SERVICE" -X "$hex"
+  security add-generic-password -U -a "$account" -s "$SERVICE" -w "$(cat "$tmpfile")"
 
   bytes=$(wc -c < "$tmpfile" | tr -d ' ')
   echo "Imported $bytes bytes to keychain service '$SERVICE' (account: $account)" >&2
