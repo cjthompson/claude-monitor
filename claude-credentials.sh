@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manage the Claude Code OAuth token in the macOS Keychain.
 #
-# Usage: ./claude-credentials.sh [--simple] [--refresh]
+# Usage: ./claude-credentials.sh [--simple] [--refresh] --import <file|->
 
 set -euo pipefail
 
@@ -11,10 +11,11 @@ CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 SIMPLE_OUT=false
 DO_REFRESH=false
+IMPORT_PATH=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--simple] [--refresh]
+Usage: $(basename "$0") [--simple] [--refresh] --import <file|->
 
 Modes:
   (default)    Print raw keychain bytes for '$SERVICE' (no decoding).
@@ -28,7 +29,16 @@ Modes:
   --refresh    Refresh the access token via OAuth, write the result back
                to the keychain, then print the result in --simple form.
 
---simple and --refresh are mutually exclusive.
+  --import <path>   Read raw keychain JSON from <path> (use '-' for stdin)
+                    and write it verbatim to the keychain, replacing the
+                    existing entry. Input is expected to be exactly what
+                    default-mode export produces — the same shape Claude
+                    Code itself stores. Requires the keychain entry to
+                    already exist on this Mac (i.e., 'claude login' has
+                    been run here at least once) so the account name can
+                    be discovered.
+
+--simple, --refresh, and --import are mutually exclusive.
 EOF
 }
 
@@ -36,15 +46,62 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --simple)   SIMPLE_OUT=true ;;
     --refresh)  DO_REFRESH=true ;;
+    --import)
+      [[ $# -ge 2 ]] || { echo "Error: --import requires a path argument (use '-' for stdin)" >&2; exit 1; }
+      IMPORT_PATH="$2"
+      shift
+      ;;
     -h|--help)  usage; exit 0 ;;
     *)          echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
   shift
 done
 
-if $SIMPLE_OUT && $DO_REFRESH; then
-  echo "Error: --simple and --refresh are mutually exclusive" >&2
+modes=0
+$SIMPLE_OUT && modes=$((modes + 1))
+$DO_REFRESH  && modes=$((modes + 1))
+[[ -n "$IMPORT_PATH" ]] && modes=$((modes + 1))
+if (( modes > 1 )); then
+  echo "Error: --simple, --refresh, and --import are mutually exclusive" >&2
   exit 1
+fi
+
+# --import: read raw keychain bytes (file or stdin) and write verbatim.
+if [[ -n "$IMPORT_PATH" ]]; then
+  tmpfile=$(mktemp)
+  trap 'rm -f "$tmpfile"' EXIT
+
+  if [[ "$IMPORT_PATH" == "-" ]]; then
+    cat > "$tmpfile"
+  else
+    if [[ ! -r "$IMPORT_PATH" ]]; then
+      echo "Error: Cannot read import file: $IMPORT_PATH" >&2
+      exit 1
+    fi
+    cat "$IMPORT_PATH" > "$tmpfile"
+  fi
+
+  if [[ ! -s "$tmpfile" ]]; then
+    echo "Error: Import input is empty" >&2
+    exit 1
+  fi
+
+  # Discover account name from existing keychain entry
+  account=$(security find-generic-password -s "$SERVICE" 2>/dev/null \
+    | grep '"acct"' | sed 's/.*<blob>="\{0,1\}//' | sed 's/"\{0,1\}$//')
+
+  if [[ -z "$account" ]]; then
+    echo "Error: No existing keychain entry for service '$SERVICE'. Run 'claude login' first." >&2
+    exit 1
+  fi
+
+  # Use -X (hex) to write raw bytes without shell expansion stripping trailing newlines
+  hex=$(xxd -p "$tmpfile" | tr -d '\n')
+  security add-generic-password -U -a "$account" -s "$SERVICE" -X "$hex"
+
+  bytes=$(wc -c < "$tmpfile" | tr -d ' ')
+  echo "Imported $bytes bytes to keychain service '$SERVICE' (account: $account)" >&2
+  exit 0
 fi
 
 # Default: pass-through of `security -w` bytes, exactly as Claude Code wrote them.
