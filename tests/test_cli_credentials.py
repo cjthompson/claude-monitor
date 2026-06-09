@@ -1,7 +1,9 @@
-"""End-to-end tests for the credentials-helper.py CLI.
+"""End-to-end tests for the claude-monitor-credentials CLI.
 
-Drives the real script via subprocess with the `security` binary mocked by a
-temp shim on PATH; uses real loopback UDP sockets for --send/--receive.
+Drives the module via `python -m claude_monitor.cli_credentials` with the
+`security` binary mocked by a temp shim on PATH; uses real loopback TCP sockets
+for --send/--receive. The installed console script (claude-monitor-credentials)
+is the same main(), so this exercises the real entry point.
 """
 
 import json
@@ -9,11 +11,13 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "credentials-helper.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MODULE = "claude_monitor.cli_credentials"
 KEYCHAIN_JSON = json.dumps(
     {
         "claudeAiOauth": {
@@ -71,8 +75,8 @@ def cli_env(tmp_path):
 
 def _run(env, *args, stdin=None):
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        cwd=SCRIPT.parent,
+        [sys.executable, "-m", MODULE, *args],
+        cwd=REPO_ROOT,
         env=env,
         capture_output=True,
         text=True,
@@ -81,17 +85,53 @@ def _run(env, *args, stdin=None):
     )
 
 
-def _udp_listener():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 0))
-    return sock, sock.getsockname()[1]
+def _tcp_server():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    return srv, srv.getsockname()[1]
 
 
-def test_default_prints_raw_blob(cli_env):
+def _recv_all(conn):
+    chunks = []
+    while True:
+        b = conn.recv(65535)
+        if not b:
+            break
+        chunks.append(b)
+    return b"".join(chunks)
+
+
+def test_no_args_shows_help(cli_env):
     env, _ = cli_env
     res = _run(env)
     assert res.returncode == 0
+    assert "usage:" in res.stdout.lower()
+    assert "--oauth-only" in res.stdout
+    # Must NOT dump credentials when invoked with no arguments.
+    assert "accessToken" not in res.stdout
+
+
+def test_raw_prints_full_blob(cli_env):
+    env, _ = cli_env
+    res = _run(env, "--raw")
+    assert res.returncode == 0
     assert res.stdout.strip() == KEYCHAIN_JSON
+
+
+def test_raw_conflicts_with_oauth_only(cli_env):
+    env, _ = cli_env
+    res = _run(env, "--raw", "--oauth-only")
+    assert res.returncode != 0
+    assert "oauth-only" in res.stderr.lower()
+
+
+def test_raw_conflicts_with_other_modes(cli_env):
+    env, _ = cli_env
+    res = _run(env, "--raw", "--simple")
+    assert res.returncode != 0
+    assert "mutually exclusive" in res.stderr.lower()
 
 
 def test_oauth_only_prints_filtered_payload(cli_env):
@@ -112,38 +152,39 @@ def test_simple_prints_token_fields(cli_env):
 
 def test_full_send_transmits_raw_blob(cli_env):
     env, _ = cli_env
-    sock, port = _udp_listener()
+    srv, port = _tcp_server()
     try:
         res = _run(env, "--send", "127.0.0.1", "--send-port", str(port))
         assert res.returncode == 0
-        sock.settimeout(5)
-        data, _addr = sock.recvfrom(65535)
+        srv.settimeout(5)
+        conn, _addr = srv.accept()
+        data = _recv_all(conn)
+        conn.close()
         assert data.decode() == KEYCHAIN_JSON
-        assert f"Sent {len(KEYCHAIN_JSON)} bytes to 127.0.0.1:{port} via UDP" in res.stderr
+        assert f"Sent {len(KEYCHAIN_JSON)} bytes to 127.0.0.1:{port} via TCP" in res.stderr
         assert "(oauth-only)" not in res.stderr
     finally:
-        sock.close()
+        srv.close()
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [("--oauth-only",), ()],
-)
+@pytest.mark.parametrize("extra", [("--oauth-only",), ()])
 def test_oauth_only_send_transmits_filtered_payload(cli_env, extra):
     env, _ = cli_env
-    sock, port = _udp_listener()
+    srv, port = _tcp_server()
     try:
         res = _run(env, "--send", "127.0.0.1", "--send-port", str(port), *extra)
         assert res.returncode == 0
-        sock.settimeout(5)
-        data, _addr = sock.recvfrom(65535)
+        srv.settimeout(5)
+        conn, _addr = srv.accept()
+        data = _recv_all(conn)
+        conn.close()
         if extra:
             assert json.loads(data) == OAUTH_ONLY
             assert "(oauth-only)" in res.stderr
         else:
             assert data.decode() == KEYCHAIN_JSON
     finally:
-        sock.close()
+        srv.close()
 
 
 def test_oauth_only_only_combinable_with_send(cli_env):
@@ -168,34 +209,37 @@ def test_import_stdin_writes_verbatim(cli_env):
     assert capture.read_text() == payload  # surrounding whitespace trimmed
 
 
-def test_receive_writes_datagram_to_keychain(cli_env):
+def test_receive_writes_connection_to_keychain(cli_env):
     env, capture = cli_env
-    sock, port = _udp_listener()
-    port_for_receive = port
-    sock.close()  # free the port for the receiver to bind
+    # Pick a free port, then let the receiver bind+listen on it.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
 
     proc = subprocess.Popen(
-        [sys.executable, str(SCRIPT), "--receive", "--port", str(port_for_receive)],
-        cwd=SCRIPT.parent,
+        [sys.executable, "-m", MODULE, "--receive", "--port", str(port)],
+        cwd=REPO_ROOT,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     payload = '{"claudeAiOauth":{"accessToken":"received"}}'
-    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # The receiver needs a moment to bind; resend until it exits.
+        # The receiver needs a moment to start listening; retry connect.
+        client = None
         for _ in range(50):
-            sender.sendto(payload.encode(), ("127.0.0.1", port_for_receive))
             try:
-                proc.wait(timeout=0.2)
+                client = socket.create_connection(("127.0.0.1", port), timeout=1)
                 break
-            except subprocess.TimeoutExpired:
-                continue
+            except OSError:
+                time.sleep(0.1)
+        assert client is not None, "receiver never started listening"
+        client.sendall(payload.encode())
+        client.close()
         proc.wait(timeout=5)
     finally:
-        sender.close()
         if proc.poll() is None:
             proc.kill()
     assert proc.returncode == 0

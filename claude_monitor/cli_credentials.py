@@ -1,20 +1,22 @@
-#!/usr/bin/env python3
-"""Manage the Claude Code OAuth credentials in the macOS Keychain.
+"""CLI for managing Claude Code OAuth credentials in the macOS Keychain.
 
-A pure-Python sibling of ``claude-credentials.sh`` — same CLI surface, no
-bash/jq/xxd/curl. All keychain and OAuth work is delegated to the shared
-``claude_monitor.credentials`` module (which shells out to the ``security``
-binary, matching the rest of the project).
+Installed as the ``claude-monitor-credentials`` console script (and runnable via
+``python -m claude_monitor.cli_credentials``). A pure-Python counterpart to
+``claude-credentials.sh`` — same CLI surface, no bash/jq/xxd/curl. All keychain
+and OAuth work is delegated to the shared ``claude_monitor.credentials`` module.
 
-Modes (mutually exclusive, except --oauth-only which may accompany --send):
-  (default)        Print the raw keychain blob, exactly as stored.
+Modes (mutually exclusive, except --oauth-only which may accompany --send).
+With no arguments, prints help (it does not dump credentials by default).
+  --raw            Print the raw keychain blob, exactly as stored.
   --simple         Print access_token / refresh_token / expires_at / expires.
   --oauth-only     Print only the claudeAiOauth section as compact JSON.
   --refresh        Refresh the access token, write it back, print --simple form.
   --import <file|-> Write raw keychain bytes (file or stdin) verbatim.
-  --send <host>    Send the keychain blob to <host> as one UDP datagram.
-                   With --oauth-only, send only the claudeAiOauth section.
-  --receive        Receive one UDP datagram and write it to the keychain.
+  --send <host>    Send the keychain blob to <host> over TCP (the receiver must
+                   be running --receive first). With --oauth-only, send only the
+                   claudeAiOauth section.
+  --receive        Accept one TCP connection and write the received bytes to
+                   the keychain.
 """
 
 import argparse
@@ -27,6 +29,7 @@ from datetime import datetime
 from claude_monitor import credentials as creds
 
 DEFAULT_PORT = 47299
+SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
 
 
 def _err(msg: str) -> None:
@@ -35,9 +38,10 @@ def _err(msg: str) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="credentials-helper.py",
+        prog="claude-monitor-credentials",
         description="Manage Claude Code OAuth credentials in the macOS Keychain.",
     )
+    p.add_argument("--raw", action="store_true", help="print the raw keychain blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
     p.add_argument("--refresh", action="store_true", help="refresh the access token")
     p.add_argument(
@@ -47,22 +51,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only the claudeAiOauth section (alone, or as a --send modifier)",
     )
     p.add_argument("--import", dest="import_path", metavar="<file|->", help="write bytes verbatim")
-    p.add_argument("--send", dest="send_host", metavar="<host>", help="UDP-send the blob")
-    p.add_argument("--send-port", dest="send_port", type=int, default=DEFAULT_PORT)
-    p.add_argument("--receive", action="store_true", help="receive one UDP datagram, write it")
-    p.add_argument("--port", dest="receive_port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--send", dest="send_host", metavar="<host>", help="send the blob over TCP")
+    p.add_argument(
+        "--send-port",
+        dest="send_port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="<port>",
+        help=f"destination port for --send (default {DEFAULT_PORT})",
+    )
+    p.add_argument("--receive", action="store_true", help="accept one TCP connection, write it")
+    p.add_argument(
+        "--port",
+        dest="receive_port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="<port>",
+        help=f"listening port for --receive (default {DEFAULT_PORT})",
+    )
     return p
 
 
 def _validate(args: argparse.Namespace) -> str | None:
     """Return an error message if the flag combination is invalid, else None."""
     primary = sum(
-        [args.simple, args.refresh, bool(args.import_path), bool(args.send_host), args.receive]
+        [args.raw, args.simple, args.refresh, bool(args.import_path), bool(args.send_host), args.receive]
     )
     if primary > 1:
-        return "Error: --simple, --refresh, --import, --send, and --receive are mutually exclusive"
+        return (
+            "Error: --raw, --simple, --refresh, --import, --send, and --receive "
+            "are mutually exclusive"
+        )
     if args.oauth_only and (
-        args.simple or args.refresh or args.import_path or args.receive
+        args.raw or args.simple or args.refresh or args.import_path or args.receive
     ):
         return "Error: --oauth-only can only be used by itself or with --send"
     return None
@@ -90,27 +111,42 @@ def _do_import(import_path: str) -> int:
 
 def _do_send(host: str, port: int, oauth_only: bool) -> int:
     payload = (creds.oauth_only_json() if oauth_only else creds.read_raw()).encode()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # TCP: connect() fails loudly if no receiver is listening, and there is no
+    # datagram size cap, so the full blob transfers reliably.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(SEND_TIMEOUT)
     try:
-        sock.sendto(payload, (host, port))
+        sock.connect((host, port))
+        sock.sendall(payload)
     finally:
         sock.close()
     note = " (oauth-only)" if oauth_only else ""
-    _err(f"Sent {len(payload)} bytes to {host}:{port} via UDP{note}")
+    _err(f"Sent {len(payload)} bytes to {host}:{port} via TCP{note}")
     return 0
 
 
 def _do_receive(port: int) -> int:
-    _err(f"Listening for one UDP datagram on port {port}...")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    _err(f"Listening for one TCP connection on port {port}...")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind(("0.0.0.0", port))
-        data, _addr = sock.recvfrom(65535)
+        srv.bind(("0.0.0.0", port))
+        srv.listen(1)
+        conn, _addr = srv.accept()
+        try:
+            chunks = []
+            while True:
+                block = conn.recv(65535)
+                if not block:
+                    break
+                chunks.append(block)
+        finally:
+            conn.close()
     finally:
-        sock.close()
-    content = data.decode("utf-8", errors="replace").strip()
+        srv.close()
+    content = b"".join(chunks).decode("utf-8", errors="replace").strip()
     if not content:
-        _err("Error: Received empty datagram")
+        _err("Error: Received empty connection")
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")
@@ -143,7 +179,8 @@ def _do_refresh(tokens: tuple[str, str, float]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
     error = _validate(args)
     if error:
@@ -157,6 +194,9 @@ def main(argv: list[str] | None = None) -> int:
             return _do_send(args.send_host, args.send_port, args.oauth_only)
         if args.receive:
             return _do_receive(args.receive_port)
+        if args.raw:
+            print(creds.read_raw())
+            return 0
         if args.oauth_only:
             print(creds.oauth_only_json())
             return 0
@@ -169,8 +209,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _do_refresh(tokens)
             _print_simple(tokens)
             return 0
-        # default: raw passthrough
-        print(creds.read_raw())
+        # No mode selected (e.g. no arguments) → show help rather than dump the blob.
+        parser.print_help()
         return 0
     except (creds.CredentialsError, OSError) as e:
         _err(f"Error: {e}")

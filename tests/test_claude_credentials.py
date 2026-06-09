@@ -75,7 +75,7 @@ def test_send_uses_raw_keychain_payload_by_default(tmp_path):
 
     assert result.returncode == 0
     assert capture_file.read_text() == KEYCHAIN_JSON
-    assert f"Sent {len(KEYCHAIN_JSON)} bytes to 127.0.0.1:59999 via UDP" in result.stderr
+    assert f"Sent {len(KEYCHAIN_JSON)} bytes to 127.0.0.1:59999 via TCP" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -105,6 +105,29 @@ def test_oauth_only_alone_prints_filtered_payload(tmp_path):
 
 def test_oauth_only_is_only_combinable_with_send(tmp_path):
     result, _capture_file = _run_script(tmp_path, "--oauth-only", "--receive")
+
+    assert result.returncode == 1
+    assert "Error: --oauth-only can only be used by itself or with --send" in result.stderr
+
+
+def test_no_args_shows_help(tmp_path):
+    result, _capture_file = _run_script(tmp_path)
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout.lower()
+    # Must NOT dump credentials when invoked with no arguments.
+    assert "accessToken" not in result.stdout
+
+
+def test_raw_prints_full_blob(tmp_path):
+    result, _capture_file = _run_script(tmp_path, "--raw")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == KEYCHAIN_JSON
+
+
+def test_raw_conflicts_with_oauth_only(tmp_path):
+    result, _capture_file = _run_script(tmp_path, "--raw", "--oauth-only")
 
     assert result.returncode == 1
     assert "Error: --oauth-only can only be used by itself or with --send" in result.stderr
