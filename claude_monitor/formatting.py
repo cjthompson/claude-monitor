@@ -6,6 +6,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Callable
 
+from rich.markup import escape
+
 if TYPE_CHECKING:
     from claude_monitor.widgets.session_panel import SessionPanel
 
@@ -139,11 +141,11 @@ def format_event(
         if tool == "AskUserQuestion":
             detail = _format_ask_user_question_inline(tool_input)
         elif tool == "Bash":
-            detail = f" `{oneline(tool_input.get('command', ''))}`"
+            detail = f" `{escape(oneline(tool_input.get('command', '')))}` "
         elif tool in ("Edit", "Write"):
-            detail = f" `{tool_input.get('file_path', '')}`"
+            detail = f" `{escape(tool_input.get('file_path', ''))}`"
         elif tool == "WebFetch":
-            detail = f" `{tool_input.get('url', '')}`"
+            detail = f" `{escape(tool_input.get('url', ''))}`"
         if data.get("_excluded_tool"):
             return f"[bold red]{'MANUAL':<8}[/]", f"{_ag}{tool}{detail}"
         decision = data.get("_decision", "allowed")
@@ -166,7 +168,7 @@ def format_event(
             answer_text = ", ".join(answer_vals)
             return (
                 f"[bold green]{'ANSWER':<8}[/]",
-                f"{_ag}AskUserQuestion -> [bold]{answer_text}[/]",
+                f"{_ag}AskUserQuestion -> [bold]{escape(answer_text)}[/]",
             )
         return None, None
 
@@ -174,10 +176,10 @@ def format_event(
         ntype = data.get("notification_type", "")
         message = data.get("message", "")
         if ntype == "idle_prompt":
-            return f"[dim]{'IDLE':<8}[/]", f"{_ag}{oneline(message, 80)}"
+            return f"[dim]{'IDLE':<8}[/]", f"{_ag}{escape(oneline(message, 80))}"
         elif ntype == "ask_timeout_complete":
             if data.get("_auto_accepted"):
-                return f"[bold cyan]{'AUTO':<8}[/]", message
+                return f"[bold cyan]{'AUTO':<8}[/]", escape(message)
             return None, None
         elif ntype == "permission_prompt":
             if self_sid and pause_sid == self_sid:
@@ -186,8 +188,8 @@ def format_event(
                 pending = getattr(panel_ref, "_pending_timeout", None) if panel_ref else None
                 if pending and pending > time.time():
                     return None, None
-                return f"[bold green]{'APPROVED':<8}[/]", f"{_ag}{message}"
-        return f"[bold cyan]{'NOTIFY':<8}[/]", f"{_ag}{oneline(message, 80)}"
+                return f"[bold green]{'APPROVED':<8}[/]", f"{_ag}{escape(message)}"
+        return f"[bold cyan]{'NOTIFY':<8}[/]", f"{_ag}{escape(oneline(message, 80))}"
 
     elif event_name == "SubagentStart":
         agent_id = data.get("agent_id", "?")
@@ -198,7 +200,7 @@ def format_event(
         agent_id = data.get("agent_id", "?")
         agent_type = data.get("agent_type", "?")
         msg = data.get("last_assistant_message", "")
-        suffix = f"  -> {oneline(msg, 100)}" if msg else ""
+        suffix = f"  -> {escape(oneline(msg, 100))}" if msg else ""
         return f"[magenta]{'AGENT-':<8}[/]", f"{agent_type} [{agent_id[:8]}]{suffix}"
 
     elif event_name == "SessionStart":
@@ -213,12 +215,12 @@ def format_event(
             msg = error.get("message", "API error")
         else:
             msg = str(error) if error else "API error"
-        return f"[bold red]{'FAIL':<8}[/]", f"{_ag}{oneline(msg, 80)}"
+        return f"[bold red]{'FAIL':<8}[/]", f"{_ag}{escape(oneline(msg, 80))}"
 
     elif event_name == "PermissionDenied":
         tool = data.get("tool_name", "?")
         reason = data.get("reason", "")
-        detail = f"{tool}  [dim]{reason}[/]" if reason else tool
+        detail = f"{escape(tool)}  [dim]{escape(reason)}[/]" if reason else escape(tool)
         return f"[bold red]{'DENIED':<8}[/]", f"{_ag}{detail}"
 
     elif event_name == "PostCompact":
@@ -232,11 +234,11 @@ def format_event(
             or data.get("description")
             or "?"
         )
-        return f"[bold blue]{'TASK+':<8}[/]", f"{_ag}{oneline(subject, 80)}"
+        return f"[bold blue]{'TASK+':<8}[/]", f"{_ag}{escape(oneline(subject, 80))}"
 
     elif event_name == "CwdChanged":
         cwd = data.get("cwd") or data.get("new_cwd") or "?"
-        return f"[dim]{'CWD':<8}[/]", f"{_ag}{cwd}"
+        return f"[dim]{'CWD':<8}[/]", f"{_ag}{escape(cwd)}"
 
     elif event_name == "PostToolUseFailure":
         tool = data.get("tool_name", "?")
@@ -245,6 +247,6 @@ def format_event(
             msg = error.get("message", "unknown error")
         else:
             msg = str(error) if error else "unknown error"
-        return f"[bold red]{'TOOLFAIL':<8}[/]", f"{tool}  -> {oneline(msg, 80)}"
+        return f"[bold red]{'TOOLFAIL':<8}[/]", f"{escape(tool)}  -> {escape(oneline(msg, 80))}"
 
     return None, None
