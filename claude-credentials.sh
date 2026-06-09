@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manage the Claude Code OAuth token in the macOS Keychain.
 #
-# Usage: ./claude-credentials.sh [--simple | --refresh | --oauth-only]
+# Usage: ./claude-credentials.sh [--raw | --simple | --refresh | --oauth-only]
 #        ./claude-credentials.sh --import <file|->
 #        ./claude-credentials.sh [--oauth-only] --send <host> [--send-port <port>]
 
@@ -11,6 +11,7 @@ SERVICE="Claude Code-credentials"
 TOKEN_URL="https://platform.claude.com/v1/oauth/token"
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+RAW_OUT=false
 SIMPLE_OUT=false
 DO_REFRESH=false
 OAUTH_ONLY=false
@@ -22,13 +23,15 @@ RECEIVE_PORT="47299"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--simple | --refresh | --oauth-only]
+Usage: $(basename "$0") [--raw | --simple | --refresh | --oauth-only]
        $(basename "$0") --import <file|->
        $(basename "$0") [--oauth-only] --send <host> [--send-port <port>]
        $(basename "$0") --receive [--port <port>]
 
 Modes:
-  (default)    Print raw keychain bytes for '$SERVICE' (no decoding).
+  (no args)    Print this help (does not dump credentials by default).
+
+  --raw        Print raw keychain bytes for '$SERVICE' (no decoding).
 
   --simple     Print the three OAuth fields in human-readable form:
                  access_token:  <value>
@@ -52,22 +55,20 @@ Modes:
                     been run here at least once) so the account name can
                     be discovered.
 
-  --send <host>     Read keychain bytes (same as default mode) and send them
-                    as a single UDP datagram to <host> on the configured
-                    port. With --oauth-only, send only the claudeAiOauth
-                    section as JSON. Default port: 47299. Override with
-                    --send-port.
-                    Sender is fire-and-forget — the receiver does not need
-                    to be running first (UDP is connectionless). Exit 0
-                    even if no receiver is listening.
+  --send <host>     Read keychain bytes (same as --raw) and send them over a
+                    TCP connection to <host> on the configured port. With
+                    --oauth-only, send only the claudeAiOauth section as JSON.
+                    Default port: 47299. Override with --send-port.
+                    The receiver must be running --receive first; if nothing
+                    is listening, --send fails with a connection error.
 
-  --receive         Bind a UDP socket on the configured port (default 47299,
-                    override with --port), wait for ONE datagram, write the
-                    received bytes to the keychain (replacing the existing
-                    entry, same write path as --import), then exit.
+  --receive         Listen for ONE TCP connection on the configured port
+                    (default 47299, override with --port), read the bytes,
+                    write them to the keychain (replacing the existing entry,
+                    same write path as --import), then exit.
                     Receiver is one-shot — it is NOT a daemon.
                     Note: macOS may prompt for firewall access the first
-                    time you --receive, since python3 is binding a non-
+                    time you --receive, since python3 is listening on a non-
                     standard port.
 
   --send-port <port>  Override the destination port for --send (default 47299).
@@ -75,19 +76,17 @@ Modes:
 
 Default port 47299 is "claude credentials" (4+7+2+9+9). It is in the
 IANA dynamic/private range (49152-65535) so collisions with common
-services are unlikely. Note that keychain bytes can be larger than the
-theoretical 65507-byte UDP limit only if the credential blob is unusually
-large; in practice the OAuth blob is well under 4 KB. macOS default
-socket buffer is 9216 bytes — a brief comment near the send/receive
-points will call this out.
+services are unlikely. Transport is plain TCP — reliable and with no
+datagram size limit, so the full keychain blob transfers fine.
 
---simple, --refresh, --import, --send, and --receive are mutually exclusive.
+--raw, --simple, --refresh, --import, --send, and --receive are mutually exclusive.
 --oauth-only can be used alone or with --send.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --raw)        RAW_OUT=true ;;
     --simple)     SIMPLE_OUT=true ;;
     --oauth-only) OAUTH_ONLY=true ;;
     --refresh)    DO_REFRESH=true ;;
@@ -119,17 +118,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 primary_modes=0
+$RAW_OUT              && primary_modes=$((primary_modes + 1))
 $SIMPLE_OUT           && primary_modes=$((primary_modes + 1))
 $DO_REFRESH           && primary_modes=$((primary_modes + 1))
 [[ -n "$IMPORT_PATH" ]] && primary_modes=$((primary_modes + 1))
 [[ -n "$SEND_HOST" ]]   && primary_modes=$((primary_modes + 1))
 $RECEIVE_MODE           && primary_modes=$((primary_modes + 1))
 if (( primary_modes > 1 )); then
-  echo "Error: --simple, --refresh, --import, --send, and --receive are mutually exclusive" >&2
+  echo "Error: --raw, --simple, --refresh, --import, --send, and --receive are mutually exclusive" >&2
   exit 1
 fi
 
-if $OAUTH_ONLY && { $SIMPLE_OUT || $DO_REFRESH || [[ -n "$IMPORT_PATH" ]] || $RECEIVE_MODE; }; then
+if $OAUTH_ONLY && { $RAW_OUT || $SIMPLE_OUT || $DO_REFRESH || [[ -n "$IMPORT_PATH" ]] || $RECEIVE_MODE; }; then
   echo "Error: --oauth-only can only be used by itself or with --send" >&2
   exit 1
 fi
@@ -186,11 +186,10 @@ if [[ -n "$IMPORT_PATH" ]]; then
   exit 0
 fi
 
-# --send: read keychain bytes and send as a single UDP datagram.
-# UDP is connectionless — we just fire and forget. Exit 0 regardless of
-# whether a receiver is listening. The credential blob is typically < 4 KB,
-# well under the macOS 9216-byte default socket buffer and the 65507-byte
-# UDP theoretical max.
+# --send: read keychain bytes and send them over a TCP connection.
+# TCP confirms delivery — connect() fails if no receiver is listening — and has
+# no datagram size cap, so the full blob transfers reliably. The receiver must
+# be running --receive first.
 if [[ -n "$SEND_HOST" ]]; then
   keychain_bytes=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
     echo "Error: No credentials found in Keychain" >&2; exit 1
@@ -209,33 +208,48 @@ import socket, sys
 data = sys.stdin.buffer.read()
 host = sys.argv[1]
 port = int(sys.argv[2])
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.sendto(data, (host, port))
-sock.close()
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(10)
+try:
+    sock.connect((host, port))
+    sock.sendall(data)
+except OSError as e:
+    sys.exit(f"Error: could not connect to {host}:{port} — {e}")
+finally:
+    sock.close()
 ' "$SEND_HOST" "$SEND_PORT"
 
-  echo "Sent $byte_count bytes to $SEND_HOST:$SEND_PORT via UDP$mode_note" >&2
+  echo "Sent $byte_count bytes to $SEND_HOST:$SEND_PORT via TCP$mode_note" >&2
   exit 0
 fi
 
-# --receive: bind a UDP socket, accept one datagram, write to keychain.
-# One-shot: read a single datagram, write it, exit. Not a daemon.
-# Note: macOS will prompt for firewall access the first time python3 binds
-# a non-standard port. Default port 47299 is in the IANA dynamic range.
+# --receive: listen for one TCP connection, read it fully, write to keychain.
+# One-shot: accept a single connection, write it, exit. Not a daemon.
+# Note: macOS will prompt for firewall access the first time python3 listens
+# on a non-standard port. Default port 47299 is in the IANA dynamic range.
 if $RECEIVE_MODE; then
-  echo "Listening for one UDP datagram on port $RECEIVE_PORT..." >&2
+  echo "Listening for one TCP connection on port $RECEIVE_PORT..." >&2
   echo "Note: macOS may prompt for firewall access the first time you --receive" >&2
 
   received=$(python3 -c '
 import socket, sys
 port = int(sys.argv[1])
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("0.0.0.0", port))
-data, addr = sock.recvfrom(65535)
-sock.close()
-sys.stdout.buffer.write(data)
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("0.0.0.0", port))
+srv.listen(1)
+conn, addr = srv.accept()
+chunks = []
+while True:
+    block = conn.recv(65535)
+    if not block:
+        break
+    chunks.append(block)
+conn.close()
+srv.close()
+sys.stdout.buffer.write(b"".join(chunks))
 ' "$RECEIVE_PORT") || {
-    echo "Error: Failed to bind UDP socket on port $RECEIVE_PORT" >&2; exit 1
+    echo "Error: Failed to listen on TCP port $RECEIVE_PORT" >&2; exit 1
   }
 
   if [[ -z "$received" ]]; then
@@ -268,10 +282,16 @@ if $OAUTH_ONLY; then
   exit 0
 fi
 
-# Default: pass-through of `security -w` bytes, exactly as Claude Code wrote them.
-if ! $SIMPLE_OUT && ! $DO_REFRESH; then
+# --raw: pass-through of `security -w` bytes, exactly as Claude Code wrote them.
+if $RAW_OUT; then
   security find-generic-password -s "$SERVICE" -w
   exit $?
+fi
+
+# No mode selected (e.g. no arguments) → show help instead of dumping the blob.
+if ! $SIMPLE_OUT && ! $DO_REFRESH; then
+  usage
+  exit 0
 fi
 
 # --simple and --refresh both need the keychain bytes parsed as JSON.
