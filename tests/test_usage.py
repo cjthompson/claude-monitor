@@ -702,7 +702,7 @@ class TestUsageManager:
             }
         ).encode()
 
-        monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
+        monkeypatch.setattr("claude_monitor.credentials.urlopen", lambda req, **kw: mock_resp)
         monkeypatch.setattr("claude_monitor.usage._read_keychain", lambda: None)
 
         called = []
@@ -730,7 +730,7 @@ class TestUsageManager:
             }
         ).encode()
 
-        monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
+        monkeypatch.setattr("claude_monitor.credentials.urlopen", lambda req, **kw: mock_resp)
 
         keychain_data = {"claudeAiOauth": {"accessToken": "old", "refreshToken": "old_ref"}}
         monkeypatch.setattr("claude_monitor.usage._read_keychain", lambda: keychain_data)
@@ -753,7 +753,7 @@ class TestUsageManager:
         mock_resp.status = 200
         mock_resp.read.return_value = json.dumps({}).encode()
 
-        monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
+        monkeypatch.setattr("claude_monitor.credentials.urlopen", lambda req, **kw: mock_resp)
         assert mgr._refresh_access_token("ref") is None
 
     def test_refresh_access_token_network_error(self, monkeypatch):
@@ -761,7 +761,7 @@ class TestUsageManager:
         from urllib.error import URLError
 
         monkeypatch.setattr(
-            "claude_monitor.usage.urlopen",
+            "claude_monitor.credentials.urlopen",
             lambda req, **kw: (_ for _ in ()).throw(URLError("fail")),
         )
         assert mgr._refresh_access_token("ref") is None
@@ -781,7 +781,7 @@ class TestUsageManager:
             }
         ).encode()
 
-        monkeypatch.setattr("claude_monitor.usage.urlopen", lambda req, **kw: mock_resp)
+        monkeypatch.setattr("claude_monitor.credentials.urlopen", lambda req, **kw: mock_resp)
         monkeypatch.setattr("claude_monitor.usage._read_keychain", lambda: None)
 
         # Should not raise despite callback error

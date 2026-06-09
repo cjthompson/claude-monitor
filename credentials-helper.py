@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Manage the Claude Code OAuth credentials in the macOS Keychain.
+
+A pure-Python sibling of ``claude-credentials.sh`` — same CLI surface, no
+bash/jq/xxd/curl. All keychain and OAuth work is delegated to the shared
+``claude_monitor.credentials`` module (which shells out to the ``security``
+binary, matching the rest of the project).
+
+Modes (mutually exclusive, except --oauth-only which may accompany --send):
+  (default)        Print the raw keychain blob, exactly as stored.
+  --simple         Print access_token / refresh_token / expires_at / expires.
+  --oauth-only     Print only the claudeAiOauth section as compact JSON.
+  --refresh        Refresh the access token, write it back, print --simple form.
+  --import <file|-> Write raw keychain bytes (file or stdin) verbatim.
+  --send <host>    Send the keychain blob to <host> as one UDP datagram.
+                   With --oauth-only, send only the claudeAiOauth section.
+  --receive        Receive one UDP datagram and write it to the keychain.
+"""
+
+import argparse
+import json
+import socket
+import sys
+import time
+from datetime import datetime
+
+from claude_monitor import credentials as creds
+
+DEFAULT_PORT = 47299
+
+
+def _err(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="credentials-helper.py",
+        description="Manage Claude Code OAuth credentials in the macOS Keychain.",
+    )
+    p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
+    p.add_argument("--refresh", action="store_true", help="refresh the access token")
+    p.add_argument(
+        "--oauth-only",
+        dest="oauth_only",
+        action="store_true",
+        help="only the claudeAiOauth section (alone, or as a --send modifier)",
+    )
+    p.add_argument("--import", dest="import_path", metavar="<file|->", help="write bytes verbatim")
+    p.add_argument("--send", dest="send_host", metavar="<host>", help="UDP-send the blob")
+    p.add_argument("--send-port", dest="send_port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--receive", action="store_true", help="receive one UDP datagram, write it")
+    p.add_argument("--port", dest="receive_port", type=int, default=DEFAULT_PORT)
+    return p
+
+
+def _validate(args: argparse.Namespace) -> str | None:
+    """Return an error message if the flag combination is invalid, else None."""
+    primary = sum(
+        [args.simple, args.refresh, bool(args.import_path), bool(args.send_host), args.receive]
+    )
+    if primary > 1:
+        return "Error: --simple, --refresh, --import, --send, and --receive are mutually exclusive"
+    if args.oauth_only and (
+        args.simple or args.refresh or args.import_path or args.receive
+    ):
+        return "Error: --oauth-only can only be used by itself or with --send"
+    return None
+
+
+def _print_simple(tokens: tuple[str, str, float]) -> None:
+    access, refresh, expires_epoch = tokens
+    expires_local = datetime.fromtimestamp(expires_epoch).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+    print(f"access_token:  {access}")
+    print(f"refresh_token: {refresh}")
+    print(f"expires_at:    {int(expires_epoch * 1000)}")
+    print(f"expires:       {expires_local}")
+
+
+def _do_import(import_path: str) -> int:
+    content = sys.stdin.read() if import_path == "-" else open(import_path, encoding="utf-8").read()
+    content = content.strip()
+    if not content:
+        _err("Error: Import input is empty")
+        return 1
+    creds.write(content)
+    _err(f"Imported {len(content.encode())} bytes to keychain service '{creds.KEYCHAIN_SERVICE}'")
+    return 0
+
+
+def _do_send(host: str, port: int, oauth_only: bool) -> int:
+    payload = (creds.oauth_only_json() if oauth_only else creds.read_raw()).encode()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(payload, (host, port))
+    finally:
+        sock.close()
+    note = " (oauth-only)" if oauth_only else ""
+    _err(f"Sent {len(payload)} bytes to {host}:{port} via UDP{note}")
+    return 0
+
+
+def _do_receive(port: int) -> int:
+    _err(f"Listening for one UDP datagram on port {port}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+        data, _addr = sock.recvfrom(65535)
+    finally:
+        sock.close()
+    content = data.decode("utf-8", errors="replace").strip()
+    if not content:
+        _err("Error: Received empty datagram")
+        return 1
+    creds.write(content)
+    _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")
+    return 0
+
+
+def _do_refresh(tokens: tuple[str, str, float]) -> int:
+    _, refresh_token, _ = tokens
+    if not refresh_token:
+        _err("Error: No refresh token available")
+        return 1
+    refreshed = creds.refresh_tokens(refresh_token)
+    if not refreshed:
+        _err("Error: token refresh failed")
+        return 1
+    new_access, new_refresh, expires_in = refreshed
+    new_expires_epoch = time.time() + expires_in
+
+    data = creds.read_json()
+    oauth = data.get("claudeAiOauth", {})
+    oauth["accessToken"] = new_access
+    oauth["refreshToken"] = new_refresh
+    oauth["expiresAt"] = int(new_expires_epoch * 1000)
+    data["claudeAiOauth"] = oauth
+    creds.write(json.dumps(data))
+    _err("Token refreshed successfully")
+
+    _print_simple((new_access, new_refresh, new_expires_epoch))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    error = _validate(args)
+    if error:
+        _err(error)
+        return 1
+
+    try:
+        if args.import_path:
+            return _do_import(args.import_path)
+        if args.send_host:
+            return _do_send(args.send_host, args.send_port, args.oauth_only)
+        if args.receive:
+            return _do_receive(args.receive_port)
+        if args.oauth_only:
+            print(creds.oauth_only_json())
+            return 0
+        if args.simple or args.refresh:
+            tokens = creds.extract_oauth_tokens()
+            if not tokens:
+                _err("Error: No OAuth token found in credentials")
+                return 1
+            if args.refresh:
+                return _do_refresh(tokens)
+            _print_simple(tokens)
+            return 0
+        # default: raw passthrough
+        print(creds.read_raw())
+        return 0
+    except (creds.CredentialsError, OSError) as e:
+        _err(f"Error: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
