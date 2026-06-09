@@ -21,6 +21,7 @@ With no arguments, prints help (it does not dump credentials by default).
 
 import argparse
 import json
+import os
 import socket
 import sys
 import time
@@ -30,6 +31,20 @@ from claude_monitor import credentials as creds
 
 DEFAULT_PORT = 47299
 SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+# Bound a hostile or buggy peer on --receive: drop a connection that goes idle,
+# and refuse a stream larger than any real credential blob (~11 KB) so a peer
+# cannot stream until memory exhaustion. Overridable via env for tuning/tests.
+RECV_TIMEOUT = _int_env("CLAUDE_CREDENTIALS_RECV_TIMEOUT", 30)
+MAX_PAYLOAD = _int_env("CLAUDE_CREDENTIALS_MAX_PAYLOAD", 1024 * 1024)
 
 
 def _err(msg: str) -> None:
@@ -75,7 +90,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def _validate(args: argparse.Namespace) -> str | None:
     """Return an error message if the flag combination is invalid, else None."""
     primary = sum(
-        [args.raw, args.simple, args.refresh, bool(args.import_path), bool(args.send_host), args.receive]
+        [
+            args.raw,
+            args.simple,
+            args.refresh,
+            bool(args.import_path),
+            bool(args.send_host),
+            args.receive,
+        ]
     )
     if primary > 1:
         return (
@@ -133,12 +155,22 @@ def _do_receive(port: int) -> int:
         srv.bind(("0.0.0.0", port))
         srv.listen(1)
         conn, _addr = srv.accept()
+        conn.settimeout(RECV_TIMEOUT)
         try:
             chunks = []
+            total = 0
             while True:
-                block = conn.recv(65535)
+                try:
+                    block = conn.recv(65535)
+                except socket.timeout:
+                    _err(f"Error: connection idle for {RECV_TIMEOUT}s; aborting")
+                    return 1
                 if not block:
                     break
+                total += len(block)
+                if total > MAX_PAYLOAD:
+                    _err(f"Error: payload exceeds {MAX_PAYLOAD} bytes; aborting")
+                    return 1
                 chunks.append(block)
         finally:
             conn.close()

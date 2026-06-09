@@ -232,28 +232,45 @@ if $RECEIVE_MODE; then
   echo "Note: macOS may prompt for firewall access the first time you --receive" >&2
 
   received=$(python3 -c '
-import socket, sys
+import os, socket, sys
+def _int_env(name, default):
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+# Bound a hostile/buggy peer: drop an idle connection and refuse a stream larger
+# than any real credential blob (~11 KB) so it cannot exhaust memory.
+RECV_TIMEOUT = _int_env("CLAUDE_CREDENTIALS_RECV_TIMEOUT", 30)
+MAX_PAYLOAD = _int_env("CLAUDE_CREDENTIALS_MAX_PAYLOAD", 1024 * 1024)
 port = int(sys.argv[1])
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("0.0.0.0", port))
 srv.listen(1)
 conn, addr = srv.accept()
+conn.settimeout(RECV_TIMEOUT)
 chunks = []
+total = 0
 while True:
-    block = conn.recv(65535)
+    try:
+        block = conn.recv(65535)
+    except socket.timeout:
+        sys.exit("Error: connection idle for %ds; aborting" % RECV_TIMEOUT)
     if not block:
         break
+    total += len(block)
+    if total > MAX_PAYLOAD:
+        sys.exit("Error: payload exceeds %d bytes; aborting" % MAX_PAYLOAD)
     chunks.append(block)
 conn.close()
 srv.close()
 sys.stdout.buffer.write(b"".join(chunks))
 ' "$RECEIVE_PORT") || {
-    echo "Error: Failed to listen on TCP port $RECEIVE_PORT" >&2; exit 1
+    echo "Error: receive failed on TCP port $RECEIVE_PORT" >&2; exit 1
   }
 
   if [[ -z "$received" ]]; then
-    echo "Error: Received empty datagram" >&2; exit 1
+    echo "Error: Received empty connection" >&2; exit 1
   fi
 
   # Reuse the --import write path: discover account, trim, write.

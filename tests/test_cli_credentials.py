@@ -209,6 +209,76 @@ def test_import_stdin_writes_verbatim(cli_env):
     assert capture.read_text() == payload  # surrounding whitespace trimmed
 
 
+def _free_port():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def _start_receiver(env, port):
+    return subprocess.Popen(
+        [sys.executable, "-m", MODULE, "--receive", "--port", str(port)],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _connect_with_retry(port):
+    for _ in range(50):
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=1)
+        except OSError:
+            time.sleep(0.1)
+    return None
+
+
+def test_receive_rejects_oversized_payload(cli_env):
+    env, capture = cli_env
+    env = {**env, "CLAUDE_CREDENTIALS_MAX_PAYLOAD": "100"}
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        try:
+            client.sendall(b"x" * 5000)  # well over the 100-byte cap
+        except OSError:
+            pass  # the receiver may close mid-stream once the cap trips
+        finally:
+            client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode != 0
+    assert "exceeds" in proc.stderr.read().lower()
+    assert not capture.exists()  # nothing written to the keychain
+
+
+def test_receive_times_out_on_idle_peer(cli_env):
+    env, capture = cli_env
+    env = {**env, "CLAUDE_CREDENTIALS_RECV_TIMEOUT": "1"}
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        # Connect but never send — the idle-read timeout must abort the receiver.
+        proc.wait(timeout=5)
+        client.close()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode != 0
+    assert "idle" in proc.stderr.read().lower()
+    assert not capture.exists()
+
+
 def test_receive_writes_connection_to_keychain(cli_env):
     env, capture = cli_env
     # Pick a free port, then let the receiver bind+listen on it.
