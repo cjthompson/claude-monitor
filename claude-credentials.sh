@@ -13,10 +13,16 @@ SIMPLE_OUT=false
 DO_REFRESH=false
 OAUTH_ONLY=false
 IMPORT_PATH=""
+SEND_HOST=""
+SEND_PORT="47299"
+RECEIVE_MODE=false
+RECEIVE_PORT="47299"
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--simple] [--refresh] [--oauth-only] --import <file|->
+       $(basename "$0") --send <host> [--send-port <port>]
+       $(basename "$0") --receive [--port <port>]
 
 Modes:
   (default)    Print raw keychain bytes for '$SERVICE' (no decoding).
@@ -43,7 +49,34 @@ Modes:
                     been run here at least once) so the account name can
                     be discovered.
 
---simple, --oauth-only, --refresh, and --import are mutually exclusive.
+  --send <host>     Read keychain bytes (same as default mode) and send them
+                    as a single UDP datagram to <host> on the configured
+                    port. Default port: 47299. Override with --send-port.
+                    Sender is fire-and-forget — the receiver does not need
+                    to be running first (UDP is connectionless). Exit 0
+                    even if no receiver is listening.
+
+  --receive         Bind a UDP socket on the configured port (default 47299,
+                    override with --port), wait for ONE datagram, write the
+                    received bytes to the keychain (replacing the existing
+                    entry, same write path as --import), then exit.
+                    Receiver is one-shot — it is NOT a daemon.
+                    Note: macOS may prompt for firewall access the first
+                    time you --receive, since python3 is binding a non-
+                    standard port.
+
+  --send-port <port>  Override the destination port for --send (default 47299).
+  --port <port>       Override the listening port for --receive (default 47299).
+
+Default port 47299 is "claude credentials" (4+7+2+9+9). It is in the
+IANA dynamic/private range (49152-65535) so collisions with common
+services are unlikely. Note that keychain bytes can be larger than the
+theoretical 65507-byte UDP limit only if the credential blob is unusually
+large; in practice the OAuth blob is well under 4 KB. macOS default
+socket buffer is 9216 bytes — a brief comment near the send/receive
+points will call this out.
+
+--simple, --oauth-only, --refresh, --import, --send, and --receive are mutually exclusive.
 EOF
 }
 
@@ -57,6 +90,22 @@ while [[ $# -gt 0 ]]; do
       IMPORT_PATH="$2"
       shift
       ;;
+    --send)
+      [[ $# -ge 2 ]] || { echo "Error: --send requires a <host> argument" >&2; exit 1; }
+      SEND_HOST="$2"
+      shift
+      ;;
+    --send-port)
+      [[ $# -ge 2 ]] || { echo "Error: --send-port requires a <port> argument" >&2; exit 1; }
+      SEND_PORT="$2"
+      shift
+      ;;
+    --receive)    RECEIVE_MODE=true ;;
+    --port)
+      [[ $# -ge 2 ]] || { echo "Error: --port requires a <port> argument" >&2; exit 1; }
+      RECEIVE_PORT="$2"
+      shift
+      ;;
     -h|--help)  usage; exit 0 ;;
     *)          echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -64,12 +113,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 modes=0
-$SIMPLE_OUT  && modes=$((modes + 1))
-$OAUTH_ONLY  && modes=$((modes + 1))
-$DO_REFRESH  && modes=$((modes + 1))
+$SIMPLE_OUT   && modes=$((modes + 1))
+$OAUTH_ONLY   && modes=$((modes + 1))
+$DO_REFRESH   && modes=$((modes + 1))
 [[ -n "$IMPORT_PATH" ]] && modes=$((modes + 1))
+[[ -n "$SEND_HOST" ]]   && modes=$((modes + 1))
+$RECEIVE_MODE           && modes=$((modes + 1))
 if (( modes > 1 )); then
-  echo "Error: --simple, --oauth-only, --refresh, and --import are mutually exclusive" >&2
+  echo "Error: --simple, --oauth-only, --refresh, --import, --send, and --receive are mutually exclusive" >&2
   exit 1
 fi
 
@@ -108,6 +159,72 @@ if [[ -n "$IMPORT_PATH" ]]; then
 
   bytes=$(printf '%s' "$content" | wc -c | tr -d ' ')
   echo "Imported $bytes bytes to keychain service '$SERVICE' (account: $account)" >&2
+  exit 0
+fi
+
+# --send: read keychain bytes and send as a single UDP datagram.
+# UDP is connectionless — we just fire and forget. Exit 0 regardless of
+# whether a receiver is listening. The credential blob is typically < 4 KB,
+# well under the macOS 9216-byte default socket buffer and the 65507-byte
+# UDP theoretical max.
+if [[ -n "$SEND_HOST" ]]; then
+  keychain_bytes=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
+    echo "Error: No credentials found in Keychain" >&2; exit 1
+  }
+  byte_count=$(printf '%s' "$keychain_bytes" | wc -c | tr -d ' ')
+
+  printf '%s' "$keychain_bytes" | python3 -c '
+import socket, sys
+data = sys.stdin.buffer.read()
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.sendto(data, (host, port))
+sock.close()
+' "$SEND_HOST" "$SEND_PORT"
+
+  echo "Sent $byte_count bytes to $SEND_HOST:$SEND_PORT via UDP" >&2
+  exit 0
+fi
+
+# --receive: bind a UDP socket, accept one datagram, write to keychain.
+# One-shot: read a single datagram, write it, exit. Not a daemon.
+# Note: macOS will prompt for firewall access the first time python3 binds
+# a non-standard port. Default port 47299 is in the IANA dynamic range.
+if $RECEIVE_MODE; then
+  echo "Listening for one UDP datagram on port $RECEIVE_PORT..." >&2
+  echo "Note: macOS may prompt for firewall access the first time you --receive" >&2
+
+  received=$(python3 -c '
+import socket, sys
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", port))
+data, addr = sock.recvfrom(65535)
+sock.close()
+sys.stdout.buffer.write(data)
+' "$RECEIVE_PORT") || {
+    echo "Error: Failed to bind UDP socket on port $RECEIVE_PORT" >&2; exit 1
+  }
+
+  if [[ -z "$received" ]]; then
+    echo "Error: Received empty datagram" >&2; exit 1
+  fi
+
+  # Reuse the --import write path: discover account, trim, write.
+  account=$(security find-generic-password -s "$SERVICE" 2>/dev/null \
+    | grep '"acct"' | sed 's/.*<blob>="\{0,1\}//' | sed 's/"\{0,1\}$//')
+
+  if [[ -z "$account" ]]; then
+    echo "Error: No existing keychain entry for service '$SERVICE'. Run 'claude login' first." >&2
+    exit 1
+  fi
+
+  content="$(printf '%s' "$received" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  security add-generic-password -U -a "$account" -s "$SERVICE" -w "$content"
+
+  bytes=$(printf '%s' "$content" | wc -c | tr -d ' ')
+  echo "Received and imported $bytes bytes to keychain service '$SERVICE' (account: $account)" >&2
   exit 0
 fi
 
