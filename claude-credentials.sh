@@ -74,10 +74,15 @@ Modes:
   --send-port <port>  Override the destination port for --send (default 47299).
   --port <port>       Override the listening port for --receive (default 47299).
 
-Default port 47299 is "claude credentials" (4+7+2+9+9). It is in the
-IANA dynamic/private range (49152-65535) so collisions with common
-services are unlikely. Transport is plain TCP — reliable and with no
-datagram size limit, so the full keychain blob transfers fine.
+Default port 47299 is "claude credentials" (4+7+2+9+9). It sits in the
+IANA registered-port range (1024-49151) but is not assigned to a common
+service, so collisions are unlikely. Transport is plain TCP — reliable
+and with no datagram size limit, so the full keychain blob transfers fine.
+
+SECURITY: --send/--receive transmit your OAuth tokens in PLAINTEXT and the
+receiver writes the FIRST connection it accepts — no encryption, no auth. Use
+only on a network you trust, or tunnel over SSH:
+    ssh -L 47299:localhost:47299 <receiving-host>   # then --send 127.0.0.1
 
 --raw, --simple, --refresh, --import, --send, and --receive are mutually exclusive.
 --oauth-only can be used alone or with --send.
@@ -226,7 +231,7 @@ fi
 # --receive: listen for one TCP connection, read it fully, write to keychain.
 # One-shot: accept a single connection, write it, exit. Not a daemon.
 # Note: macOS will prompt for firewall access the first time python3 listens
-# on a non-standard port. Default port 47299 is in the IANA dynamic range.
+# on a non-standard port. Default port 47299 is an unassigned registered port.
 if $RECEIVE_MODE; then
   echo "Listening for one TCP connection on port $RECEIVE_PORT..." >&2
   echo "Note: macOS may prompt for firewall access the first time you --receive" >&2

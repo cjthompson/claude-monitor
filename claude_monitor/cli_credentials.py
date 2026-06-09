@@ -55,6 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="claude-monitor-credentials",
         description="Manage Claude Code OAuth credentials in the macOS Keychain.",
+        epilog=(
+            "SECURITY: --send/--receive transmit your OAuth tokens in PLAINTEXT and "
+            "the receiver writes the first connection it accepts — no encryption, no "
+            "auth. Use only on a trusted network, or tunnel over SSH "
+            "(ssh -L 47299:localhost:47299 <host>, then --send 127.0.0.1)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--raw", action="store_true", help="print the raw keychain blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
