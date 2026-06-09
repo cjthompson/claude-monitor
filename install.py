@@ -15,6 +15,7 @@ IS_MACOS = sys.platform == "darwin"
 VENV_DIR = REPO_DIR / ".venv"
 LOCAL_BIN = Path.home() / ".local" / "bin"
 SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+CODEX_HOOKS_FILE = Path.home() / ".codex" / "hooks.json"
 
 HOOK_COMMAND = str(VENV_DIR / "bin" / "claude-monitor-hook")
 STATUSLINE_COMMAND = str(VENV_DIR / "bin" / "claude-monitor-statusline")
@@ -47,6 +48,21 @@ HOOKS_CONFIG = {
     "PermissionDenied": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     "CwdChanged": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     "PostToolUseFailure": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+}
+
+CODEX_HOOKS_CONFIG = {
+    "PermissionRequest": [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": HOOK_COMMAND,
+                    "timeout": 300,
+                    "statusMessage": "Checking claude-monitor approval state",
+                }
+            ]
+        }
+    ]
 }
 
 
@@ -151,6 +167,44 @@ def _find_monitor_hooks(groups):
     return results
 
 
+def _merge_monitor_hooks(settings: dict, desired_config: dict) -> tuple[list, list, list]:
+    """Return hook merge actions for a settings-like object with a top-level hooks key."""
+    if "hooks" not in settings:
+        settings["hooks"] = {}
+
+    to_skip = []
+    to_add = []
+    to_replace = []
+
+    for event_type, desired_groups in desired_config.items():
+        existing_groups = settings["hooks"].get(event_type)
+
+        if existing_groups is None:
+            # Event type absent entirely — create it
+            to_add.append((event_type, desired_groups, None))
+            continue
+
+        # Already configured exactly as desired?
+        exact = any(
+            h.get("command") == HOOK_COMMAND
+            for group in existing_groups
+            for h in group.get("hooks", [])
+        )
+        if exact:
+            to_skip.append(event_type)
+            continue
+
+        # Claude-monitor hook present but with a different path?
+        stale = _find_monitor_hooks(existing_groups)
+        if stale:
+            to_replace.append((event_type, existing_groups, stale, desired_groups))
+        else:
+            # Unrelated hooks exist — append ours without touching theirs
+            to_add.append((event_type, desired_groups, existing_groups))
+
+    return to_skip, to_add, to_replace
+
+
 def configure_hooks():
     print()
     print(f"Claude Code settings file: {SETTINGS_FILE}")
@@ -179,39 +233,8 @@ def configure_hooks():
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         settings = {}
 
-    if "hooks" not in settings:
-        settings["hooks"] = {}
-
     # Analyse what needs to happen for each event type (two-pass to ask once)
-    to_skip = []  # already configured correctly
-    to_add = []  # (event_type, desired_groups, existing_groups_or_None)
-    to_replace = []  # (event_type, existing_groups, stale_list, desired_groups)
-
-    for event_type, desired_groups in HOOKS_CONFIG.items():
-        existing_groups = settings["hooks"].get(event_type)
-
-        if existing_groups is None:
-            # Event type absent entirely — create it
-            to_add.append((event_type, desired_groups, None))
-            continue
-
-        # Already configured exactly as desired?
-        exact = any(
-            h.get("command") == HOOK_COMMAND
-            for group in existing_groups
-            for h in group.get("hooks", [])
-        )
-        if exact:
-            to_skip.append(event_type)
-            continue
-
-        # Claude-monitor hook present but with a different path?
-        stale = _find_monitor_hooks(existing_groups)
-        if stale:
-            to_replace.append((event_type, existing_groups, stale, desired_groups))
-        else:
-            # Unrelated hooks exist — append ours without touching theirs
-            to_add.append((event_type, desired_groups, existing_groups))
+    to_skip, to_add, to_replace = _merge_monitor_hooks(settings, HOOKS_CONFIG)
 
     # Ask once if any replacements are needed
     overwrite = False
@@ -272,6 +295,85 @@ def configure_hooks():
         f.write("\n")
 
     print(f"\nHooks written to {SETTINGS_FILE}")
+
+
+def configure_codex_hooks():
+    print()
+    print(f"Codex hooks file: {CODEX_HOOKS_FILE}")
+    print()
+    print("This will configure the following Codex hook:")
+    print("  - PermissionRequest  (auto-accept permissions when claude-monitor is running)")
+    print()
+    print(f"Hook command: {HOOK_COMMAND}")
+    print()
+
+    answer = input("Configure Codex hooks in ~/.codex/hooks.json? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("Skipped. You can add Codex hooks manually later.")
+        return
+
+    if CODEX_HOOKS_FILE.exists():
+        with open(CODEX_HOOKS_FILE) as f:
+            settings = json.load(f)
+    else:
+        CODEX_HOOKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        settings = {}
+
+    to_skip, to_add, to_replace = _merge_monitor_hooks(settings, CODEX_HOOKS_CONFIG)
+
+    overwrite = False
+    if to_replace:
+        print()
+        print("Found existing claude-monitor Codex hooks with a different path:")
+        for event_type, _, stale, _ in to_replace:
+            for _, _, h in stale:
+                print(f"  {event_type}: {h['command']}")
+        print(f"New path would be: {HOOK_COMMAND}")
+        ans = input("Replace with new path? [y/N] ").strip().lower()
+        overwrite = ans in ("y", "yes")
+
+    for event_type in to_skip:
+        print(f"  {event_type}: already configured correctly, skipping")
+
+    for event_type, desired_groups, existing_groups in to_add:
+        if existing_groups is None:
+            settings["hooks"][event_type] = list(desired_groups)
+        else:
+            for desired_group in desired_groups:
+                desired_matcher = desired_group.get("matcher")
+                merge_target = next(
+                    (g for g in existing_groups if g.get("matcher") == desired_matcher),
+                    None,
+                )
+                if merge_target is not None:
+                    merge_target.setdefault("hooks", []).extend(desired_group.get("hooks", []))
+                else:
+                    existing_groups.append(desired_group)
+        print(f"  {event_type}: added")
+
+    for event_type, existing_groups, stale, desired_groups in to_replace:
+        if overwrite:
+            replacement_hook = desired_groups[0]["hooks"][0]
+            for gi, hi, _ in stale:
+                existing_groups[gi]["hooks"][hi] = replacement_hook
+            settings["hooks"][event_type] = existing_groups
+            print(f"  {event_type}: updated hook path")
+        else:
+            print(f"  {event_type}: skipped (keeping existing path)")
+
+    changed = bool(to_add) or (bool(to_replace) and overwrite)
+    if not changed and not to_skip:
+        return
+
+    if not changed:
+        print("\nNo Codex hook changes needed.")
+        return
+
+    with open(CODEX_HOOKS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+
+    print(f"\nCodex hooks written to {CODEX_HOOKS_FILE}")
 
 
 def _shell_quote(s: str) -> str:
@@ -363,6 +465,7 @@ def main():
 
     symlink_to_path()
     configure_hooks()
+    configure_codex_hooks()
     configure_statusline()
 
     print()

@@ -83,7 +83,7 @@ The install script:
 
 1. Creates a `.venv` and installs the package in editable mode
 2. Symlinks `claude-monitor` and `claude-monitor-hook` to `~/.local/bin/`
-3. Configures Claude Code hooks in `~/.claude/settings.json` (interactive — asks before writing)
+3. Configures Claude Code hooks in `~/.claude/settings.json` and, optionally, Codex hooks in `~/.codex/hooks.json` (interactive - asks before writing)
 
 Make sure `~/.local/bin` is on your `$PATH`.
 
@@ -95,6 +95,31 @@ python3 -m venv .venv
 ```
 
 Then add hooks to `~/.claude/settings.json` manually (see [How it works](#how-it-works) below).
+
+### Codex Permission Hook
+
+Codex can use the same hook executable for permission requests. Add this to `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/claude-monitor/.venv/bin/claude-monitor-hook",
+            "timeout": 300,
+            "statusMessage": "Checking claude-monitor approval state"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+After adding or changing a Codex hook, open `/hooks` in Codex and trust the hook definition. When `claude-monitor` is running and the session is in auto mode, the hook returns an allow decision for Codex permission requests. In manual mode, or when the monitor is not reachable, it returns no decision so Codex shows its normal approval prompt. Usage/quota polling for Codex is out of scope.
 
 ## Usage
 
@@ -179,7 +204,7 @@ Two files in `/tmp/claude-auto-accept/`:
 
 ### Hook
 
-Claude Code calls `claude-monitor-hook` on four event types via the hooks config in `~/.claude/settings.json`:
+Claude Code calls `claude-monitor-hook` via `~/.claude/settings.json`. Codex can call the same executable via `~/.codex/hooks.json` for `PermissionRequest` events.
 
 | Event | Description |
 |---|---|
@@ -187,8 +212,9 @@ Claude Code calls `claude-monitor-hook` on four event types via the hooks config
 | `Notification` | Permission prompt or idle prompt notification |
 | `SubagentStart` | A subagent has started |
 | `SubagentStop` | A subagent has completed |
+| Codex `PermissionRequest` | Codex wants approval for a tool or sandbox/network escalation |
 
-The hook writes every event as a JSON line to `events.jsonl`, tagged with the iTerm2 session ID and timestamp. For permission requests, it reads `state.json` to check both global and per-session pause state. If paused, it exits silently and Claude Code shows the normal prompt. Otherwise, it responds with an allow decision.
+The hook normalizes Claude Code and Codex payloads into one internal event shape, writes every event as a JSON line to `events.jsonl`, and tags the producer with `_source`. For permission requests, it reads `state.json` to check global and per-session pause state. If paused, or if the monitor is not running, it exits without a decision so the original tool shows its normal approval prompt. Otherwise, it responds with an allow decision.
 
 ### TUI
 

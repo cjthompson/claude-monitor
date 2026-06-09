@@ -104,6 +104,28 @@ class TestHookEndToEnd:
             event = json.loads(f.readline())
         assert event["_decision"] == "no_monitor"
 
+    def test_codex_no_monitor_when_nothing_listening(self, isolated_state, monkeypatch):
+        """Codex hook stays silent when the TUI is not reachable."""
+        monkeypatch.setattr("claude_monitor.hook.API_PORT", _free_port_no_listener())
+        out = self._run(
+            {
+                "hook_event_name": "PermissionRequest",
+                "session_id": "codex-session",
+                "turn_id": "turn-123",
+                "permission_mode": "default",
+                "cwd": "/tmp",
+                "tool_name": "Bash",
+                "tool_input": {"command": "git status"},
+            },
+            monkeypatch,
+        )
+        assert out == ""
+
+        with open(isolated_state["events_file"]) as f:
+            event = json.loads(f.readline())
+        assert event["_source"] == "codex"
+        assert event["_decision"] == "no_monitor"
+
     def test_allow_when_listener_present(self, isolated_state, monkeypatch):
         """Hook outputs ``allow`` when the probe finds a listener."""
         sock, port = _bind_free_port()

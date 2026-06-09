@@ -15,6 +15,48 @@ import time
 
 from claude_monitor import API_PORT, EVENTS_FILE, SIGNAL_DIR, extract_iterm_session_id, read_state
 
+SOURCE_CLAUDE_CODE = "claude_code"
+SOURCE_CODEX = "codex"
+
+
+def detect_hook_source(data: dict) -> str:
+    """Return the hook producer for a raw hook payload."""
+    if data.get("turn_id") is not None or data.get("permission_mode") is not None:
+        return SOURCE_CODEX
+    return SOURCE_CLAUDE_CODE
+
+
+def normalize_hook_event(data: dict) -> dict:
+    """Convert a raw hook payload into claude-monitor's internal event shape."""
+    source = detect_hook_source(data)
+    event = dict(data)
+    event["_source"] = source
+
+    if source == SOURCE_CODEX:
+        event["hook_event_name"] = data.get("hook_event_name") or data.get(
+            "hookEventName", "PermissionRequest"
+        )
+        event.setdefault("session_id", data.get("session_id", ""))
+        event.setdefault("tool_name", data.get("tool_name", ""))
+        event.setdefault("tool_input", data.get("tool_input") or {})
+
+    return event
+
+
+def build_permission_allow_output(source: str) -> dict:
+    """Build the allow response for the hook producer."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "allow"},
+        }
+    }
+
+
+def write_permission_allow(source: str) -> None:
+    """Write an allow decision to stdout for a permission request."""
+    json.dump(build_permission_allow_output(source), sys.stdout)
+
 
 def _tui_is_running() -> bool:
     """Check if the TUI is running by probing its API port.
@@ -74,7 +116,9 @@ def decide_permission(state: dict, event: dict) -> tuple[str, int]:
 def main():
     os.makedirs(SIGNAL_DIR, exist_ok=True)
 
-    data = json.load(sys.stdin)
+    raw_data = json.load(sys.stdin)
+    data = normalize_hook_event(raw_data)
+    source = data.get("_source", SOURCE_CLAUDE_CODE)
     event_name = data.get("hook_event_name", "")
     data["_timestamp"] = time.time()
     data["_tty"] = os.ttyname(sys.stderr.fileno()) if sys.stderr.isatty() else None
@@ -125,15 +169,7 @@ def main():
             f.write(json.dumps(completion) + "\n")
 
     # Auto-allow
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {"behavior": "allow"},
-            }
-        },
-        sys.stdout,
-    )
+    write_permission_allow(source)
 
 
 def statusline_main() -> int:

@@ -102,7 +102,7 @@ Both are symlinked to `~/.local/bin/` for PATH access. The venv is at `.venv/`.
 
 ## How it works
 
-1. **Hook** (`hook.py`): Claude Code calls this on PermissionRequest, Notification, SubagentStart, SubagentStop events via `~/.claude/settings.json` hooks config. It writes JSON events to `/tmp/claude-auto-accept/events.jsonl` and auto-allows permission requests unless paused (checked via `state.json`).
+1. **Hook** (`hook.py`): Claude Code calls this via `~/.claude/settings.json`, and Codex can call it via `~/.codex/hooks.json` for `PermissionRequest` events. It normalizes source-specific payloads, writes JSON events to `/tmp/claude-auto-accept/events.jsonl`, and auto-allows permission requests unless paused or the TUI is not reachable (checked via `state.json` and the local API port).
 
 2. **TUI** (`tui.py`): Uses iTerm2 Python API to discover pane layout, then builds a matching Textual widget tree. A background worker tails the events JSONL file and routes events to the correct panel via `_iterm_session_id`. Layout is polled every 3 seconds to detect pane adds/removes; resizes update CSS only without rebuilding.
 
