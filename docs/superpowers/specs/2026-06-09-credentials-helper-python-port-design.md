@@ -1,5 +1,30 @@
 # Pure-Python credentials helper
 
+## Status: as shipped (2026-06-09)
+
+This was the design plan. The implementation diverged on several points during
+the build — the sections below are the original plan and are kept for rationale;
+where they conflict with this note, **this note is authoritative**:
+
+- **Form:** shipped as a `[project.scripts]` console entry point
+  `claude-monitor-credentials` (`claude_monitor/cli_credentials.py`), with an
+  `auth-helper` wrapper — *not* a root-level `credentials-helper.py`. Reason: a
+  `#!/usr/bin/env python3` shebang resolved to the system Python 3.9, which
+  crashed on `str | None` annotations; an entry point pins the venv's 3.12+
+  interpreter structurally. `install.py` symlinks the command onto `PATH`.
+- **Default behavior:** no arguments prints help (it does *not* dump raw
+  credentials). A `--raw` flag prints the verbatim blob on demand.
+- **Transport:** `--send`/`--receive` use **TCP**, not UDP. The full keychain
+  blob (~11 KB) exceeds the macOS UDP datagram cap (9216 B), and UDP failed
+  silently; TCP fails loudly (connection refused) and carries any size. The
+  receiver is bounded by an idle-read timeout and a max-payload cap
+  (env-tunable) to limit a hostile peer.
+- **Tests:** the CLI suite is `tests/test_cli_credentials.py`, driving
+  `python -m claude_monitor.cli_credentials` over real loopback TCP; the bash
+  suite gained matching real-loopback TCP coverage.
+- **Console entry point** was originally listed out of scope (see below) — it is
+  now the chosen form.
+
 ## Context
 
 `claude-credentials.sh` manages the Claude Code OAuth blob in the macOS Keychain

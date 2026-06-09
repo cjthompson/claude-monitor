@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from claude_monitor import cli_credentials
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE = "claude_monitor.cli_credentials"
 KEYCHAIN_JSON = json.dumps(
@@ -314,3 +316,70 @@ def test_receive_writes_connection_to_keychain(cli_env):
             proc.kill()
     assert proc.returncode == 0
     assert capture.read_text() == payload
+
+
+# ── In-process --refresh coverage ─────────────────────────────────────────────
+# --refresh mutates the keychain via a network OAuth call, so it's driven
+# in-process with creds.* monkeypatched rather than as a subprocess.
+
+
+def test_refresh_writes_new_tokens_and_preserves_other_keys(monkeypatch, capsys):
+    written = {}
+    monkeypatch.setattr(
+        cli_credentials.creds, "extract_oauth_tokens", lambda: ("old-access", "old-refresh", 1.0)
+    )
+    monkeypatch.setattr(
+        cli_credentials.creds, "refresh_tokens", lambda rt: ("new-access", "new-refresh", 3600)
+    )
+    monkeypatch.setattr(
+        cli_credentials.creds,
+        "read_json",
+        lambda: {"claudeAiOauth": {"accessToken": "old-access"}, "other": "keep"},
+    )
+    monkeypatch.setattr(cli_credentials.creds, "write", lambda content: written.update(c=content))
+
+    rc = cli_credentials.main(["--refresh"])
+
+    assert rc == 0
+    assert "new-access" in capsys.readouterr().out
+    saved = json.loads(written["c"])
+    assert saved["claudeAiOauth"]["accessToken"] == "new-access"
+    assert saved["claudeAiOauth"]["refreshToken"] == "new-refresh"
+    assert saved["other"] == "keep"  # unrelated keychain keys survive the rewrite
+
+
+def test_refresh_without_refresh_token_skips_network(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli_credentials.creds, "extract_oauth_tokens", lambda: ("access", "", 1.0)
+    )
+    called = {}
+    monkeypatch.setattr(
+        cli_credentials.creds, "refresh_tokens", lambda rt: called.setdefault("hit", True)
+    )
+
+    rc = cli_credentials.main(["--refresh"])
+
+    assert rc == 1
+    assert "no refresh token" in capsys.readouterr().err.lower()
+    assert "hit" not in called  # never attempted the network refresh
+
+
+def test_refresh_reports_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli_credentials.creds, "extract_oauth_tokens", lambda: ("access", "refresh", 1.0)
+    )
+    monkeypatch.setattr(cli_credentials.creds, "refresh_tokens", lambda rt: None)
+
+    rc = cli_credentials.main(["--refresh"])
+
+    assert rc == 1
+    assert "refresh failed" in capsys.readouterr().err.lower()
+
+
+def test_refresh_without_credentials_errors(monkeypatch, capsys):
+    monkeypatch.setattr(cli_credentials.creds, "extract_oauth_tokens", lambda: None)
+
+    rc = cli_credentials.main(["--refresh"])
+
+    assert rc == 1
+    assert "no oauth token" in capsys.readouterr().err.lower()
