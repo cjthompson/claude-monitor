@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Manage the Claude Code OAuth token in the macOS Keychain.
 #
-# Usage: ./claude-credentials.sh [--simple] [--refresh] --import <file|->
+# Usage: ./claude-credentials.sh [--simple | --refresh | --oauth-only]
+#        ./claude-credentials.sh --import <file|->
+#        ./claude-credentials.sh [--oauth-only] --send <host> [--send-port <port>]
 
 set -euo pipefail
 
@@ -20,8 +22,9 @@ RECEIVE_PORT="47299"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--simple] [--refresh] [--oauth-only] --import <file|->
-       $(basename "$0") --send <host> [--send-port <port>]
+Usage: $(basename "$0") [--simple | --refresh | --oauth-only]
+       $(basename "$0") --import <file|->
+       $(basename "$0") [--oauth-only] --send <host> [--send-port <port>]
        $(basename "$0") --receive [--port <port>]
 
 Modes:
@@ -51,7 +54,9 @@ Modes:
 
   --send <host>     Read keychain bytes (same as default mode) and send them
                     as a single UDP datagram to <host> on the configured
-                    port. Default port: 47299. Override with --send-port.
+                    port. With --oauth-only, send only the claudeAiOauth
+                    section as JSON. Default port: 47299. Override with
+                    --send-port.
                     Sender is fire-and-forget — the receiver does not need
                     to be running first (UDP is connectionless). Exit 0
                     even if no receiver is listening.
@@ -76,7 +81,8 @@ large; in practice the OAuth blob is well under 4 KB. macOS default
 socket buffer is 9216 bytes — a brief comment near the send/receive
 points will call this out.
 
---simple, --oauth-only, --refresh, --import, --send, and --receive are mutually exclusive.
+--simple, --refresh, --import, --send, and --receive are mutually exclusive.
+--oauth-only can be used alone or with --send.
 EOF
 }
 
@@ -112,17 +118,35 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-modes=0
-$SIMPLE_OUT   && modes=$((modes + 1))
-$OAUTH_ONLY   && modes=$((modes + 1))
-$DO_REFRESH   && modes=$((modes + 1))
-[[ -n "$IMPORT_PATH" ]] && modes=$((modes + 1))
-[[ -n "$SEND_HOST" ]]   && modes=$((modes + 1))
-$RECEIVE_MODE           && modes=$((modes + 1))
-if (( modes > 1 )); then
-  echo "Error: --simple, --oauth-only, --refresh, --import, --send, and --receive are mutually exclusive" >&2
+primary_modes=0
+$SIMPLE_OUT           && primary_modes=$((primary_modes + 1))
+$DO_REFRESH           && primary_modes=$((primary_modes + 1))
+[[ -n "$IMPORT_PATH" ]] && primary_modes=$((primary_modes + 1))
+[[ -n "$SEND_HOST" ]]   && primary_modes=$((primary_modes + 1))
+$RECEIVE_MODE           && primary_modes=$((primary_modes + 1))
+if (( primary_modes > 1 )); then
+  echo "Error: --simple, --refresh, --import, --send, and --receive are mutually exclusive" >&2
   exit 1
 fi
+
+if $OAUTH_ONLY && { $SIMPLE_OUT || $DO_REFRESH || [[ -n "$IMPORT_PATH" ]] || $RECEIVE_MODE; }; then
+  echo "Error: --oauth-only can only be used by itself or with --send" >&2
+  exit 1
+fi
+
+keychain_json_from_bytes() {
+  local keychain_out="$1"
+  if [[ "$keychain_out" =~ ^\{ ]]; then
+    printf '%s' "$keychain_out"
+  else
+    printf '%s' "$keychain_out" | xxd -r -p
+  fi
+}
+
+oauth_only_from_bytes() {
+  local keychain_out="$1"
+  keychain_json_from_bytes "$keychain_out" | jq -c '{claudeAiOauth: .claudeAiOauth}'
+}
 
 # --import: read raw keychain bytes (file or stdin) and write verbatim.
 if [[ -n "$IMPORT_PATH" ]]; then
@@ -171,9 +195,16 @@ if [[ -n "$SEND_HOST" ]]; then
   keychain_bytes=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
     echo "Error: No credentials found in Keychain" >&2; exit 1
   }
-  byte_count=$(printf '%s' "$keychain_bytes" | wc -c | tr -d ' ')
+  if $OAUTH_ONLY; then
+    send_payload=$(oauth_only_from_bytes "$keychain_bytes")
+    mode_note=" (oauth-only)"
+  else
+    send_payload="$keychain_bytes"
+    mode_note=""
+  fi
+  byte_count=$(printf '%s' "$send_payload" | wc -c | tr -d ' ')
 
-  printf '%s' "$keychain_bytes" | python3 -c '
+  printf '%s' "$send_payload" | python3 -c '
 import socket, sys
 data = sys.stdin.buffer.read()
 host = sys.argv[1]
@@ -183,7 +214,7 @@ sock.sendto(data, (host, port))
 sock.close()
 ' "$SEND_HOST" "$SEND_PORT"
 
-  echo "Sent $byte_count bytes to $SEND_HOST:$SEND_PORT via UDP" >&2
+  echo "Sent $byte_count bytes to $SEND_HOST:$SEND_PORT via UDP$mode_note" >&2
   exit 0
 fi
 
@@ -233,12 +264,7 @@ if $OAUTH_ONLY; then
   keychain_out=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
     echo "Error: No credentials found in Keychain" >&2; exit 1
   }
-  if [[ "$keychain_out" =~ ^\{ ]]; then
-    raw="$keychain_out"
-  else
-    raw=$(echo "$keychain_out" | xxd -r -p)
-  fi
-  echo "$raw" | jq -c '{claudeAiOauth: .claudeAiOauth}'
+  oauth_only_from_bytes "$keychain_out"
   exit 0
 fi
 
@@ -255,11 +281,7 @@ keychain_out=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
 }
 
 # Output may be hex-encoded or raw JSON depending on macOS version
-if [[ "$keychain_out" =~ ^\{ ]]; then
-  raw="$keychain_out"
-else
-  raw=$(echo "$keychain_out" | xxd -r -p)
-fi
+raw=$(keychain_json_from_bytes "$keychain_out")
 
 access_token=$(echo "$raw" | jq -r '.claudeAiOauth.accessToken // empty')
 refresh_token=$(echo "$raw" | jq -r '.claudeAiOauth.refreshToken // empty')
