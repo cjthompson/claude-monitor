@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-06-09
+
+### Features
+- Add LAN UDP transfer to claude-credentials.sh (--send / --receive) (#claude-credentials, #networking)
+
 ## 2026-05-05
 
 ### Fixes
