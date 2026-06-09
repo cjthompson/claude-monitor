@@ -131,7 +131,12 @@ def setup_venv():
 def symlink_to_path():
     print()
     LOCAL_BIN.mkdir(parents=True, exist_ok=True)
-    for name in ("claude-monitor", "claude-monitor-hook", "claude-monitor-statusline"):
+    for name in (
+        "claude-monitor",
+        "claude-monitor-hook",
+        "claude-monitor-statusline",
+        "claude-monitor-credentials",
+    ):
         src = VENV_DIR / "bin" / name
         dst = LOCAL_BIN / name
         if dst.is_symlink() or dst.exists():

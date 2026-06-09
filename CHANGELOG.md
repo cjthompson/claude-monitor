@@ -3,7 +3,8 @@
 ## 2026-06-09
 
 ### Features
-- Add LAN UDP transfer to claude-credentials.sh (--send / --receive) (#claude-credentials, #networking)
+- Add LAN TCP transfer to claude-credentials.sh (--send / --receive) (#claude-credentials, #networking)
+- Add `claude-monitor-credentials` console command — a pure-Python port of claude-credentials.sh (#claude-credentials)
 
 ## 2026-05-05
 
