@@ -12,14 +12,19 @@ With no arguments, prints help (it does not dump credentials by default).
   --oauth-only     Print only the claudeAiOauth section as compact JSON.
   --refresh        Refresh the access token, write it back, print --simple form.
   --import <file|-> Write raw keychain bytes (file or stdin) verbatim.
-  --send <host>    Send the keychain blob to <host> over TCP (the receiver must
-                   be running --receive first). With --oauth-only, send only the
-                   claudeAiOauth section.
-  --receive        Accept one TCP connection and write the received bytes to
-                   the keychain.
+  --send <host>    Encrypt the keychain blob and send it to <host> over TCP (the
+                   receiver must be running --receive first). With --oauth-only,
+                   send only the claudeAiOauth section.
+  --receive        Accept one TCP connection, verify+decrypt it, and write the
+                   result to the keychain.
+
+--send/--receive are end-to-end encrypted with a shared passphrase
+(CLAUDE_CREDENTIALS_PASSPHRASE, or an interactive prompt). Both ends must use
+the same passphrase. See claude_monitor.transfer_crypto for the construction.
 """
 
 import argparse
+import getpass
 import json
 import os
 import socket
@@ -28,6 +33,7 @@ import time
 from datetime import datetime
 
 from claude_monitor import credentials as creds
+from claude_monitor import transfer_crypto
 
 DEFAULT_PORT = 47299
 SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
@@ -51,15 +57,27 @@ def _err(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _get_passphrase() -> str:
+    """Return the transfer passphrase from the env, else prompt; never from argv."""
+    pw = os.environ.get("CLAUDE_CREDENTIALS_PASSPHRASE")
+    if pw:
+        return pw
+    if not sys.stdin.isatty():
+        raise creds.CredentialsError(
+            "no passphrase: set CLAUDE_CREDENTIALS_PASSPHRASE or run interactively"
+        )
+    return getpass.getpass("Passphrase: ")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="claude-monitor-credentials",
         description="Manage Claude Code OAuth credentials in the macOS Keychain.",
         epilog=(
-            "SECURITY: --send/--receive transmit your OAuth tokens in PLAINTEXT and "
-            "the receiver writes the first connection it accepts — no encryption, no "
-            "auth. Use only on a trusted network, or tunnel over SSH "
-            "(ssh -L 47299:localhost:47299 <host>, then --send 127.0.0.1)."
+            "--send/--receive are end-to-end encrypted (AES-256-CBC + HMAC-SHA256) "
+            "with a shared passphrase. Set CLAUDE_CREDENTIALS_PASSPHRASE on both "
+            "ends, or you will be prompted. A wrong passphrase or tampered payload "
+            "is rejected and the keychain is left untouched."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -73,7 +91,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only the claudeAiOauth section (alone, or as a --send modifier)",
     )
     p.add_argument("--import", dest="import_path", metavar="<file|->", help="write bytes verbatim")
-    p.add_argument("--send", dest="send_host", metavar="<host>", help="send the blob over TCP")
+    p.add_argument(
+        "--send", dest="send_host", metavar="<host>", help="encrypt and send the blob over TCP"
+    )
     p.add_argument(
         "--send-port",
         dest="send_port",
@@ -82,7 +102,9 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="<port>",
         help=f"destination port for --send (default {DEFAULT_PORT})",
     )
-    p.add_argument("--receive", action="store_true", help="accept one TCP connection, write it")
+    p.add_argument(
+        "--receive", action="store_true", help="accept one TCP connection, decrypt, write it"
+    )
     p.add_argument(
         "--port",
         dest="receive_port",
@@ -139,22 +161,28 @@ def _do_import(import_path: str) -> int:
 
 
 def _do_send(host: str, port: int, oauth_only: bool) -> int:
-    payload = (creds.oauth_only_json() if oauth_only else creds.read_raw()).encode()
+    plaintext = creds.oauth_only_json() if oauth_only else creds.read_raw()
+    frame = transfer_crypto.encrypt(plaintext, _get_passphrase()).encode()
     # TCP: connect() fails loudly if no receiver is listening, and there is no
-    # datagram size cap, so the full blob transfers reliably.
+    # datagram size cap, so the encrypted frame transfers reliably.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(SEND_TIMEOUT)
     try:
         sock.connect((host, port))
-        sock.sendall(payload)
+        sock.sendall(frame)
+    except OSError as e:
+        # Add host:port context the bare errno omits (parity with the bash script).
+        _err(f"Error: could not connect to {host}:{port} — {e}")
+        return 1
     finally:
         sock.close()
     note = " (oauth-only)" if oauth_only else ""
-    _err(f"Sent {len(payload)} bytes to {host}:{port} via TCP{note}")
+    _err(f"Sent {len(frame)} encrypted bytes to {host}:{port} via TCP{note}")
     return 0
 
 
 def _do_receive(port: int) -> int:
+    passphrase = _get_passphrase()  # up front: prompt (if any) and fail fast before listening
     _err(f"Listening for one TCP connection on port {port}...")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -183,9 +211,19 @@ def _do_receive(port: int) -> int:
             conn.close()
     finally:
         srv.close()
-    content = b"".join(chunks).decode("utf-8", errors="replace").strip()
-    if not content:
+    frame = b"".join(chunks).decode("utf-8", errors="replace")
+    if not frame.strip():
         _err("Error: Received empty connection")
+        return 1
+    # Verify+decrypt BEFORE touching the keychain: a wrong passphrase or a
+    # forged/tampered payload is rejected here, leaving credentials untouched.
+    try:
+        content = transfer_crypto.decrypt(frame, passphrase).strip()
+    except transfer_crypto.DecryptionError as e:
+        _err(f"Error: {e}; keychain left unchanged")
+        return 1
+    if not content:
+        _err("Error: decrypted payload is empty")
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")

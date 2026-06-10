@@ -17,9 +17,11 @@ from pathlib import Path
 import pytest
 
 from claude_monitor import cli_credentials
+from claude_monitor import transfer_crypto as tc
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE = "claude_monitor.cli_credentials"
+PASSPHRASE = "test-transfer-passphrase"
 KEYCHAIN_JSON = json.dumps(
     {
         "claudeAiOauth": {
@@ -72,6 +74,7 @@ def cli_env(tmp_path):
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["CLAUDE_CREDENTIALS_TEST_KEYCHAIN"] = KEYCHAIN_JSON
     env["CLAUDE_CREDENTIALS_TEST_CAPTURE"] = str(capture)
+    env["CLAUDE_CREDENTIALS_PASSPHRASE"] = PASSPHRASE  # --send/--receive are encrypted
     return env, capture
 
 
@@ -152,7 +155,7 @@ def test_simple_prints_token_fields(cli_env):
     assert "expires_at:    1790000000000" in res.stdout
 
 
-def test_full_send_transmits_raw_blob(cli_env):
+def test_full_send_transmits_encrypted_blob(cli_env):
     env, _ = cli_env
     srv, port = _tcp_server()
     try:
@@ -162,8 +165,10 @@ def test_full_send_transmits_raw_blob(cli_env):
         conn, _addr = srv.accept()
         data = _recv_all(conn)
         conn.close()
-        assert data.decode() == KEYCHAIN_JSON
-        assert f"Sent {len(KEYCHAIN_JSON)} bytes to 127.0.0.1:{port} via TCP" in res.stderr
+        # Wire bytes are an encrypted frame, not the plaintext blob.
+        assert KEYCHAIN_JSON not in data.decode()
+        assert tc.decrypt(data.decode(), PASSPHRASE) == KEYCHAIN_JSON
+        assert f"encrypted bytes to 127.0.0.1:{port} via TCP" in res.stderr
         assert "(oauth-only)" not in res.stderr
     finally:
         srv.close()
@@ -180,11 +185,25 @@ def test_oauth_only_send_transmits_filtered_payload(cli_env, extra):
         conn, _addr = srv.accept()
         data = _recv_all(conn)
         conn.close()
+        decrypted = tc.decrypt(data.decode(), PASSPHRASE)
         if extra:
-            assert json.loads(data) == OAUTH_ONLY
+            assert json.loads(decrypted) == OAUTH_ONLY
             assert "(oauth-only)" in res.stderr
         else:
-            assert data.decode() == KEYCHAIN_JSON
+            assert decrypted == KEYCHAIN_JSON
+    finally:
+        srv.close()
+
+
+def test_send_without_passphrase_errors(cli_env):
+    env, _ = cli_env
+    del env["CLAUDE_CREDENTIALS_PASSPHRASE"]
+    srv, port = _tcp_server()
+    try:
+        # Empty stdin (a pipe, not a tty) → must error, not prompt.
+        res = _run(env, "--send", "127.0.0.1", "--send-port", str(port), stdin="")
+        assert res.returncode != 0
+        assert "passphrase" in res.stderr.lower()
     finally:
         srv.close()
 
@@ -281,41 +300,62 @@ def test_receive_times_out_on_idle_peer(cli_env):
     assert not capture.exists()
 
 
-def test_receive_writes_connection_to_keychain(cli_env):
+def test_receive_decrypts_and_writes_to_keychain(cli_env):
     env, capture = cli_env
-    # Pick a free port, then let the receiver bind+listen on it.
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", MODULE, "--receive", "--port", str(port)],
-        cwd=REPO_ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    port = _free_port()
+    proc = _start_receiver(env, port)
     payload = '{"claudeAiOauth":{"accessToken":"received"}}'
+    frame = tc.encrypt(payload, PASSPHRASE).encode()
     try:
-        # The receiver needs a moment to start listening; retry connect.
-        client = None
-        for _ in range(50):
-            try:
-                client = socket.create_connection(("127.0.0.1", port), timeout=1)
-                break
-            except OSError:
-                time.sleep(0.1)
+        client = _connect_with_retry(port)
         assert client is not None, "receiver never started listening"
-        client.sendall(payload.encode())
+        client.sendall(frame)
         client.close()
         proc.wait(timeout=5)
     finally:
         if proc.poll() is None:
             proc.kill()
     assert proc.returncode == 0
-    assert capture.read_text() == payload
+    assert capture.read_text() == payload  # decrypted plaintext written to keychain
+
+
+def test_receive_rejects_wrong_passphrase(cli_env):
+    env, capture = cli_env
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    # Frame encrypted under a DIFFERENT passphrase than the receiver expects.
+    frame = tc.encrypt('{"claudeAiOauth":{"accessToken":"x"}}', "the-wrong-passphrase").encode()
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(frame)
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode != 0
+    assert "authentication failed" in proc.stderr.read().lower()
+    assert not capture.exists()  # keychain left unchanged
+
+
+def test_receive_without_passphrase_errors(cli_env):
+    env, capture = cli_env
+    del env["CLAUDE_CREDENTIALS_PASSPHRASE"]
+    port = _free_port()
+    # No passphrase + non-interactive stdin → fail fast, before listening.
+    proc = subprocess.run(
+        [sys.executable, "-m", MODULE, "--receive", "--port", str(port)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "passphrase" in proc.stderr.lower()
+    assert not capture.exists()
 
 
 # ── In-process --refresh coverage ─────────────────────────────────────────────
