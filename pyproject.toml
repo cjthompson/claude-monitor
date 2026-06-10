@@ -5,6 +5,7 @@ description = "Monitor and auto-accept Claude Code permission prompts"
 requires-python = ">=3.12"
 dependencies = [
     "cairosvg",  # Requires system packages on Linux: libcairo2-dev (Debian/Ubuntu) or cairo-devel (Fedora/RHEL)
+    "cryptography>=42",  # AES-256-CBC + HMAC for encrypted credential transfer (--send/--receive)
     "iterm2>=2.14; sys_platform == 'darwin'",
     "textual>=1.0",
     "websockets>=13.0,<15",
