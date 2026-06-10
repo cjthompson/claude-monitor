@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-06-10
+
+### Features
+- Encrypt `--send`/`--receive` credential transfer end-to-end (AES-256-CBC + HMAC-SHA256, shared passphrase via `CLAUDE_CREDENTIALS_PASSPHRASE`); wrong passphrase or tampered payload is rejected and the keychain is left untouched (#claude-credentials, #security)
+
 ## 2026-06-09
 
 ### Features

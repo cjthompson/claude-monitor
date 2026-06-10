@@ -5,9 +5,10 @@ import subprocess
 import time
 from pathlib import Path
 
-import pytest
+from claude_monitor import transfer_crypto as tc
 
 SCRIPT = Path(__file__).resolve().parents[1] / "claude-credentials.sh"
+PASSPHRASE = "test-transfer-passphrase"
 KEYCHAIN_JSON = json.dumps(
     {
         "claudeAiOauth": {
@@ -71,29 +72,9 @@ printf '%s\n' "$@" > "$CLAUDE_CREDENTIALS_TEST_PYTHON_ARGS"
     return result, capture_file
 
 
-def test_send_uses_raw_keychain_payload_by_default(tmp_path):
-    result, capture_file = _run_script(tmp_path, "--send", "127.0.0.1", "--send-port", "59999")
-
-    assert result.returncode == 0
-    assert capture_file.read_text() == KEYCHAIN_JSON
-    assert f"Sent {len(KEYCHAIN_JSON)} bytes to 127.0.0.1:59999 via TCP" in result.stderr
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ("--oauth-only", "--send", "example.test"),
-        ("--send", "example.test", "--oauth-only"),
-    ],
-)
-def test_oauth_only_send_uses_filtered_payload(tmp_path, args):
-    result, capture_file = _run_script(tmp_path, *args)
-
-    assert result.returncode == 0
-    payload = json.loads(capture_file.read_text())
-    assert payload == {"claudeAiOauth": json.loads(KEYCHAIN_JSON)["claudeAiOauth"]}
-    assert "mcpOAuth" not in payload
-    assert "other" not in payload
+# NOTE: --send/--receive now run real python3 (crypto), so they can't be tested
+# with the python3-shimming _run_script helper — they are covered by the real
+# loopback TCP tests further down, which encrypt/decrypt with transfer_crypto.
 
 
 def test_oauth_only_alone_prints_filtered_payload(tmp_path):
@@ -175,6 +156,7 @@ def _real_python_env(tmp_path, **extra):
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["CLAUDE_CREDENTIALS_TEST_KEYCHAIN"] = KEYCHAIN_JSON
     env["CLAUDE_CREDENTIALS_TEST_CAPTURE"] = str(capture)
+    env["CLAUDE_CREDENTIALS_PASSPHRASE"] = PASSPHRASE  # --send/--receive are encrypted
     env.update(extra)
     return env, capture
 
@@ -225,7 +207,9 @@ def _connect_with_retry(port):
     return None
 
 
-def test_send_real_tcp_delivers_full_blob(tmp_path):
+def test_send_real_tcp_delivers_encrypted_full_blob(tmp_path):
+    # The bash sender encrypts; the Python transfer_crypto must decrypt it
+    # (this is the bash->python interop check, against the real openssl binary).
     env, _capture = _real_python_env(tmp_path)
     srv, port = _tcp_server()
     try:
@@ -242,8 +226,9 @@ def test_send_real_tcp_delivers_full_blob(tmp_path):
         conn, _addr = srv.accept()
         data = _recv_all(conn)
         conn.close()
-        assert data.decode() == KEYCHAIN_JSON
-        assert "via TCP" in result.stderr
+        assert KEYCHAIN_JSON not in data.decode()  # on the wire it's encrypted
+        assert tc.decrypt(data.decode(), PASSPHRASE) == KEYCHAIN_JSON
+        assert "encrypted bytes" in result.stderr and "via TCP" in result.stderr
     finally:
         srv.close()
 
@@ -265,28 +250,71 @@ def test_send_real_tcp_oauth_only_delivers_filtered_payload(tmp_path):
         conn, _addr = srv.accept()
         data = _recv_all(conn)
         conn.close()
-        assert json.loads(data) == {"claudeAiOauth": json.loads(KEYCHAIN_JSON)["claudeAiOauth"]}
+        decrypted = tc.decrypt(data.decode(), PASSPHRASE)
+        assert json.loads(decrypted) == {"claudeAiOauth": json.loads(KEYCHAIN_JSON)["claudeAiOauth"]}
         assert "(oauth-only)" in result.stderr
     finally:
         srv.close()
 
 
-def test_receive_real_tcp_writes_to_keychain(tmp_path):
+def test_send_real_tcp_requires_passphrase(tmp_path):
+    env, _capture = _real_python_env(tmp_path)
+    del env["CLAUDE_CREDENTIALS_PASSPHRASE"]
+    srv, port = _tcp_server()
+    try:
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "--send", "127.0.0.1", "--send-port", str(port)],
+            cwd=SCRIPT.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,  # non-tty → must error, not prompt
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "passphrase" in result.stderr.lower()
+    finally:
+        srv.close()
+
+
+def test_receive_real_tcp_decrypts_and_writes_to_keychain(tmp_path):
+    # Python transfer_crypto encrypts; the bash receiver must decrypt it
+    # (python->bash interop check).
     env, capture = _real_python_env(tmp_path)
     port = _free_port()
     proc = _start_receiver(env, port)
     payload = '{"claudeAiOauth":{"accessToken":"received"}}'
+    frame = tc.encrypt(payload, PASSPHRASE).encode()
     try:
         client = _connect_with_retry(port)
         assert client is not None, "receiver never started listening"
-        client.sendall(payload.encode())
+        client.sendall(frame)
         client.close()
         proc.wait(timeout=5)
     finally:
         if proc.poll() is None:
             proc.kill()
     assert proc.returncode == 0, proc.stderr.read()
-    assert capture.read_text() == payload
+    assert capture.read_text() == payload  # decrypted plaintext written
+
+
+def test_receive_real_tcp_rejects_wrong_passphrase(tmp_path):
+    env, capture = _real_python_env(tmp_path)
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    frame = tc.encrypt('{"claudeAiOauth":{"accessToken":"x"}}', "the-wrong-passphrase").encode()
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(frame)
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode != 0
+    assert "authentication failed" in proc.stderr.read().lower()
+    assert not capture.exists()  # keychain left unchanged
 
 
 def test_receive_real_tcp_rejects_oversized_payload(tmp_path):

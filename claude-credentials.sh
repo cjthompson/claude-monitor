@@ -55,17 +55,17 @@ Modes:
                     been run here at least once) so the account name can
                     be discovered.
 
-  --send <host>     Read keychain bytes (same as --raw) and send them over a
-                    TCP connection to <host> on the configured port. With
-                    --oauth-only, send only the claudeAiOauth section as JSON.
+  --send <host>     Encrypt the keychain bytes and send them over a TCP
+                    connection to <host> on the configured port. With
+                    --oauth-only, send only the claudeAiOauth section.
                     Default port: 47299. Override with --send-port.
                     The receiver must be running --receive first; if nothing
                     is listening, --send fails with a connection error.
 
   --receive         Listen for ONE TCP connection on the configured port
-                    (default 47299, override with --port), read the bytes,
-                    write them to the keychain (replacing the existing entry,
-                    same write path as --import), then exit.
+                    (default 47299, override with --port), verify+decrypt the
+                    payload, then write it to the keychain (replacing the
+                    existing entry, same write path as --import) and exit.
                     Receiver is one-shot — it is NOT a daemon.
                     Note: macOS may prompt for firewall access the first
                     time you --receive, since python3 is listening on a non-
@@ -76,17 +76,30 @@ Modes:
 
 Default port 47299 is "claude credentials" (4+7+2+9+9). It sits in the
 IANA registered-port range (1024-49151) but is not assigned to a common
-service, so collisions are unlikely. Transport is plain TCP — reliable
-and with no datagram size limit, so the full keychain blob transfers fine.
+service, so collisions are unlikely.
 
-SECURITY: --send/--receive transmit your OAuth tokens in PLAINTEXT and the
-receiver writes the FIRST connection it accepts — no encryption, no auth. Use
-only on a network you trust, or tunnel over SSH:
-    ssh -L 47299:localhost:47299 <receiving-host>   # then --send 127.0.0.1
+ENCRYPTION: --send/--receive are end-to-end encrypted (AES-256-CBC +
+HMAC-SHA256) with a shared passphrase. Set CLAUDE_CREDENTIALS_PASSPHRASE on
+both ends, or you will be prompted. Both ends must use the same passphrase; a
+wrong passphrase or a tampered/forged payload is rejected and the keychain is
+left untouched.
 
 --raw, --simple, --refresh, --import, --send, and --receive are mutually exclusive.
 --oauth-only can be used alone or with --send.
 EOF
+}
+
+# Resolve the transfer passphrase into $PASS: env first, else an interactive
+# no-echo prompt. Never accepted on the command line (would leak via ps/history).
+get_passphrase() {
+  if [[ -n "${CLAUDE_CREDENTIALS_PASSPHRASE:-}" ]]; then
+    PASS="$CLAUDE_CREDENTIALS_PASSPHRASE"
+  elif [[ -t 0 ]]; then
+    read -rsp "Passphrase: " PASS </dev/tty; echo >&2
+  else
+    echo "Error: no passphrase: set CLAUDE_CREDENTIALS_PASSPHRASE or run interactively" >&2
+    exit 1
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -191,10 +204,11 @@ if [[ -n "$IMPORT_PATH" ]]; then
   exit 0
 fi
 
-# --send: read keychain bytes and send them over a TCP connection.
-# TCP confirms delivery — connect() fails if no receiver is listening — and has
-# no datagram size cap, so the full blob transfers reliably. The receiver must
-# be running --receive first.
+# --send: encrypt the keychain bytes, then send the frame over a TCP connection.
+# TCP confirms delivery — connect() fails if no receiver is listening. The
+# receiver must be running --receive first. Encryption: see transfer_crypto.py
+# (AES-256-CBC + HMAC-SHA256, PBKDF2). AES is done by openssl; KDF/HMAC/base64
+# by the system python3 stdlib — both stock on macOS, no extra deps.
 if [[ -n "$SEND_HOST" ]]; then
   keychain_bytes=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
     echo "Error: No credentials found in Keychain" >&2; exit 1
@@ -206,9 +220,26 @@ if [[ -n "$SEND_HOST" ]]; then
     send_payload="$keychain_bytes"
     mode_note=""
   fi
-  byte_count=$(printf '%s' "$send_payload" | wc -c | tr -d ' ')
+  get_passphrase
 
-  printf '%s' "$send_payload" | python3 -c '
+  # Encrypt -> wire frame (base64(salt||ciphertext)\nhex(hmac)).
+  frame=$(printf '%s' "$send_payload" | CRED_PASS="$PASS" python3 -c '
+import base64, hashlib, hmac, os, subprocess, sys
+pw = os.environ["CRED_PASS"].encode()
+data = sys.stdin.buffer.read()
+salt = os.urandom(16)
+material = hashlib.pbkdf2_hmac("sha256", pw, salt, 600000, 80)
+enc_key, iv, mac_key = material[0:32], material[32:48], material[48:80]
+ct = subprocess.run(
+    ["openssl", "enc", "-aes-256-cbc", "-K", enc_key.hex(), "-iv", iv.hex(), "-nosalt"],
+    input=data, capture_output=True, check=True).stdout
+blob = salt + ct
+tag = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
+sys.stdout.write(base64.b64encode(blob).decode() + "\n" + tag + "\n")
+')
+
+  # Send the frame over TCP.
+  printf '%s' "$frame" | python3 -c '
 import socket, sys
 data = sys.stdin.buffer.read()
 host = sys.argv[1]
@@ -224,7 +255,8 @@ finally:
     sock.close()
 ' "$SEND_HOST" "$SEND_PORT"
 
-  echo "Sent $byte_count bytes to $SEND_HOST:$SEND_PORT via TCP$mode_note" >&2
+  byte_count=$(printf '%s' "$frame" | wc -c | tr -d ' ')
+  echo "Sent $byte_count encrypted bytes to $SEND_HOST:$SEND_PORT via TCP$mode_note" >&2
   exit 0
 fi
 
@@ -233,6 +265,7 @@ fi
 # Note: macOS will prompt for firewall access the first time python3 listens
 # on a non-standard port. Default port 47299 is an unassigned registered port.
 if $RECEIVE_MODE; then
+  get_passphrase  # up front: prompt (if any) and fail fast before listening
   echo "Listening for one TCP connection on port $RECEIVE_PORT..." >&2
   echo "Note: macOS may prompt for firewall access the first time you --receive" >&2
 
@@ -278,7 +311,36 @@ sys.stdout.buffer.write(b"".join(chunks))
     echo "Error: Received empty connection" >&2; exit 1
   fi
 
-  # Reuse the --import write path: discover account, trim, write.
+  # Verify+decrypt BEFORE touching the keychain. A wrong passphrase or a
+  # forged/tampered frame is rejected here, leaving credentials untouched.
+  content=$(printf '%s' "$received" | CRED_PASS="$PASS" python3 -c '
+import base64, hashlib, hmac, os, subprocess, sys
+pw = os.environ["CRED_PASS"].encode()
+lines = [ln for ln in sys.stdin.read().splitlines() if ln.strip()]
+if len(lines) < 2:
+    sys.exit("Error: malformed transfer frame")
+try:
+    blob = base64.b64decode(lines[0], validate=True)
+except Exception:
+    sys.exit("Error: malformed transfer frame")
+if len(blob) <= 16:
+    sys.exit("Error: malformed transfer frame")
+salt, ct = blob[:16], blob[16:]
+material = hashlib.pbkdf2_hmac("sha256", pw, salt, 600000, 80)
+enc_key, iv, mac_key = material[0:32], material[32:48], material[48:80]
+expected = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
+if not hmac.compare_digest(expected, lines[1].strip()):
+    sys.exit("Error: authentication failed (wrong passphrase or corrupted/forged data)")
+pt = subprocess.run(
+    ["openssl", "enc", "-d", "-aes-256-cbc", "-K", enc_key.hex(), "-iv", iv.hex(), "-nosalt"],
+    input=ct, capture_output=True, check=True).stdout
+sys.stdout.buffer.write(pt)
+') || {
+    echo "Keychain left unchanged." >&2; exit 1
+  }
+  content="$(printf '%s' "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  # Reuse the --import write path: discover account, write.
   account=$(security find-generic-password -s "$SERVICE" 2>/dev/null \
     | grep '"acct"' | sed 's/.*<blob>="\{0,1\}//' | sed 's/"\{0,1\}$//')
 
@@ -287,7 +349,6 @@ sys.stdout.buffer.write(b"".join(chunks))
     exit 1
   fi
 
-  content="$(printf '%s' "$received" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   security add-generic-password -U -a "$account" -s "$SERVICE" -w "$content"
 
   bytes=$(printf '%s' "$content" | wc -c | tr -d ' ')

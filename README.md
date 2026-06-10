@@ -168,6 +168,65 @@ Enable via Settings > Account usage. Displays your Anthropic API rate limit util
 - Color coded: green (<40%), yellow (<60%), orange (<80%), red (>=80%)
 - Width-responsive: full bars at wide widths, percentages only when narrow
 
+## Credential transfer
+
+Manage the Claude Code OAuth blob in the macOS Keychain, and move it between
+machines. Two interchangeable front-ends share one wire format:
+
+- `claude-monitor-credentials` — installed console command (pure Python).
+- `./claude-credentials.sh` — standalone bash (only needs stock macOS:
+  `openssl`, `python3`, `security`).
+
+Common modes (mutually exclusive):
+
+```bash
+claude-monitor-credentials --raw        # print the raw keychain blob
+claude-monitor-credentials --simple     # access/refresh token + expiry
+claude-monitor-credentials --oauth-only # just the claudeAiOauth section (JSON)
+claude-monitor-credentials --refresh    # refresh the access token, write it back
+claude-monitor-credentials --import -   # write a blob from stdin to the keychain
+```
+
+### Encrypted send / receive
+
+`--send` / `--receive` copy your credentials to another machine over a one-shot
+TCP connection. The transfer is **end-to-end encrypted with a shared
+passphrase** — AES-256-CBC for confidentiality, HMAC-SHA256 for authentication
+(encrypt-then-MAC), keys derived with PBKDF2. The receiver verifies the HMAC
+**before** decrypting, so a wrong passphrase or a tampered/forged payload is
+rejected and the keychain is left untouched.
+
+The passphrase comes from `CLAUDE_CREDENTIALS_PASSPHRASE`, or you are prompted
+(no echo). **Both ends must use the same passphrase.** It is never passed on the
+command line.
+
+On the **receiving** machine (it must already have logged in once, so the
+keychain entry exists), start the receiver first:
+
+```bash
+export CLAUDE_CREDENTIALS_PASSPHRASE='something both ends share'
+claude-monitor-credentials --receive            # listens on port 47299
+```
+
+Then on the **sending** machine:
+
+```bash
+export CLAUDE_CREDENTIALS_PASSPHRASE='something both ends share'
+claude-monitor-credentials --send 192.168.1.42  # send the full blob
+# or send only the portable OAuth section (omits machine-specific mcpOAuth):
+claude-monitor-credentials --oauth-only --send 192.168.1.42
+```
+
+The two front-ends interoperate (e.g. `claude-credentials.sh --send` →
+`claude-monitor-credentials --receive`). Notes:
+
+- Override the port with `--send-port` / `--port` (default `47299`).
+- A refused connection means nothing is listening (start `--receive` first); a
+  "no route to host" means the target is unreachable (off, asleep, or a
+  different network).
+- `--oauth-only --send` replaces only the OAuth section on the receiver; without
+  it the **entire** blob (including `mcpOAuth`) is replaced.
+
 ## How it works
 
 ### State management
