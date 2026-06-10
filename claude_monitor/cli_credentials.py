@@ -58,15 +58,21 @@ def _err(msg: str) -> None:
 
 
 def _get_passphrase() -> str:
-    """Return the transfer passphrase from the env, else prompt; never from argv."""
+    """Return the transfer passphrase from the env, else prompt; never from argv.
+
+    An empty passphrase is rejected (whether from an unset/empty env var or a
+    bare Enter at the prompt) — an empty shared secret would defeat encryption.
+    """
     pw = os.environ.get("CLAUDE_CREDENTIALS_PASSPHRASE")
-    if pw:
-        return pw
-    if not sys.stdin.isatty():
-        raise creds.CredentialsError(
-            "no passphrase: set CLAUDE_CREDENTIALS_PASSPHRASE or run interactively"
-        )
-    return getpass.getpass("Passphrase: ")
+    if not pw:
+        if not sys.stdin.isatty():
+            raise creds.CredentialsError(
+                "no passphrase: set CLAUDE_CREDENTIALS_PASSPHRASE or run interactively"
+            )
+        pw = getpass.getpass("Passphrase: ")
+    if not pw:
+        raise creds.CredentialsError("empty passphrase not allowed")
+    return pw
 
 
 def _build_parser() -> argparse.ArgumentParser:

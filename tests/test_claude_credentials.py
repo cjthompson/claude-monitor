@@ -5,6 +5,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 from claude_monitor import transfer_crypto as tc
 
 SCRIPT = Path(__file__).resolve().parents[1] / "claude-credentials.sh"
@@ -354,4 +356,68 @@ def test_receive_real_tcp_times_out_on_idle_peer(tmp_path):
             proc.kill()
     assert proc.returncode != 0
     assert "idle" in proc.stderr.read().lower()
+    assert not capture.exists()
+
+
+def test_bash_rejects_empty_interactive_passphrase(tmp_path):
+    # A bare Enter at the prompt must be rejected, not used as the shared secret.
+    # Drive --send over a real pty (so the script prompts) and feed an empty line;
+    # get_passphrase rejects before any network connection happens.
+    pty = pytest.importorskip("pty")
+    import select
+
+    env, capture = _real_python_env(tmp_path)
+    del env["CLAUDE_CREDENTIALS_PASSPHRASE"]
+
+    pid, fd = pty.fork()
+    if pid == 0:  # child: bash sees a tty on stdin and prompts
+        try:
+            os.chdir(str(SCRIPT.parent))
+            os.execvpe(
+                "bash",
+                ["bash", str(SCRIPT), "--send", "127.0.0.1", "--send-port", "59998"],
+                env,
+            )
+        except Exception:
+            os._exit(127)
+
+    output = b""
+    try:
+        os.write(fd, b"\n")  # empty passphrase + Enter
+        for _ in range(40):
+            r, _w, _e = select.select([fd], [], [], 0.25)
+            if not r:
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+            if b"empty passphrase" in output:
+                break
+        os.waitpid(pid, 0)
+    finally:
+        os.close(fd)
+
+    assert b"empty passphrase" in output, output
+    assert not capture.exists()  # rejected before reading/sending anything
+
+
+def test_receive_real_tcp_rejects_malformed_frame(tmp_path):
+    env, capture = _real_python_env(tmp_path)
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(b"not-a-valid-frame\nzzzz\nextra\n")  # wrong shape + bad tag
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode != 0
+    assert "malformed transfer frame" in proc.stderr.read().lower()
     assert not capture.exists()

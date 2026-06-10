@@ -70,7 +70,7 @@ def decrypt(frame: str, passphrase: str) -> str:
     passphrase or a forged/tampered frame is rejected without ever decrypting.
     """
     lines = [ln for ln in frame.splitlines() if ln.strip()]
-    if len(lines) < 2:
+    if len(lines) != 2:  # exactly base64-blob + hex-tag; reject extras
         raise DecryptionError("malformed transfer frame")
     try:
         blob = base64.b64decode(lines[0], validate=True)
@@ -80,6 +80,8 @@ def decrypt(frame: str, passphrase: str) -> str:
         raise DecryptionError("malformed transfer frame")
 
     tag_hex = lines[1].strip()
+    if len(tag_hex) != 64 or not all(c in "0123456789abcdef" for c in tag_hex.lower()):
+        raise DecryptionError("malformed transfer frame")
     salt, ciphertext = blob[:SALT_LEN], blob[SALT_LEN:]
     enc_key, iv, mac_key = _derive(passphrase, salt)
 

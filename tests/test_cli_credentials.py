@@ -423,3 +423,41 @@ def test_refresh_without_credentials_errors(monkeypatch, capsys):
 
     assert rc == 1
     assert "no oauth token" in capsys.readouterr().err.lower()
+
+
+# ── Passphrase resolution (_get_passphrase) ───────────────────────────────────
+
+
+class _FakeStdin:
+    def __init__(self, tty):
+        self._tty = tty
+
+    def isatty(self):
+        return self._tty
+
+
+def test_passphrase_from_env(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PASSPHRASE", "hunter2")
+    assert cli_credentials._get_passphrase() == "hunter2"
+
+
+def test_empty_env_passphrase_treated_as_missing(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PASSPHRASE", "")
+    monkeypatch.setattr(cli_credentials.sys, "stdin", _FakeStdin(tty=False))
+    with pytest.raises(cli_credentials.creds.CredentialsError, match="no passphrase"):
+        cli_credentials._get_passphrase()
+
+
+def test_empty_interactive_passphrase_rejected(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CREDENTIALS_PASSPHRASE", raising=False)
+    monkeypatch.setattr(cli_credentials.sys, "stdin", _FakeStdin(tty=True))
+    monkeypatch.setattr(cli_credentials.getpass, "getpass", lambda *a, **k: "")  # bare Enter
+    with pytest.raises(cli_credentials.creds.CredentialsError, match="empty passphrase"):
+        cli_credentials._get_passphrase()
+
+
+def test_interactive_passphrase_accepted(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CREDENTIALS_PASSPHRASE", raising=False)
+    monkeypatch.setattr(cli_credentials.sys, "stdin", _FakeStdin(tty=True))
+    monkeypatch.setattr(cli_credentials.getpass, "getpass", lambda *a, **k: "typed-secret")
+    assert cli_credentials._get_passphrase() == "typed-secret"

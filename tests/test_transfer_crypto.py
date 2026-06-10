@@ -83,6 +83,20 @@ def test_malformed_frame_rejected(bad):
         tc.decrypt(bad, PASSPHRASE)
 
 
+def test_extra_lines_rejected():
+    # The wire format is exactly two lines; a third line must be rejected, not ignored.
+    frame = tc.encrypt(PLAINTEXT, PASSPHRASE)
+    with pytest.raises(tc.DecryptionError, match="malformed"):
+        tc.decrypt(frame.rstrip("\n") + "\nextra-line\n", PASSPHRASE)
+
+
+@pytest.mark.parametrize("bad_tag", ["z" * 64, "abc", "a" * 63, "a" * 65])
+def test_malformed_tag_shape_rejected(bad_tag):
+    b64 = tc.encrypt(PLAINTEXT, PASSPHRASE).splitlines()[0]
+    with pytest.raises(tc.DecryptionError, match="malformed"):
+        tc.decrypt(f"{b64}\n{bad_tag}\n", PASSPHRASE)
+
+
 # ── Interop with the real openssl binary (LibreSSL on macOS) ──────────────────
 # Mirrors exactly what claude-credentials.sh does: PBKDF2/HMAC via stdlib,
 # AES-256-CBC via `openssl enc -K/-iv -nosalt`.

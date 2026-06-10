@@ -100,6 +100,12 @@ get_passphrase() {
     echo "Error: no passphrase: set CLAUDE_CREDENTIALS_PASSPHRASE or run interactively" >&2
     exit 1
   fi
+  # An empty shared secret would defeat encryption — reject it (matches the
+  # env path, where an unset/empty var is already treated as missing).
+  if [[ -z "$PASS" ]]; then
+    echo "Error: empty passphrase not allowed" >&2
+    exit 1
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -317,7 +323,7 @@ sys.stdout.buffer.write(b"".join(chunks))
 import base64, hashlib, hmac, os, subprocess, sys
 pw = os.environ["CRED_PASS"].encode()
 lines = [ln for ln in sys.stdin.read().splitlines() if ln.strip()]
-if len(lines) < 2:
+if len(lines) != 2:
     sys.exit("Error: malformed transfer frame")
 try:
     blob = base64.b64decode(lines[0], validate=True)
@@ -325,11 +331,14 @@ except Exception:
     sys.exit("Error: malformed transfer frame")
 if len(blob) <= 16:
     sys.exit("Error: malformed transfer frame")
+tag_hex = lines[1].strip()
+if len(tag_hex) != 64 or any(c not in "0123456789abcdef" for c in tag_hex.lower()):
+    sys.exit("Error: malformed transfer frame")
 salt, ct = blob[:16], blob[16:]
 material = hashlib.pbkdf2_hmac("sha256", pw, salt, 600000, 80)
 enc_key, iv, mac_key = material[0:32], material[32:48], material[48:80]
 expected = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
-if not hmac.compare_digest(expected, lines[1].strip()):
+if not hmac.compare_digest(expected, tag_hex):
     sys.exit("Error: authentication failed (wrong passphrase or corrupted/forged data)")
 pt = subprocess.run(
     ["openssl", "enc", "-d", "-aes-256-cbc", "-K", enc_key.hex(), "-iv", iv.hex(), "-nosalt"],

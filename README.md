@@ -174,8 +174,9 @@ Manage the Claude Code OAuth blob in the macOS Keychain, and move it between
 machines. Two interchangeable front-ends share one wire format:
 
 - `claude-monitor-credentials` — installed console command (pure Python).
-- `./claude-credentials.sh` — standalone bash (only needs stock macOS:
-  `openssl`, `python3`, `security`).
+- `./claude-credentials.sh` — standalone bash. Uses `openssl`, `python3`, and
+  `security` (all stock macOS); the `--simple`, `--oauth-only`, and `--refresh`
+  modes also require [`jq`](https://jqlang.github.io/jq/) (`brew install jq`).
 
 Common modes (mutually exclusive):
 
@@ -224,8 +225,11 @@ The two front-ends interoperate (e.g. `claude-credentials.sh --send` →
 - A refused connection means nothing is listening (start `--receive` first); a
   "no route to host" means the target is unreachable (off, asleep, or a
   different network).
-- `--oauth-only --send` replaces only the OAuth section on the receiver; without
-  it the **entire** blob (including `mcpOAuth`) is replaced.
+- The receiver always **overwrites its entire** keychain entry with whatever it
+  decrypts — it does not merge. With `--oauth-only --send` it receives only the
+  `claudeAiOauth` section, so any `mcpOAuth` or other keys already on the
+  receiver are **dropped**. Send the full blob (omit `--oauth-only`) if you need
+  to preserve the receiver's other keys.
 
 ## How it works
 
