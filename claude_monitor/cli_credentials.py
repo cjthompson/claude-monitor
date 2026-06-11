@@ -24,12 +24,12 @@ the same passphrase. See claude_monitor.transfer_crypto for the construction.
 """
 
 import argparse
-import errno
 import getpass
 import json
 import logging
 import os
 import socket
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -42,10 +42,12 @@ log = logging.getLogger("claude_monitor.cli_credentials")
 DEFAULT_PORT = 47299
 SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
 
-
-def _errno_name(exc: OSError) -> str:
-    """e.g. 'EHOSTUNREACH (65)' — names the OS error for diagnostics."""
-    return f"{errno.errorcode.get(exc.errno, '?')} ({exc.errno})"
+# --send delegates the outbound TCP write to `nc`, an Apple platform binary that
+# is exempt from macOS Local Network Privacy. A third-party (Homebrew/uv/etc.)
+# venv python is blocked from LAN connect()s (EHOSTUNREACH); nc is not. Only the
+# OUTBOUND hop is gated — --receive (bind/listen/accept) works natively in the
+# venv python, so it is not delegated. Overridable via env for tests.
+NC_BINARY = os.environ.get("CLAUDE_CREDENTIALS_NC", "/usr/bin/nc")
 
 
 def _int_env(name: str, default: int) -> int:
@@ -181,34 +183,29 @@ def _do_import(import_path: str) -> int:
 def _do_send(host: str, port: int, oauth_only: bool) -> int:
     plaintext = creds.oauth_only_json() if oauth_only else creds.read_raw()
     frame = transfer_crypto.encrypt(plaintext, _get_passphrase()).encode()
-    log.debug(
-        "send: target %s:%d, %d-byte encrypted frame, connect timeout %ds",
-        host, port, len(frame), SEND_TIMEOUT,
-    )
-    # TCP: connect() fails loudly if no receiver is listening, and there is no
-    # datagram size cap, so the encrypted frame transfers reliably.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(SEND_TIMEOUT)
+    # Hand the encrypted frame to nc for the outbound TCP write (see NC_BINARY).
+    # nc half-closes its write side on stdin EOF, so the receiver reads to EOF.
+    log.debug("send: target %s:%d via %s, %d-byte frame", host, port, NC_BINARY, len(frame))
     started = time.monotonic()
     try:
-        sock.connect((host, port))
-        elapsed_ms = (time.monotonic() - started) * 1000
-        log.debug("send: connected to %s:%d in %.0f ms", host, port, elapsed_ms)
-        sock.sendall(frame)
-        log.debug("send: wrote %d bytes", len(frame))
-    except OSError as e:
-        # A fast failure here points at the network layer, not this program:
-        # EHOSTUNREACH = host unreachable (often a stale/missing ARP entry, or the
-        # peer asleep); ECONNREFUSED = host up but no --receive listening.
-        log.debug(
-            "send: connect/send to %s:%d failed after %.0f ms — %s: %s",
-            host, port, (time.monotonic() - started) * 1000, _errno_name(e), e.strerror,
+        proc = subprocess.run(
+            [NC_BINARY, "-w", str(SEND_TIMEOUT), host, str(port)],
+            input=frame,
+            capture_output=True,
+            timeout=SEND_TIMEOUT + 5,
         )
-        # Add host:port context the bare errno omits (parity with the bash script).
-        _err(f"Error: could not connect to {host}:{port} — {e}")
+    except FileNotFoundError:
+        _err(f"Error: {NC_BINARY} not found (needed to send)")
         return 1
-    finally:
-        sock.close()
+    except subprocess.TimeoutExpired:
+        _err(f"Error: send to {host}:{port} timed out after {SEND_TIMEOUT}s")
+        return 1
+    if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="replace").strip() or f"nc exited {proc.returncode}"
+        log.debug("send: nc failed after %.0f ms — %s", (time.monotonic() - started) * 1000, detail)
+        _err(f"Error: could not send to {host}:{port} — {detail}")
+        return 1
+    log.debug("send: nc ok in %.0f ms", (time.monotonic() - started) * 1000)
     note = " (oauth-only)" if oauth_only else ""
     _err(f"Sent {len(frame)} encrypted bytes to {host}:{port} via TCP{note}")
     return 0

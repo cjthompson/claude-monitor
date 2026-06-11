@@ -11,6 +11,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -108,6 +109,37 @@ def _recv_all(conn):
     return b"".join(chunks)
 
 
+def _serve_one_frame(srv, holder):
+    """Accept one connection, read to EOF, then CLOSE promptly.
+
+    Closing right after EOF mimics a real --receive (which closes after reading)
+    so the sender's `nc` exits immediately instead of waiting out its -w timeout.
+    """
+    srv.settimeout(15)
+    conn, _addr = srv.accept()
+    try:
+        holder["data"] = _recv_all(conn)
+    finally:
+        conn.close()
+
+
+def _send_collecting(env, port, *extra, stdin=None):
+    """Run --send while a background server collects+closes; return (result, frame_bytes)."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(1)
+    holder = {}
+    th = threading.Thread(target=_serve_one_frame, args=(srv, holder), daemon=True)
+    th.start()
+    try:
+        res = _run(env, "--send", "127.0.0.1", "--send-port", str(port), *extra, stdin=stdin)
+        th.join(timeout=15)
+    finally:
+        srv.close()
+    return res, holder.get("data", b"")
+
+
 def test_no_args_shows_help(cli_env):
     env, _ = cli_env
     res = _run(env)
@@ -157,42 +189,26 @@ def test_simple_prints_token_fields(cli_env):
 
 def test_full_send_transmits_encrypted_blob(cli_env):
     env, _ = cli_env
-    srv, port = _tcp_server()
-    try:
-        res = _run(env, "--send", "127.0.0.1", "--send-port", str(port))
-        assert res.returncode == 0
-        srv.settimeout(5)
-        conn, _addr = srv.accept()
-        data = _recv_all(conn)
-        conn.close()
-        # Wire bytes are an encrypted frame, not the plaintext blob.
-        assert KEYCHAIN_JSON not in data.decode()
-        assert tc.decrypt(data.decode(), PASSPHRASE) == KEYCHAIN_JSON
-        assert f"encrypted bytes to 127.0.0.1:{port} via TCP" in res.stderr
-        assert "(oauth-only)" not in res.stderr
-    finally:
-        srv.close()
+    res, data = _send_collecting(env, _free_port())
+    assert res.returncode == 0
+    # Wire bytes are an encrypted frame, not the plaintext blob.
+    assert KEYCHAIN_JSON not in data.decode()
+    assert tc.decrypt(data.decode(), PASSPHRASE) == KEYCHAIN_JSON
+    assert "encrypted bytes to 127.0.0.1:" in res.stderr and "via TCP" in res.stderr
+    assert "(oauth-only)" not in res.stderr
 
 
 @pytest.mark.parametrize("extra", [("--oauth-only",), ()])
 def test_oauth_only_send_transmits_filtered_payload(cli_env, extra):
     env, _ = cli_env
-    srv, port = _tcp_server()
-    try:
-        res = _run(env, "--send", "127.0.0.1", "--send-port", str(port), *extra)
-        assert res.returncode == 0
-        srv.settimeout(5)
-        conn, _addr = srv.accept()
-        data = _recv_all(conn)
-        conn.close()
-        decrypted = tc.decrypt(data.decode(), PASSPHRASE)
-        if extra:
-            assert json.loads(decrypted) == OAUTH_ONLY
-            assert "(oauth-only)" in res.stderr
-        else:
-            assert decrypted == KEYCHAIN_JSON
-    finally:
-        srv.close()
+    res, data = _send_collecting(env, _free_port(), *extra)
+    assert res.returncode == 0
+    decrypted = tc.decrypt(data.decode(), PASSPHRASE)
+    if extra:
+        assert json.loads(decrypted) == OAUTH_ONLY
+        assert "(oauth-only)" in res.stderr
+    else:
+        assert decrypted == KEYCHAIN_JSON
 
 
 def test_send_without_passphrase_errors(cli_env):
@@ -208,30 +224,43 @@ def test_send_without_passphrase_errors(cli_env):
         srv.close()
 
 
-def test_verbose_send_logs_connection(cli_env):
+def test_verbose_send_logs_via_nc(cli_env):
     env, _ = cli_env
-    srv, port = _tcp_server()
-    try:
-        res = _run(env, "--verbose", "--send", "127.0.0.1", "--send-port", str(port))
-        assert res.returncode == 0
-        conn, _addr = srv.accept()
-        _recv_all(conn)
-        conn.close()
-        assert "[DEBUG]" in res.stderr
-        assert f"connected to 127.0.0.1:{port}" in res.stderr
-    finally:
-        srv.close()
+    res, _data = _send_collecting(env, _free_port(), "--verbose")
+    assert res.returncode == 0
+    assert "[DEBUG]" in res.stderr
+    assert "via" in res.stderr and "nc" in res.stderr  # logs the nc delegate
+    assert "nc ok" in res.stderr
 
 
-def test_verbose_send_logs_errno_name_on_failure(cli_env):
+def test_send_failure_reports_error(cli_env):
     env, _ = cli_env
     port = _free_port()  # nothing is listening here
-    res = _run(env, "--verbose", "--send", "127.0.0.1", "--send-port", str(port))
+    res = _run(env, "--send", "127.0.0.1", "--send-port", str(port))
     assert res.returncode != 0
-    # The diagnostic names the OS error so a stale-ARP/unreachable vs
-    # nobody-listening situation is distinguishable.
-    assert "ECONNREFUSED" in res.stderr
-    assert "could not connect" in res.stderr
+    # nc's own message (e.g. "Connection refused") is surfaced with host:port.
+    assert f"could not send to 127.0.0.1:{port}" in res.stderr
+
+
+def test_send_to_receive_roundtrip(cli_env):
+    """Real nc-based --send into the native --receive — the actual workflow."""
+    env, capture = cli_env
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    res = None
+    try:
+        for _ in range(40):  # retry until the receiver is listening
+            res = _run(env, "--send", "127.0.0.1", "--send-port", str(port))
+            if res.returncode == 0:
+                break
+            time.sleep(0.1)
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert res is not None and res.returncode == 0, res.stderr if res else "no send"
+    assert proc.returncode == 0, proc.stderr.read()
+    assert capture.read_text() == KEYCHAIN_JSON  # decrypted blob written to keychain
 
 
 def test_oauth_only_only_combinable_with_send(cli_env):

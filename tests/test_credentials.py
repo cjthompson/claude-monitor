@@ -7,7 +7,6 @@ import pytest
 
 from claude_monitor import credentials as creds
 
-
 OAUTH = {
     "accessToken": "sk-ant-oat-abc",
     "refreshToken": "sk-ant-ort-xyz",

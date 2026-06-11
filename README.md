@@ -230,6 +230,11 @@ The two front-ends interoperate (e.g. `claude-credentials.sh --send` →
   `claudeAiOauth` section, so any `mcpOAuth` or other keys already on the
   receiver are **dropped**. Send the full blob (omit `--oauth-only`) if you need
   to preserve the receiver's other keys.
+- **macOS Local Network Privacy:** `--send` performs the outbound connection via
+  `/usr/bin/nc` (an Apple platform binary, exempt from Local Network Privacy).
+  A Homebrew/uv/pyenv Python is otherwise blocked from LAN connections with
+  `EHOSTUNREACH`. `--receive` only listens, which isn't gated, so it runs in
+  Python directly. Override the binary with `CLAUDE_CREDENTIALS_NC` if needed.
 
 ## How it works
 
