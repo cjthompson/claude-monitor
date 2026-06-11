@@ -24,8 +24,10 @@ the same passphrase. See claude_monitor.transfer_crypto for the construction.
 """
 
 import argparse
+import errno
 import getpass
 import json
+import logging
 import os
 import socket
 import sys
@@ -35,8 +37,15 @@ from datetime import datetime
 from claude_monitor import credentials as creds
 from claude_monitor import transfer_crypto
 
+log = logging.getLogger("claude_monitor.cli_credentials")
+
 DEFAULT_PORT = 47299
 SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
+
+
+def _errno_name(exc: OSError) -> str:
+    """e.g. 'EHOSTUNREACH (65)' — names the OS error for diagnostics."""
+    return f"{errno.errorcode.get(exc.errno, '?')} ({exc.errno})"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -86,6 +95,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "is rejected and the keychain is left untouched."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true", help="log diagnostic detail to stderr"
     )
     p.add_argument("--raw", action="store_true", help="print the raw keychain blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
@@ -169,14 +181,29 @@ def _do_import(import_path: str) -> int:
 def _do_send(host: str, port: int, oauth_only: bool) -> int:
     plaintext = creds.oauth_only_json() if oauth_only else creds.read_raw()
     frame = transfer_crypto.encrypt(plaintext, _get_passphrase()).encode()
+    log.debug(
+        "send: target %s:%d, %d-byte encrypted frame, connect timeout %ds",
+        host, port, len(frame), SEND_TIMEOUT,
+    )
     # TCP: connect() fails loudly if no receiver is listening, and there is no
     # datagram size cap, so the encrypted frame transfers reliably.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(SEND_TIMEOUT)
+    started = time.monotonic()
     try:
         sock.connect((host, port))
+        elapsed_ms = (time.monotonic() - started) * 1000
+        log.debug("send: connected to %s:%d in %.0f ms", host, port, elapsed_ms)
         sock.sendall(frame)
+        log.debug("send: wrote %d bytes", len(frame))
     except OSError as e:
+        # A fast failure here points at the network layer, not this program:
+        # EHOSTUNREACH = host unreachable (often a stale/missing ARP entry, or the
+        # peer asleep); ECONNREFUSED = host up but no --receive listening.
+        log.debug(
+            "send: connect/send to %s:%d failed after %.0f ms — %s: %s",
+            host, port, (time.monotonic() - started) * 1000, _errno_name(e), e.strerror,
+        )
         # Add host:port context the bare errno omits (parity with the bash script).
         _err(f"Error: could not connect to {host}:{port} — {e}")
         return 1
@@ -195,7 +222,9 @@ def _do_receive(port: int) -> int:
     try:
         srv.bind(("0.0.0.0", port))
         srv.listen(1)
-        conn, _addr = srv.accept()
+        log.debug("receive: bound 0.0.0.0:%d, waiting for one connection", port)
+        conn, addr = srv.accept()
+        log.debug("receive: accepted connection from %s", addr)
         conn.settimeout(RECV_TIMEOUT)
         try:
             chunks = []
@@ -218,6 +247,7 @@ def _do_receive(port: int) -> int:
     finally:
         srv.close()
     frame = b"".join(chunks).decode("utf-8", errors="replace")
+    log.debug("receive: read %d bytes from the connection", len(frame.encode()))
     if not frame.strip():
         _err("Error: Received empty connection")
         return 1
@@ -226,8 +256,10 @@ def _do_receive(port: int) -> int:
     try:
         content = transfer_crypto.decrypt(frame, passphrase).strip()
     except transfer_crypto.DecryptionError as e:
+        log.debug("receive: decryption/verification failed (%s)", e)
         _err(f"Error: {e}; keychain left unchanged")
         return 1
+    log.debug("receive: verified + decrypted %d bytes", len(content.encode()))
     if not content:
         _err("Error: decrypted payload is empty")
         return 1
@@ -264,6 +296,12 @@ def _do_refresh(tokens: tuple[str, str, float]) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="[%(levelname)s] %(message)s",
+        stream=sys.stderr,
+    )
 
     error = _validate(args)
     if error:

@@ -4,6 +4,7 @@
 
 ### Features
 - Encrypt `--send`/`--receive` credential transfer end-to-end (AES-256-CBC + HMAC-SHA256, shared passphrase via `CLAUDE_CREDENTIALS_PASSPHRASE`); wrong passphrase or tampered payload is rejected and the keychain is left untouched (#claude-credentials, #security)
+- Add `-v`/`--verbose` to `claude-monitor-credentials` for connection diagnostics (target, connect timing, and the OS error name on failure, e.g. EHOSTUNREACH vs ECONNREFUSED) (#claude-credentials)
 
 ## 2026-06-09
 

@@ -208,6 +208,32 @@ def test_send_without_passphrase_errors(cli_env):
         srv.close()
 
 
+def test_verbose_send_logs_connection(cli_env):
+    env, _ = cli_env
+    srv, port = _tcp_server()
+    try:
+        res = _run(env, "--verbose", "--send", "127.0.0.1", "--send-port", str(port))
+        assert res.returncode == 0
+        conn, _addr = srv.accept()
+        _recv_all(conn)
+        conn.close()
+        assert "[DEBUG]" in res.stderr
+        assert f"connected to 127.0.0.1:{port}" in res.stderr
+    finally:
+        srv.close()
+
+
+def test_verbose_send_logs_errno_name_on_failure(cli_env):
+    env, _ = cli_env
+    port = _free_port()  # nothing is listening here
+    res = _run(env, "--verbose", "--send", "127.0.0.1", "--send-port", str(port))
+    assert res.returncode != 0
+    # The diagnostic names the OS error so a stale-ARP/unreachable vs
+    # nobody-listening situation is distinguishable.
+    assert "ECONNREFUSED" in res.stderr
+    assert "could not connect" in res.stderr
+
+
 def test_oauth_only_only_combinable_with_send(cli_env):
     env, _ = cli_env
     res = _run(env, "--oauth-only", "--simple")
