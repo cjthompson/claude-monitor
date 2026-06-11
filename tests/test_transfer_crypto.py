@@ -97,6 +97,44 @@ def test_malformed_tag_shape_rejected(bad_tag):
         tc.decrypt(f"{b64}\n{bad_tag}\n", PASSPHRASE)
 
 
+def _authenticated_frame(passphrase: str, salt: bytes, ciphertext: bytes) -> str:
+    """Build a frame with a VALID HMAC over arbitrary ``ciphertext`` bytes.
+
+    Simulates a buggy/mismatched peer that shares the passphrase (so the tag
+    verifies) yet emits a payload Python cannot actually decrypt. Such a frame
+    passes the HMAC gate and reaches the decrypt path.
+    """
+    _enc_key, _iv, mac_key = tc._derive(passphrase, salt)
+    blob = salt + ciphertext
+    tag = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
+    return f"{base64.b64encode(blob).decode()}\n{tag}\n"
+
+
+def test_authenticated_frame_with_bad_cipher_length_rejected():
+    # Valid HMAC, but the ciphertext is not a multiple of the AES block size —
+    # the cipher raises ValueError, which must surface as DecryptionError.
+    frame = _authenticated_frame(PASSPHRASE, bytes.fromhex(KDF_SALT_HEX), b"short")
+    with pytest.raises(tc.DecryptionError):
+        tc.decrypt(frame, PASSPHRASE)
+
+
+def test_authenticated_frame_with_non_utf8_plaintext_rejected():
+    # Valid HMAC and valid PKCS7, but the plaintext is not UTF-8 — the final
+    # .decode() raises UnicodeDecodeError, which must surface as DecryptionError.
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    salt = bytes.fromhex(KDF_SALT_HEX)
+    enc_key, iv, _mac_key = tc._derive(PASSPHRASE, salt)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(b"\xff\xfe\xfd\xfc") + padder.finalize()
+    encryptor = Cipher(algorithms.AES(enc_key), modes.CBC(iv)).encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+    frame = _authenticated_frame(PASSPHRASE, salt, ciphertext)
+    with pytest.raises(tc.DecryptionError):
+        tc.decrypt(frame, PASSPHRASE)
+
+
 # ── Interop with the real openssl binary (LibreSSL on macOS) ──────────────────
 # Mirrors exactly what claude-credentials.sh does: PBKDF2/HMAC via stdlib,
 # AES-256-CBC via `openssl enc -K/-iv -nosalt`.

@@ -4,8 +4,11 @@
 
 ### Features
 - Encrypt `--send`/`--receive` credential transfer end-to-end (AES-256-CBC + HMAC-SHA256, shared passphrase via `CLAUDE_CREDENTIALS_PASSPHRASE`); wrong passphrase or tampered payload is rejected and the keychain is left untouched (#claude-credentials, #security)
-- `claude-monitor-credentials --send` performs the outbound TCP write via `/usr/bin/nc` so it works under macOS Local Network Privacy (a Homebrew/uv Python is blocked from LAN connections; `nc` is an exempt platform binary). `--receive` only listens, which isn't gated, so it stays in Python. Override with `CLAUDE_CREDENTIALS_NC` (#claude-credentials, #macos)
+- Both `--send` frontends (`claude-monitor-credentials` and `claude-credentials.sh`) perform the outbound TCP write via `/usr/bin/nc` so they work under macOS Local Network Privacy (a Homebrew/uv Python is blocked from LAN connections; `nc` is an exempt platform binary). `--receive` only listens, which isn't gated, so it stays in Python. Override with `CLAUDE_CREDENTIALS_NC` (#claude-credentials, #macos)
 - Add `-v`/`--verbose` to `claude-monitor-credentials` for send/receive diagnostics (target, timing, and the underlying error on failure) (#claude-credentials)
+
+### Fixes
+- `--receive` now rejects an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding or non-UTF-8 plaintext) cleanly as a decryption error instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
 
 ## 2026-06-09
 

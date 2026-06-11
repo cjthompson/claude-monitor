@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -181,6 +182,18 @@ def _recv_all(conn):
     return b"".join(chunks)
 
 
+def _serve_one(srv, holder):
+    # Accept, read to EOF, and close PROMPTLY. nc half-closes its write side on
+    # stdin EOF, then waits (up to -w) for the peer's FIN before exiting; closing
+    # here sends that FIN so nc returns immediately instead of burning the timeout.
+    srv.settimeout(10)
+    conn, _addr = srv.accept()
+    try:
+        holder.append(_recv_all(conn))
+    finally:
+        conn.close()
+
+
 def _free_port():
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
@@ -214,6 +227,9 @@ def test_send_real_tcp_delivers_encrypted_full_blob(tmp_path):
     # (this is the bash->python interop check, against the real openssl binary).
     env, _capture = _real_python_env(tmp_path)
     srv, port = _tcp_server()
+    holder = []
+    server = threading.Thread(target=_serve_one, args=(srv, holder), daemon=True)
+    server.start()
     try:
         result = subprocess.run(
             ["bash", str(SCRIPT), "--send", "127.0.0.1", "--send-port", str(port)],
@@ -223,11 +239,9 @@ def test_send_real_tcp_delivers_encrypted_full_blob(tmp_path):
             text=True,
             check=False,
         )
+        server.join(timeout=10)
         assert result.returncode == 0, result.stderr
-        srv.settimeout(5)
-        conn, _addr = srv.accept()
-        data = _recv_all(conn)
-        conn.close()
+        data = holder[0]
         assert KEYCHAIN_JSON not in data.decode()  # on the wire it's encrypted
         assert tc.decrypt(data.decode(), PASSPHRASE) == KEYCHAIN_JSON
         assert "encrypted bytes" in result.stderr and "via TCP" in result.stderr
@@ -238,6 +252,9 @@ def test_send_real_tcp_delivers_encrypted_full_blob(tmp_path):
 def test_send_real_tcp_oauth_only_delivers_filtered_payload(tmp_path):
     env, _capture = _real_python_env(tmp_path)
     srv, port = _tcp_server()
+    holder = []
+    server = threading.Thread(target=_serve_one, args=(srv, holder), daemon=True)
+    server.start()
     try:
         result = subprocess.run(
             ["bash", str(SCRIPT), "--oauth-only", "--send", "127.0.0.1", "--send-port", str(port)],
@@ -247,16 +264,46 @@ def test_send_real_tcp_oauth_only_delivers_filtered_payload(tmp_path):
             text=True,
             check=False,
         )
+        server.join(timeout=10)
         assert result.returncode == 0, result.stderr
-        srv.settimeout(5)
-        conn, _addr = srv.accept()
-        data = _recv_all(conn)
-        conn.close()
-        decrypted = tc.decrypt(data.decode(), PASSPHRASE)
+        decrypted = tc.decrypt(holder[0].decode(), PASSPHRASE)
         assert json.loads(decrypted) == {"claudeAiOauth": json.loads(KEYCHAIN_JSON)["claudeAiOauth"]}
         assert "(oauth-only)" in result.stderr
     finally:
         srv.close()
+
+
+def test_send_uses_nc_delegate(tmp_path):
+    # The README/CHANGELOG advertise that --send delegates the outbound socket
+    # to /usr/bin/nc (an Apple platform binary exempt from macOS Local Network
+    # Privacy). Prove the bash frontend actually does so — a fake nc, injected
+    # via CLAUDE_CREDENTIALS_NC, must receive the host/port and the frame.
+    env, _capture = _real_python_env(tmp_path)
+    nc_args = tmp_path / "nc-args"
+    nc_stdin = tmp_path / "nc-stdin"
+    fake_nc = tmp_path / "fake-nc"
+    _write_executable(
+        fake_nc,
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$@" > "{nc_args}"
+cat > "{nc_stdin}"
+""",
+    )
+    env["CLAUDE_CREDENTIALS_NC"] = str(fake_nc)
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--send", "10.0.0.5", "--send-port", "47000"],
+        cwd=SCRIPT.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert nc_args.exists(), f"--send did not invoke the nc delegate; stderr={result.stderr}"
+    assert result.returncode == 0, result.stderr
+    args = nc_args.read_text()
+    assert "10.0.0.5" in args and "47000" in args  # nc got the host + port
+    # nc received the encrypted frame on stdin, and it decrypts to the blob.
+    assert tc.decrypt(nc_stdin.read_text(), PASSPHRASE) == KEYCHAIN_JSON
 
 
 def test_send_real_tcp_requires_passphrase(tmp_path):

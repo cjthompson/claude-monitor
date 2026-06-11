@@ -21,6 +21,11 @@ SEND_PORT="47299"
 RECEIVE_MODE=false
 RECEIVE_PORT="47299"
 
+# --send delegates the outbound socket to nc (see the --send block for why).
+# Default to Apple's platform binary; override for a different nc or in tests.
+NC_BIN="${CLAUDE_CREDENTIALS_NC:-/usr/bin/nc}"
+SEND_TIMEOUT="${CLAUDE_CREDENTIALS_SEND_TIMEOUT:-10}"
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--raw | --simple | --refresh | --oauth-only]
@@ -61,6 +66,10 @@ Modes:
                     Default port: 47299. Override with --send-port.
                     The receiver must be running --receive first; if nothing
                     is listening, --send fails with a connection error.
+                    The outbound socket is made via nc (default /usr/bin/nc),
+                    not python, so it works under macOS Local Network Privacy
+                    (which blocks LAN connect() from a Homebrew/uv python).
+                    Override the binary with CLAUDE_CREDENTIALS_NC.
 
   --receive         Listen for ONE TCP connection on the configured port
                     (default 47299, override with --port), verify+decrypt the
@@ -211,10 +220,10 @@ if [[ -n "$IMPORT_PATH" ]]; then
 fi
 
 # --send: encrypt the keychain bytes, then send the frame over a TCP connection.
-# TCP confirms delivery — connect() fails if no receiver is listening. The
-# receiver must be running --receive first. Encryption: see transfer_crypto.py
-# (AES-256-CBC + HMAC-SHA256, PBKDF2). AES is done by openssl; KDF/HMAC/base64
-# by the system python3 stdlib — both stock on macOS, no extra deps.
+# Encryption: see transfer_crypto.py (AES-256-CBC + HMAC-SHA256, PBKDF2). AES is
+# done by openssl; KDF/HMAC/base64 by the system python3 stdlib — both stock on
+# macOS, no extra deps. The *encryption* is local compute (no network), so any
+# python3 works; only the outbound socket is delegated to nc (see below).
 if [[ -n "$SEND_HOST" ]]; then
   keychain_bytes=$(security find-generic-password -s "$SERVICE" -w 2>/dev/null) || {
     echo "Error: No credentials found in Keychain" >&2; exit 1
@@ -244,22 +253,21 @@ tag = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
 sys.stdout.write(base64.b64encode(blob).decode() + "\n" + tag + "\n")
 ')
 
-  # Send the frame over TCP.
-  printf '%s' "$frame" | python3 -c '
-import socket, sys
-data = sys.stdin.buffer.read()
-host = sys.argv[1]
-port = int(sys.argv[2])
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.settimeout(10)
-try:
-    sock.connect((host, port))
-    sock.sendall(data)
-except OSError as e:
-    sys.exit(f"Error: could not connect to {host}:{port} — {e}")
-finally:
-    sock.close()
-' "$SEND_HOST" "$SEND_PORT"
+  # Send the frame over TCP via nc. The outbound socket is delegated to nc
+  # (default /usr/bin/nc) instead of an inline python3 socket because on macOS
+  # Sequoia+ Local Network Privacy blocks LAN connect() from a Homebrew/uv/pyenv
+  # python3 (commonly first on PATH) — it fails instantly with EHOSTUNREACH.
+  # /usr/bin/nc is an Apple platform binary and is exempt. nc half-closes its
+  # write side on stdin EOF, so the receiver sees EOF and finishes; -w bounds
+  # the connect and final-read wait. Override the binary with CLAUDE_CREDENTIALS_NC.
+  if ! command -v "$NC_BIN" >/dev/null 2>&1; then
+    echo "Error: nc not found ($NC_BIN); set CLAUDE_CREDENTIALS_NC to your nc path" >&2
+    exit 1
+  fi
+  if ! printf '%s' "$frame" | "$NC_BIN" -w "$SEND_TIMEOUT" "$SEND_HOST" "$SEND_PORT"; then
+    echo "Error: could not send to $SEND_HOST:$SEND_PORT (is --receive running there?)" >&2
+    exit 1
+  fi
 
   byte_count=$(printf '%s' "$frame" | wc -c | tr -d ' ')
   echo "Sent $byte_count encrypted bytes to $SEND_HOST:$SEND_PORT via TCP$mode_note" >&2

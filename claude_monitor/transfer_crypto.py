@@ -91,7 +91,15 @@ def decrypt(frame: str, passphrase: str) -> str:
             "authentication failed (wrong passphrase or corrupted/forged data)"
         )
 
-    decryptor = Cipher(algorithms.AES(enc_key), modes.CBC(iv)).decryptor()
-    padded = decryptor.update(ciphertext) + decryptor.finalize()
-    unpadder = padding.PKCS7(_BLOCK_BITS).unpadder()
-    return (unpadder.update(padded) + unpadder.finalize()).decode()
+    # The HMAC gate above stops forgery, but a buggy or version-mismatched peer
+    # that shares the passphrase can still produce a valid-tag frame whose
+    # ciphertext won't decrypt (bad block length / padding) or whose plaintext
+    # isn't UTF-8. Convert those to DecryptionError so the contract holds: any
+    # failure raises DecryptionError, never a raw cryptography/codec exception.
+    try:
+        decryptor = Cipher(algorithms.AES(enc_key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = padding.PKCS7(_BLOCK_BITS).unpadder()
+        return (unpadder.update(padded) + unpadder.finalize()).decode()
+    except (ValueError, UnicodeDecodeError) as e:
+        raise DecryptionError("authenticated frame failed to decrypt") from e
