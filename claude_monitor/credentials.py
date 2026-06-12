@@ -2,7 +2,8 @@
 
 Single source of truth for reading/writing the ``Claude Code-credentials``
 Keychain entry and refreshing OAuth tokens. Used by both the usage bar
-(``usage.py``) and the standalone ``credentials-helper.py`` CLI.
+(``usage.py``) and the ``claude-monitor-credentials`` CLI
+(``claude_monitor.cli_credentials``).
 
 stdlib only — shells out to the ``security`` binary (no ``keyring`` dependency),
 matching the rest of the project.

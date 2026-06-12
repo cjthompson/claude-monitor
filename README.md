@@ -82,7 +82,7 @@ python3 install.py
 The install script:
 
 1. Creates a `.venv` and installs the package in editable mode
-2. Symlinks `claude-monitor` and `claude-monitor-hook` to `~/.local/bin/`
+2. Symlinks `claude-monitor`, `claude-monitor-hook`, `claude-monitor-statusline`, and `claude-monitor-credentials` to `~/.local/bin/`
 3. Configures Claude Code hooks in `~/.claude/settings.json` (interactive — asks before writing)
 
 Make sure `~/.local/bin` is on your `$PATH`.

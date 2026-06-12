@@ -9,6 +9,7 @@
 
 ### Fixes
 - Both `--receive` frontends (`claude-monitor-credentials` and `claude-credentials.sh`) now reject an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding or non-UTF-8 plaintext) cleanly as a decryption error instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
+- `claude-credentials.sh --receive` now rejects an empty/whitespace decrypted payload instead of overwriting the keychain entry with nothing — a data-loss guard matching the Python CLI (#claude-credentials, #security)
 
 ## 2026-06-09
 

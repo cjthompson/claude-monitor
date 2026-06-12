@@ -362,6 +362,13 @@ sys.stdout.buffer.write(dec.stdout)
   }
   content="$(printf '%s' "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
+  # An empty/whitespace-only payload (even one with a valid HMAC) must never be
+  # written — that would overwrite the keychain entry with nothing. Reject it.
+  if [[ -z "$content" ]]; then
+    echo "Error: decrypted payload is empty; keychain left unchanged" >&2
+    exit 1
+  fi
+
   # Reuse the --import write path: discover account, write.
   account=$(security find-generic-password -s "$SERVICE" 2>/dev/null \
     | grep '"acct"' | sed 's/.*<blob>="\{0,1\}//' | sed 's/"\{0,1\}$//')

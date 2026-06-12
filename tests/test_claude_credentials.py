@@ -455,6 +455,29 @@ def test_bash_rejects_empty_interactive_passphrase(tmp_path):
     assert not capture.exists()  # rejected before reading/sending anything
 
 
+def test_receive_real_tcp_rejects_empty_decrypted_payload(tmp_path):
+    # A valid-HMAC frame whose plaintext is empty must NOT overwrite the keychain
+    # with nothing. Without a guard, `security add-generic-password -w ""` would
+    # wipe the receiver's credentials — reject it and leave them untouched.
+    env, capture = _real_python_env(tmp_path)
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    frame = tc.encrypt("", PASSPHRASE).encode()  # authentic, but decrypts to ""
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(frame)
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    err = proc.stderr.read()
+    assert proc.returncode != 0
+    assert "empty" in err.lower()
+    assert not capture.exists()  # keychain left unchanged
+
+
 def test_receive_real_tcp_rejects_authenticated_undecryptable_frame(tmp_path):
     # Valid HMAC (the peer knows the passphrase) but the ciphertext can't be
     # decrypted — length is not a multiple of the AES block. The bash receiver
