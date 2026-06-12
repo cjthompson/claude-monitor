@@ -37,3 +37,12 @@ def test_symlink_credentials_matches_pyproject_entry_point():
     # The installer must expose exactly the console scripts declared in pyproject.
     pyproject = (Path(install.__file__).parent / "pyproject.toml").read_text()
     assert 'claude-monitor-credentials = "claude_monitor.cli_credentials:main"' in pyproject
+
+
+def test_python_version_gate_boundary():
+    # The pip-fallback path requires Python >= 3.12 (pyproject's requires-python).
+    # uv's path provisions its own interpreter, so this is intentionally not an
+    # unconditional top-level guard — only the boundary is locked here.
+    assert not install.python_meets_minimum((3, 11, 9))
+    assert install.python_meets_minimum((3, 12, 0))
+    assert install.python_meets_minimum((3, 14, 1))
