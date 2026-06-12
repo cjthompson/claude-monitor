@@ -184,7 +184,11 @@ def _do_send(host: str, port: int, oauth_only: bool) -> int:
     plaintext = creds.oauth_only_json() if oauth_only else creds.read_raw()
     frame = transfer_crypto.encrypt(plaintext, _get_passphrase()).encode()
     # Hand the encrypted frame to nc for the outbound TCP write (see NC_BINARY).
-    # nc half-closes its write side on stdin EOF, so the receiver reads to EOF.
+    # nc half-closes its write side on stdin EOF, so the receiver reads to EOF;
+    # the send->receive roundtrip test pins this (it would hang otherwise).
+    # Do NOT add `-N`: on macOS, nc is Apple's variant where `-N num_probes` is
+    # --apple-tcp-adp-wtimo (needs a numeric arg), not OpenBSD's shutdown-on-EOF
+    # flag — passing it errors with "invalid tcp adaptive write timeout value".
     log.debug("send: target %s:%d via %s, %d-byte frame", host, port, NC_BINARY, len(frame))
     started = time.monotonic()
     try:

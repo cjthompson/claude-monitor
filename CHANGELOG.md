@@ -8,8 +8,8 @@
 - Add `-v`/`--verbose` to `claude-monitor-credentials` for send/receive diagnostics (target, timing, and the underlying error on failure) (#claude-credentials)
 
 ### Fixes
-- Both `--receive` frontends (`claude-monitor-credentials` and `claude-credentials.sh`) now reject an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding or non-UTF-8 plaintext) cleanly as a decryption error instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
-- Both `--receive` frontends now reject a decrypted payload that doesn't parse as JSON (empty, whitespace, truncated, or garbage) instead of overwriting the keychain entry — a data-loss guard, since the credential blob is always JSON (#claude-credentials, #security)
+- Both `--receive` frontends (`claude-monitor-credentials` and `claude-credentials.sh`) now reject an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding) cleanly instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
+- Both `--receive` frontends now reject a decrypted payload that isn't a valid JSON credential blob (empty, whitespace, truncated, non-UTF-8, or otherwise non-JSON) before it can overwrite the keychain entry — a data-loss guard, since the blob is always JSON (#claude-credentials, #security)
 
 ## 2026-06-09
 

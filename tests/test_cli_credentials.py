@@ -243,7 +243,13 @@ def test_send_failure_reports_error(cli_env):
 
 
 def test_send_to_receive_roundtrip(cli_env):
-    """Real nc-based --send into the native --receive — the actual workflow."""
+    """Real nc-based --send into the native --receive — the actual workflow.
+
+    Also pins nc's EOF behavior: the receiver reads until EOF, so if `nc -w`
+    did not half-close its write side on stdin EOF the receiver would block
+    until its idle timeout and proc.wait() below would expire. It completes
+    promptly, proving no `-N` flag is needed (and macOS nc has no such flag).
+    """
     env, capture = cli_env
     port = _free_port()
     proc = _start_receiver(env, port)

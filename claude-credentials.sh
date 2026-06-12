@@ -260,6 +260,8 @@ sys.stdout.write(base64.b64encode(blob).decode() + "\n" + tag + "\n")
   # /usr/bin/nc is an Apple platform binary and is exempt. nc half-closes its
   # write side on stdin EOF, so the receiver sees EOF and finishes; -w bounds
   # the connect and final-read wait. Override the binary with CLAUDE_CREDENTIALS_NC.
+  # Do NOT add `-N`: on macOS, nc's `-N num_probes` is --apple-tcp-adp-wtimo
+  # (needs a numeric arg), not OpenBSD's shutdown-on-EOF flag — it would error.
   if ! command -v "$NC_BIN" >/dev/null 2>&1; then
     echo "Error: nc not found ($NC_BIN); set CLAUDE_CREDENTIALS_NC to your nc path" >&2
     exit 1
