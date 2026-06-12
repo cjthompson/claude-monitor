@@ -348,10 +348,15 @@ enc_key, iv, mac_key = material[0:32], material[32:48], material[48:80]
 expected = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
 if not hmac.compare_digest(expected, tag_hex):
     sys.exit("Error: authentication failed (wrong passphrase or corrupted/forged data)")
-pt = subprocess.run(
+# The HMAC passed, but a buggy/mismatched peer can still send ciphertext that
+# openssl cannot decrypt (bad block length/padding). Report that cleanly instead
+# of letting CalledProcessError dump a traceback; the keychain stays untouched.
+dec = subprocess.run(
     ["openssl", "enc", "-d", "-aes-256-cbc", "-K", enc_key.hex(), "-iv", iv.hex(), "-nosalt"],
-    input=ct, capture_output=True, check=True).stdout
-sys.stdout.buffer.write(pt)
+    input=ct, capture_output=True)
+if dec.returncode != 0:
+    sys.exit("Error: authenticated frame failed to decrypt")
+sys.stdout.buffer.write(dec.stdout)
 ') || {
     echo "Keychain left unchanged." >&2; exit 1
   }

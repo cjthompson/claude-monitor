@@ -8,7 +8,7 @@
 - Add `-v`/`--verbose` to `claude-monitor-credentials` for send/receive diagnostics (target, timing, and the underlying error on failure) (#claude-credentials)
 
 ### Fixes
-- `--receive` now rejects an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding or non-UTF-8 plaintext) cleanly as a decryption error instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
+- Both `--receive` frontends (`claude-monitor-credentials` and `claude-credentials.sh`) now reject an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding or non-UTF-8 plaintext) cleanly as a decryption error instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
 
 ## 2026-06-09
 

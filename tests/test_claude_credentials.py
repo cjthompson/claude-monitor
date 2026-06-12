@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -450,6 +453,35 @@ def test_bash_rejects_empty_interactive_passphrase(tmp_path):
 
     assert b"empty passphrase" in output, output
     assert not capture.exists()  # rejected before reading/sending anything
+
+
+def test_receive_real_tcp_rejects_authenticated_undecryptable_frame(tmp_path):
+    # Valid HMAC (the peer knows the passphrase) but the ciphertext can't be
+    # decrypted — length is not a multiple of the AES block. The bash receiver
+    # must reject it with a clean message, NOT a raw Python/openssl traceback,
+    # and leave the keychain unchanged. (Parity with the Python decrypt path.)
+    env, capture = _real_python_env(tmp_path)
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    salt = bytes(range(16))
+    _enc_key, _iv, mac_key = tc._derive(PASSPHRASE, salt)
+    blob = salt + b"short"  # 5 bytes -> not a multiple of the block size
+    tag = hmac.new(mac_key, blob, hashlib.sha256).hexdigest()
+    frame = (base64.b64encode(blob).decode() + "\n" + tag + "\n").encode()
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(frame)
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    err = proc.stderr.read()
+    assert proc.returncode != 0
+    assert "Traceback" not in err, err  # clean message, not a raw traceback
+    assert "keychain left unchanged" in err.lower()
+    assert not capture.exists()
 
 
 def test_receive_real_tcp_rejects_malformed_frame(tmp_path):
