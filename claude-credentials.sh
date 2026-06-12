@@ -328,7 +328,7 @@ sys.stdout.buffer.write(b"".join(chunks))
   # Verify+decrypt BEFORE touching the keychain. A wrong passphrase or a
   # forged/tampered frame is rejected here, leaving credentials untouched.
   content=$(printf '%s' "$received" | CRED_PASS="$PASS" python3 -c '
-import base64, hashlib, hmac, os, subprocess, sys
+import base64, hashlib, hmac, json, os, subprocess, sys
 pw = os.environ["CRED_PASS"].encode()
 lines = [ln for ln in sys.stdin.read().splitlines() if ln.strip()]
 if len(lines) != 2:
@@ -356,18 +356,17 @@ dec = subprocess.run(
     input=ct, capture_output=True)
 if dec.returncode != 0:
     sys.exit("Error: authenticated frame failed to decrypt")
+# The credential blob is always JSON. Reject anything else (empty, truncated,
+# or non-JSON) before it can overwrite the keychain entry.
+try:
+    json.loads(dec.stdout)
+except ValueError:
+    sys.exit("Error: decrypted payload is not valid JSON")
 sys.stdout.buffer.write(dec.stdout)
 ') || {
     echo "Keychain left unchanged." >&2; exit 1
   }
   content="$(printf '%s' "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-
-  # An empty/whitespace-only payload (even one with a valid HMAC) must never be
-  # written — that would overwrite the keychain entry with nothing. Reject it.
-  if [[ -z "$content" ]]; then
-    echo "Error: decrypted payload is empty; keychain left unchanged" >&2
-    exit 1
-  fi
 
   # Reuse the --import write path: discover account, write.
   account=$(security find-generic-password -s "$SERVICE" 2>/dev/null \

@@ -257,8 +257,13 @@ def _do_receive(port: int) -> int:
         _err(f"Error: {e}; keychain left unchanged")
         return 1
     log.debug("receive: verified + decrypted %d bytes", len(content.encode()))
-    if not content:
-        _err("Error: decrypted payload is empty")
+    # The credential blob is always JSON. Reject anything that doesn't parse
+    # (empty, whitespace, truncated, or non-JSON) before it can overwrite the
+    # keychain entry — an authentic HMAC alone doesn't make it a valid blob.
+    try:
+        json.loads(content)
+    except ValueError:
+        _err("Error: decrypted payload is not valid JSON; keychain left unchanged")
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")

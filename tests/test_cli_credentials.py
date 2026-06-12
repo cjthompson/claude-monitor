@@ -394,6 +394,28 @@ def test_receive_rejects_wrong_passphrase(cli_env):
     assert not capture.exists()  # keychain left unchanged
 
 
+def test_receive_rejects_non_json_payload(cli_env):
+    # The credential blob is always JSON. An authentic frame (valid HMAC) whose
+    # plaintext doesn't parse as JSON must be rejected, not written — otherwise a
+    # garbage-but-authenticated payload could corrupt the keychain entry.
+    env, capture = cli_env
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    frame = tc.encrypt("this is not json", PASSPHRASE).encode()
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(frame)
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode != 0
+    assert "json" in proc.stderr.read().lower()
+    assert not capture.exists()  # keychain left unchanged
+
+
 def test_receive_without_passphrase_errors(cli_env):
     env, capture = cli_env
     del env["CLAUDE_CREDENTIALS_PASSPHRASE"]
