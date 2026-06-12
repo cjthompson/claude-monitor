@@ -418,8 +418,30 @@ def test_receive_rejects_non_json_payload(cli_env):
         if proc.poll() is None:
             proc.kill()
     assert proc.returncode != 0
-    assert "json" in proc.stderr.read().lower()
+    assert "credential blob" in proc.stderr.read().lower()
     assert not capture.exists()  # keychain left unchanged
+
+
+def test_receive_accepts_hex_encoded_blob(cli_env):
+    # `security -w` can return hex-encoded JSON (depends on macOS version), and a
+    # full --send transfers that raw blob verbatim. The receiver must accept it,
+    # not reject it for failing to parse directly as JSON — and write it verbatim.
+    env, capture = cli_env
+    port = _free_port()
+    proc = _start_receiver(env, port)
+    hexed = '{"claudeAiOauth":{"accessToken":"hexed"}}'.encode().hex()
+    frame = tc.encrypt(hexed, PASSPHRASE).encode()
+    try:
+        client = _connect_with_retry(port)
+        assert client is not None, "receiver never started listening"
+        client.sendall(frame)
+        client.close()
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0, proc.stderr.read()
+    assert capture.read_text() == hexed  # written verbatim (still hex-encoded)
 
 
 def test_receive_without_passphrase_errors(cli_env):

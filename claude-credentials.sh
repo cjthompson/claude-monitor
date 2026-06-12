@@ -358,13 +358,16 @@ dec = subprocess.run(
     input=ct, capture_output=True)
 if dec.returncode != 0:
     sys.exit("Error: authenticated frame failed to decrypt")
-# The credential blob is always JSON. Reject anything else (empty, truncated,
-# or non-JSON) before it can overwrite the keychain entry.
+# The blob is a credential document: raw JSON or hex-encoded JSON (the two forms
+# Claude Code stores; a full --send sends it verbatim). Reject anything else
+# before it can overwrite the keychain entry.
+raw = dec.stdout
 try:
-    json.loads(dec.stdout)
-except ValueError:
-    sys.exit("Error: decrypted payload is not valid JSON")
-sys.stdout.buffer.write(dec.stdout)
+    text = raw if raw[:1] == b"{" else bytes.fromhex(raw.decode("ascii").strip())
+    json.loads(text)
+except (ValueError, UnicodeDecodeError):
+    sys.exit("Error: decrypted payload is not a valid credential blob")
+sys.stdout.buffer.write(raw)
 ') || {
     echo "Keychain left unchanged." >&2; exit 1
   }

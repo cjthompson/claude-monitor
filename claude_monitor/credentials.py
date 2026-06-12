@@ -39,6 +39,17 @@ def read_raw() -> str:
     return proc.stdout.decode("utf-8", errors="replace").rstrip("\n")
 
 
+def parse_blob(raw: str) -> dict:
+    """Parse a keychain blob — raw JSON, or hex-encoded JSON — into a dict.
+
+    These are the two forms Claude Code stores (see :func:`read_raw`). Raises
+    ``ValueError`` if ``raw`` is neither. Used to validate a *received* blob
+    before writing it, so a garbage payload can't overwrite the keychain entry.
+    """
+    text = raw if raw.startswith("{") else bytes.fromhex(raw).decode("utf-8")
+    return json.loads(text)
+
+
 def read_json() -> dict:
     """Read the keychain blob and parse it as JSON, decoding hex if needed."""
     raw = read_raw()

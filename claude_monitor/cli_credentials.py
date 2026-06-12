@@ -261,13 +261,14 @@ def _do_receive(port: int) -> int:
         _err(f"Error: {e}; keychain left unchanged")
         return 1
     log.debug("receive: verified + decrypted %d bytes", len(content.encode()))
-    # The credential blob is always JSON. Reject anything that doesn't parse
-    # (empty, whitespace, truncated, or non-JSON) before it can overwrite the
-    # keychain entry — an authentic HMAC alone doesn't make it a valid blob.
+    # The blob must be a credential document — raw JSON or hex-encoded JSON, the
+    # two forms Claude Code stores (see creds.read_raw / a full --send). Reject
+    # anything else before overwriting the keychain; an authentic HMAC alone
+    # doesn't make a payload a valid blob, and writing garbage would corrupt it.
     try:
-        json.loads(content)
+        creds.parse_blob(content)
     except ValueError:
-        _err("Error: decrypted payload is not valid JSON; keychain left unchanged")
+        _err("Error: decrypted payload is not a valid credential blob; keychain left unchanged")
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")

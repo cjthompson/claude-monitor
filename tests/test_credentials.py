@@ -82,6 +82,16 @@ def test_read_json_decodes_hex_blob(fake_security):
     assert creds.read_json() == FULL
 
 
+def test_parse_blob_accepts_json_and_hex_and_rejects_garbage():
+    # The blob Claude Code stores is JSON or hex-encoded JSON; parse_blob accepts
+    # both and raises ValueError on anything else (used to validate received data).
+    assert creds.parse_blob(FULL_JSON) == FULL
+    assert creds.parse_blob(FULL_JSON.encode().hex()) == FULL
+    for bad in ("", "   ", "not a blob", "zz", "{not json}"):
+        with pytest.raises(ValueError):
+            creds.parse_blob(bad)
+
+
 def test_oauth_only_json_strips_other_keys_and_has_no_trailing_newline(fake_security):
     out = creds.oauth_only_json()
     assert not out.endswith("\n")
