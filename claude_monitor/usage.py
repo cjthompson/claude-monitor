@@ -15,16 +15,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.error import URLError
-from urllib.request import Request, urlopen
 
-from claude_monitor import RATE_LIMITS_CACHE_FILE, fmt_duration
+from claude_monitor import RATE_LIMITS_CACHE_FILE, credentials, fmt_duration
 
 log = logging.getLogger(__name__)
 
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
-KEYCHAIN_SERVICE = "Claude Code-credentials"
-TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EXPIRY_BUFFER = 60  # refresh when within 60s of expiry
 USAGE_MAX_AGE = 300  # 5 minutes
 USAGE_CACHE_FILE = "/tmp/claude-auto-accept/usage-cache.json"
@@ -138,16 +134,14 @@ def _extract_oauth_from_env() -> tuple[str, str, float] | None:
 def _read_keychain() -> dict | None:
     """Read the full credentials JSON from macOS Keychain."""
     try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True,
-            timeout=5,
-        )
-        if result.returncode != 0 or not result.stdout:
-            log.debug("No credentials found in Keychain")
-            return None
-        return json.loads(result.stdout.decode("utf-8", errors="replace").strip())
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as e:
+        return credentials.read_json()
+    except (
+        credentials.CredentialsError,
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as e:
         log.debug(f"Keychain read failed: {e}")
         return None
 
@@ -155,43 +149,9 @@ def _read_keychain() -> dict | None:
 def _write_keychain(data: dict) -> bool:
     """Write credentials JSON back to macOS Keychain, preserving all fields."""
     try:
-        payload = json.dumps(data)
-        # Get the account name from the existing entry
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
-            capture_output=True,
-            timeout=5,
-        )
-        account = None
-        if result.returncode == 0:
-            for line in result.stdout.decode("utf-8", errors="replace").splitlines():
-                if '"acct"' in line and "<blob>=" in line:
-                    account = line.split("<blob>=")[1].strip().strip('"')
-                    break
-        if not account:
-            log.debug("Could not determine keychain account name")
-            return False
-
-        result = subprocess.run(
-            [
-                "security",
-                "add-generic-password",
-                "-U",
-                "-a",
-                account,
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-w",
-                payload,
-            ],
-            capture_output=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            log.debug(f"Keychain write failed: {result.stderr.decode()}")
-            return False
+        credentials.write(json.dumps(data))
         return True
-    except (OSError, subprocess.SubprocessError) as e:
+    except (credentials.CredentialsError, OSError, subprocess.SubprocessError) as e:
         log.debug(f"Keychain write failed: {e}")
         return False
 
@@ -204,21 +164,10 @@ def _extract_oauth_tokens() -> tuple[str, str, float] | None:
     data = _read_keychain()
     if not data:
         return None
-
-    oauth = data.get("claudeAiOauth", {})
-    token = oauth.get("accessToken")
-    refresh_token = oauth.get("refreshToken")
-    if not token:
+    tokens = credentials.tokens_from_data(data)
+    if tokens is None:
         log.debug("No OAuth token found in credentials")
-        return None
-
-    expires_at = oauth.get("expiresAt")
-    if expires_at:
-        expires_at = expires_at / 1000
-    else:
-        expires_at = time.time() + 3600
-
-    return token, refresh_token or "", expires_at
+    return tokens
 
 
 def _load_disk_cache() -> dict:
@@ -525,48 +474,26 @@ class UsageManager:
             return None
 
         try:
-            payload = json.dumps(
-                {
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                    "client_id": CLIENT_ID,
-                }
-            ).encode()
-
             log.debug(
-                "Token refresh request: POST %s body={grant_type=refresh_token, "
-                "refresh_token=%s, client_id=%s}",
-                TOKEN_URL,
+                "Token refresh request: POST %s refresh_token=%s",
+                credentials.TOKEN_URL,
                 _mask_token(refresh_token),
-                CLIENT_ID,
             )
 
-            req = Request(
-                TOKEN_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urlopen(req, timeout=15) as resp:
-                status = resp.status
-                data = json.loads(resp.read())
-
-            log.debug(
-                "Token refresh response: status=%d access_token=%s refresh_token=%s expires_in=%s",
-                status,
-                _mask_token(data.get("access_token", "")),
-                _mask_token(data.get("refresh_token", "")),
-                data.get("expires_in"),
-            )
-
-            new_access = data.get("access_token")
-            new_refresh = data.get("refresh_token", refresh_token)
-            expires_in = data.get("expires_in", 3600)
-            new_expires_at = time.time() + expires_in
-
-            if not new_access:
+            refreshed = credentials.refresh_tokens(refresh_token)
+            if not refreshed:
                 log.debug("Token refresh response missing access_token")
                 return None
+
+            new_access, new_refresh, expires_in = refreshed
+            new_expires_at = time.time() + expires_in
+
+            log.debug(
+                "Token refresh response: access_token=%s refresh_token=%s expires_in=%s",
+                _mask_token(new_access),
+                _mask_token(new_refresh),
+                expires_in,
+            )
 
             # Update keychain with new tokens
             keychain_data = _read_keychain()
