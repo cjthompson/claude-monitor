@@ -2,7 +2,8 @@
 
 Single source of truth for reading/writing the ``Claude Code-credentials``
 Keychain entry and refreshing OAuth tokens. Used by both the usage bar
-(``usage.py``) and the standalone ``credentials-helper.py`` CLI.
+(``usage.py``) and the ``claude-monitor-credentials`` CLI
+(``claude_monitor.cli_credentials``).
 
 stdlib only — shells out to the ``security`` binary (no ``keyring`` dependency),
 matching the rest of the project.
@@ -36,6 +37,17 @@ def read_raw() -> str:
     if proc.returncode != 0 or not proc.stdout:
         raise CredentialsError("No credentials found in Keychain")
     return proc.stdout.decode("utf-8", errors="replace").rstrip("\n")
+
+
+def parse_blob(raw: str) -> dict:
+    """Parse a keychain blob — raw JSON, or hex-encoded JSON — into a dict.
+
+    These are the two forms Claude Code stores (see :func:`read_raw`). Raises
+    ``ValueError`` if ``raw`` is neither. Used to validate a *received* blob
+    before writing it, so a garbage payload can't overwrite the keychain entry.
+    """
+    text = raw if raw.startswith("{") else bytes.fromhex(raw).decode("utf-8")
+    return json.loads(text)
 
 
 def read_json() -> dict:

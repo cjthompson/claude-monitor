@@ -62,6 +62,22 @@ def has_uv():
     return _shutil.which("uv") is not None
 
 
+MIN_PYTHON = (3, 12)
+
+
+def python_meets_minimum(version_info=None) -> bool:
+    """True if ``version_info`` (default: the running interpreter) meets the
+    minimum the pip-fallback path needs (matches pyproject ``requires-python``).
+
+    Only the pip path consults this: the uv path passes ``--python ">=3.12"`` and
+    lets uv provision a suitable interpreter, so install.py deliberately has no
+    unconditional top-level guard — that would wrongly reject the valid
+    "old interpreter runs install.py, uv fetches 3.12+" case.
+    """
+    vi = sys.version_info if version_info is None else version_info
+    return tuple(vi[:2]) >= MIN_PYTHON
+
+
 def setup_venv():
     venv_python = VENV_DIR / "bin" / "python"
 
@@ -82,8 +98,8 @@ def setup_venv():
         print("Installing claude-monitor in editable mode (using uv) ...")
         run(["uv", "pip", "install", "-e", str(REPO_DIR), "--python", str(venv_python)])
     else:
-        # Fallback to pip — requires Python 3.12+
-        if sys.version_info < (3, 12):
+        # Fallback to pip — requires Python 3.12+ (uv, above, provisions its own)
+        if not python_meets_minimum():
             print(
                 f"Error: Python {sys.version_info.major}.{sys.version_info.minor} "
                 "detected, but 3.12+ is required."

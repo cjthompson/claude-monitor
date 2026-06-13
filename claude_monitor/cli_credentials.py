@@ -12,25 +12,42 @@ With no arguments, prints help (it does not dump credentials by default).
   --oauth-only     Print only the claudeAiOauth section as compact JSON.
   --refresh        Refresh the access token, write it back, print --simple form.
   --import <file|-> Write raw keychain bytes (file or stdin) verbatim.
-  --send <host>    Send the keychain blob to <host> over TCP (the receiver must
-                   be running --receive first). With --oauth-only, send only the
-                   claudeAiOauth section.
-  --receive        Accept one TCP connection and write the received bytes to
-                   the keychain.
+  --send <host>    Encrypt the keychain blob and send it to <host> over TCP (the
+                   receiver must be running --receive first). With --oauth-only,
+                   send only the claudeAiOauth section.
+  --receive        Accept one TCP connection, verify+decrypt it, and write the
+                   result to the keychain.
+
+--send/--receive are end-to-end encrypted with a shared passphrase
+(CLAUDE_CREDENTIALS_PASSPHRASE, or an interactive prompt). Both ends must use
+the same passphrase. See claude_monitor.transfer_crypto for the construction.
 """
 
 import argparse
+import getpass
 import json
+import logging
 import os
 import socket
+import subprocess
 import sys
 import time
 from datetime import datetime
 
 from claude_monitor import credentials as creds
+from claude_monitor import transfer_crypto
+
+log = logging.getLogger("claude_monitor.cli_credentials")
 
 DEFAULT_PORT = 47299
 SEND_TIMEOUT = 10  # seconds to wait for the TCP connection to the receiver
+
+# --send delegates the outbound TCP write to `nc`, an Apple platform binary that
+# is exempt from macOS Local Network Privacy. A third-party (Homebrew/uv/etc.)
+# venv python is blocked from LAN connect()s (EHOSTUNREACH); nc is not. Only the
+# OUTBOUND hop is gated — --receive (bind/listen/accept) works natively in the
+# venv python, so it is not delegated. Overridable via env for tests.
+NC_BINARY = os.environ.get("CLAUDE_CREDENTIALS_NC", "/usr/bin/nc")
 
 
 def _int_env(name: str, default: int) -> int:
@@ -51,17 +68,38 @@ def _err(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _get_passphrase() -> str:
+    """Return the transfer passphrase from the env, else prompt; never from argv.
+
+    An empty passphrase is rejected (whether from an unset/empty env var or a
+    bare Enter at the prompt) — an empty shared secret would defeat encryption.
+    """
+    pw = os.environ.get("CLAUDE_CREDENTIALS_PASSPHRASE")
+    if not pw:
+        if not sys.stdin.isatty():
+            raise creds.CredentialsError(
+                "no passphrase: set CLAUDE_CREDENTIALS_PASSPHRASE or run interactively"
+            )
+        pw = getpass.getpass("Passphrase: ")
+    if not pw:
+        raise creds.CredentialsError("empty passphrase not allowed")
+    return pw
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="claude-monitor-credentials",
         description="Manage Claude Code OAuth credentials in the macOS Keychain.",
         epilog=(
-            "SECURITY: --send/--receive transmit your OAuth tokens in PLAINTEXT and "
-            "the receiver writes the first connection it accepts — no encryption, no "
-            "auth. Use only on a trusted network, or tunnel over SSH "
-            "(ssh -L 47299:localhost:47299 <host>, then --send 127.0.0.1)."
+            "--send/--receive are end-to-end encrypted (AES-256-CBC + HMAC-SHA256) "
+            "with a shared passphrase. Set CLAUDE_CREDENTIALS_PASSPHRASE on both "
+            "ends, or you will be prompted. A wrong passphrase or tampered payload "
+            "is rejected and the keychain is left untouched."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true", help="log diagnostic detail to stderr"
     )
     p.add_argument("--raw", action="store_true", help="print the raw keychain blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
@@ -73,7 +111,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only the claudeAiOauth section (alone, or as a --send modifier)",
     )
     p.add_argument("--import", dest="import_path", metavar="<file|->", help="write bytes verbatim")
-    p.add_argument("--send", dest="send_host", metavar="<host>", help="send the blob over TCP")
+    p.add_argument(
+        "--send", dest="send_host", metavar="<host>", help="encrypt and send the blob over TCP"
+    )
     p.add_argument(
         "--send-port",
         dest="send_port",
@@ -82,7 +122,9 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="<port>",
         help=f"destination port for --send (default {DEFAULT_PORT})",
     )
-    p.add_argument("--receive", action="store_true", help="accept one TCP connection, write it")
+    p.add_argument(
+        "--receive", action="store_true", help="accept one TCP connection, decrypt, write it"
+    )
     p.add_argument(
         "--port",
         dest="receive_port",
@@ -139,29 +181,51 @@ def _do_import(import_path: str) -> int:
 
 
 def _do_send(host: str, port: int, oauth_only: bool) -> int:
-    payload = (creds.oauth_only_json() if oauth_only else creds.read_raw()).encode()
-    # TCP: connect() fails loudly if no receiver is listening, and there is no
-    # datagram size cap, so the full blob transfers reliably.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(SEND_TIMEOUT)
+    plaintext = creds.oauth_only_json() if oauth_only else creds.read_raw()
+    frame = transfer_crypto.encrypt(plaintext, _get_passphrase()).encode()
+    # Hand the encrypted frame to nc for the outbound TCP write (see NC_BINARY).
+    # nc half-closes its write side on stdin EOF, so the receiver reads to EOF;
+    # the send->receive roundtrip test pins this (it would hang otherwise).
+    # Do NOT add `-N`: on macOS, nc is Apple's variant where `-N num_probes` is
+    # --apple-tcp-adp-wtimo (needs a numeric arg), not OpenBSD's shutdown-on-EOF
+    # flag — passing it errors with "invalid tcp adaptive write timeout value".
+    log.debug("send: target %s:%d via %s, %d-byte frame", host, port, NC_BINARY, len(frame))
+    started = time.monotonic()
     try:
-        sock.connect((host, port))
-        sock.sendall(payload)
-    finally:
-        sock.close()
+        proc = subprocess.run(
+            [NC_BINARY, "-w", str(SEND_TIMEOUT), host, str(port)],
+            input=frame,
+            capture_output=True,
+            timeout=SEND_TIMEOUT + 5,
+        )
+    except FileNotFoundError:
+        _err(f"Error: {NC_BINARY} not found (needed to send)")
+        return 1
+    except subprocess.TimeoutExpired:
+        _err(f"Error: send to {host}:{port} timed out after {SEND_TIMEOUT}s")
+        return 1
+    if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="replace").strip() or f"nc exited {proc.returncode}"
+        log.debug("send: nc failed after %.0f ms — %s", (time.monotonic() - started) * 1000, detail)
+        _err(f"Error: could not send to {host}:{port} — {detail}")
+        return 1
+    log.debug("send: nc ok in %.0f ms", (time.monotonic() - started) * 1000)
     note = " (oauth-only)" if oauth_only else ""
-    _err(f"Sent {len(payload)} bytes to {host}:{port} via TCP{note}")
+    _err(f"Sent {len(frame)} encrypted bytes to {host}:{port} via TCP{note}")
     return 0
 
 
 def _do_receive(port: int) -> int:
+    passphrase = _get_passphrase()  # up front: prompt (if any) and fail fast before listening
     _err(f"Listening for one TCP connection on port {port}...")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         srv.bind(("0.0.0.0", port))
         srv.listen(1)
-        conn, _addr = srv.accept()
+        log.debug("receive: bound 0.0.0.0:%d, waiting for one connection", port)
+        conn, addr = srv.accept()
+        log.debug("receive: accepted connection from %s", addr)
         conn.settimeout(RECV_TIMEOUT)
         try:
             chunks = []
@@ -183,9 +247,28 @@ def _do_receive(port: int) -> int:
             conn.close()
     finally:
         srv.close()
-    content = b"".join(chunks).decode("utf-8", errors="replace").strip()
-    if not content:
+    frame = b"".join(chunks).decode("utf-8", errors="replace")
+    log.debug("receive: read %d bytes from the connection", len(frame.encode()))
+    if not frame.strip():
         _err("Error: Received empty connection")
+        return 1
+    # Verify+decrypt BEFORE touching the keychain: a wrong passphrase or a
+    # forged/tampered payload is rejected here, leaving credentials untouched.
+    try:
+        content = transfer_crypto.decrypt(frame, passphrase).strip()
+    except transfer_crypto.DecryptionError as e:
+        log.debug("receive: decryption/verification failed (%s)", e)
+        _err(f"Error: {e}; keychain left unchanged")
+        return 1
+    log.debug("receive: verified + decrypted %d bytes", len(content.encode()))
+    # The blob must be a credential document — raw JSON or hex-encoded JSON, the
+    # two forms Claude Code stores (see creds.read_raw / a full --send). Reject
+    # anything else before overwriting the keychain; an authentic HMAC alone
+    # doesn't make a payload a valid blob, and writing garbage would corrupt it.
+    try:
+        creds.parse_blob(content)
+    except ValueError:
+        _err("Error: decrypted payload is not a valid credential blob; keychain left unchanged")
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")
@@ -220,6 +303,12 @@ def _do_refresh(tokens: tuple[str, str, float]) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="[%(levelname)s] %(message)s",
+        stream=sys.stderr,
+    )
 
     error = _validate(args)
     if error:
