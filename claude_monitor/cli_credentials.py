@@ -98,9 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument(
-        "-v", "--verbose", action="store_true", help="log diagnostic detail to stderr"
-    )
+    p.add_argument("-v", "--verbose", action="store_true", help="log diagnostic detail to stderr")
     p.add_argument("--raw", action="store_true", help="print the raw keychain blob, as stored")
     p.add_argument("--simple", action="store_true", help="print the three OAuth fields")
     p.add_argument("--refresh", action="store_true", help="refresh the access token")
@@ -160,6 +158,17 @@ def _validate(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _format_expiry_verbose(expires_epoch: float) -> str:
+    """Format expiry as 'June 23, 2026 8:13:12pm MDT' (no leading zeros, lowercase am/pm)."""
+    dt = datetime.fromtimestamp(expires_epoch).astimezone()
+    hour = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    return (
+        f"{dt.strftime('%B')} {dt.day}, {dt.strftime('%Y')} "
+        f"{hour}:{dt.strftime('%M:%S')}{ampm} {dt.strftime('%Z')}"
+    )
+
+
 def _print_simple(tokens: tuple[str, str, float]) -> None:
     access, refresh, expires_epoch = tokens
     expires_local = datetime.fromtimestamp(expires_epoch).strftime("%Y-%m-%d %I:%M:%S %p %Z")
@@ -215,7 +224,7 @@ def _do_send(host: str, port: int, oauth_only: bool) -> int:
     return 0
 
 
-def _do_receive(port: int) -> int:
+def _do_receive(port: int, verbose: bool = False) -> int:
     passphrase = _get_passphrase()  # up front: prompt (if any) and fail fast before listening
     _err(f"Listening for one TCP connection on port {port}...")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -272,6 +281,14 @@ def _do_receive(port: int) -> int:
         return 1
     creds.write(content)
     _err(f"Received and imported {len(content.encode())} bytes to '{creds.KEYCHAIN_SERVICE}'")
+    if verbose:
+        blob = creds.parse_blob(content)
+        oauth = blob.get("claudeAiOauth", {})
+        access_token = oauth.get("accessToken", "")
+        expires_ms = oauth.get("expiresAt", 0)
+        if access_token and expires_ms:
+            _err(f"access_token:  {access_token}")
+            _err(f"expires:       {_format_expiry_verbose(expires_ms / 1000)}")
     return 0
 
 
@@ -321,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.send_host:
             return _do_send(args.send_host, args.send_port, args.oauth_only)
         if args.receive:
-            return _do_receive(args.receive_port)
+            return _do_receive(args.receive_port, verbose=args.verbose)
         if args.raw:
             print(creds.read_raw())
             return 0
