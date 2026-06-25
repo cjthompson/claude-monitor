@@ -45,6 +45,11 @@ claude-monitor-credentials = "claude_monitor.cli_credentials:main"
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
