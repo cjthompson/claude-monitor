@@ -95,6 +95,24 @@ class LayoutResized(Message):
         self.tabs = tabs
 
 
+class TabNamesChanged(Message):
+    """Posted when the user renamed one or more iTerm2 tabs.
+
+    Tab names are excluded from the structure fingerprint (to avoid rebuilds
+    from dynamic titles), so a rename alone never triggers LayoutChanged —
+    this message is the only path that picks it up.
+    """
+
+    def __init__(self, names: dict) -> None:
+        super().__init__()
+        self.names = names
+
+
+def _clean_tab_name(tab_name: str) -> str:
+    """Strip any stacked " [N]" or " [N/N]" suffix from a raw iTerm2 tab title."""
+    return re.sub(r"( \[\d+(/\d+)?\])+$", "", tab_name)
+
+
 # Fetch initial layout before Textual starts
 _layout_tabs: list = []  # [(tab_id, tab_name, root_splitter), ...]
 _self_session_id: "str | None" = None
@@ -337,10 +355,9 @@ class AutoAcceptTUI(MonitorApp):
         """Mount tab layout into a container. Handles single-tab and multi-tab cases."""
         # Record original tab names and which sessions belong to each tab
         for tab_id, tab_name, tree in tabs:
-            if tab_id not in self._tab_original_names:
-                # Strip any stacked " [N]" or " [N/N]" suffixes we may have set previously
-                clean_name = re.sub(r"( \[\d+(/\d+)?\])+$", "", tab_name)
-                self._tab_original_names[tab_id] = clean_name
+            # Always refresh from the live iTerm2 read — claude-monitor never
+            # writes tab titles, so this reflects the user's current name.
+            self._tab_original_names[tab_id] = _clean_tab_name(tab_name)
             self._tab_session_ids[tab_id] = collect_session_ids(tree)
 
         if len(tabs) == 1:
@@ -407,6 +424,23 @@ class AutoAcceptTUI(MonitorApp):
     # Layout polling
     # ------------------------------------------------------------------
 
+    def _check_tab_name_changes(self, tabs: list) -> None:
+        """Detect tabs the user renamed in iTerm2 since the last poll.
+
+        Runs on the watch_layout background thread; only reads
+        _tab_original_names (safe, same pattern as the fingerprint checks
+        below) and posts a message rather than mutating state directly.
+        """
+        changed = {}
+        for tab_id, tab_name, _tree in tabs:
+            if tab_id not in self._tab_original_names:
+                continue
+            clean_name = _clean_tab_name(tab_name)
+            if self._tab_original_names[tab_id] != clean_name:
+                changed[tab_id] = clean_name
+        if changed:
+            self.post_message(TabNamesChanged(changed))
+
     @work(thread=True, exit_on_error=False)
     def watch_layout(self) -> None:
         """Poll iTerm2 layout every 3 seconds for changes."""
@@ -419,6 +453,7 @@ class AutoAcceptTUI(MonitorApp):
                 tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
                 tabs = filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
                 if tabs:
+                    self._check_tab_name_changes(tabs)
                     new_struct = LayoutFingerprint.structure(tabs)
                     if new_struct != self._current_structure_fp:
                         log.debug("watch_layout: structure changed")
@@ -515,6 +550,11 @@ class AutoAcceptTUI(MonitorApp):
         self._current_size_fp = LayoutFingerprint.size(msg.tabs)
         for _tab_id, _tab_name, root in msg.tabs:
             self._apply_sizes(root)
+
+    def on_tab_names_changed(self, msg: TabNamesChanged) -> None:
+        """Pick up tabs the user renamed in iTerm2, without a full rebuild."""
+        self._tab_original_names.update(msg.names)
+        self._update_textual_tab_labels()
 
     def _apply_sizes(self, node, parent_vertical=None) -> None:
         """Walk iTerm2 tree and update CSS sizes on matching existing widgets."""
