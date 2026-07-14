@@ -152,6 +152,11 @@ class AutoAcceptTUI(MonitorApp):
     }
     #tab-content Tab {
         text-style: none;
+        background: $panel;
+        border-right: solid $foreground 30%;
+    }
+    #tab-content Tab:last-of-type {
+        border-right: none;
     }
     SessionPanel.worktree {
         border: solid $secondary;
