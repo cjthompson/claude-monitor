@@ -1,6 +1,7 @@
 """Extended tests for tui_simple.py — uncovered branches and edge cases."""
 
 import time
+from unittest.mock import MagicMock
 
 from tests.conftest import (
     _make_notification_event,
@@ -225,6 +226,145 @@ class TestApplyEvent:
             await pilot.pause()
 
             assert panel._pending_timeout is None
+
+    async def test_ask_timeout_complete_sends_keystroke_when_iterm_available(
+        self, app_fixture, inject_message
+    ):
+        """When the underlying session is in iTerm2, ask_timeout_complete must
+        actually resolve the AskUserQuestion prompt via keystroke — not just
+        clear display state. Regression guard: simple mode used to have no
+        keystroke transport at all, so the prompt sat open indefinitely."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app_fixture._iterm_available = True
+            app_fixture._send_approve = MagicMock()
+            event1 = _make_permission_event(session_id="ato-sess-2")
+            await inject_message(event1)
+            await pilot.pause()
+            await pilot.pause()
+
+            panel = app_fixture.panels["ato-sess-2"]
+            panel._pending_timeout = time.time() + 60
+            panel._timeout_origin = 12345.0
+
+            notif = {
+                "hook_event_name": "Notification",
+                "notification_type": "ask_timeout_complete",
+                "message": "Auto-accepted",
+                "session_id": "ato-sess-2",
+                "_timestamp": time.time(),
+                "_iterm_session_id": "w0t0p0:real-uuid",
+                "_timeout_origin": 12345.0,
+            }
+            await inject_message(notif)
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app_fixture._send_approve.call_count == 1
+
+    async def test_ask_timeout_complete_fires_even_if_pending_timeout_already_cleared(
+        self, app_fixture, inject_message
+    ):
+        """SessionPanel._update_status clears _pending_timeout on its own once
+        wall-clock time passes the target, independent of whether
+        ask_timeout_complete has arrived. If that display tick wins the race,
+        the keystroke must still fire because _timeout_origin (untouched by
+        the tick) still matches — this is the race that silently dropped the
+        auto-accept keystroke in production."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app_fixture._iterm_available = True
+            app_fixture._send_approve = MagicMock()
+            event1 = _make_permission_event(session_id="ato-sess-race")
+            await inject_message(event1)
+            await pilot.pause()
+            await pilot.pause()
+
+            panel = app_fixture.panels["ato-sess-race"]
+            panel._pending_timeout = None  # display tick already cleared this
+            panel._timeout_origin = 12345.0  # but the origin marker survives
+
+            notif = {
+                "hook_event_name": "Notification",
+                "notification_type": "ask_timeout_complete",
+                "message": "Auto-accepted",
+                "session_id": "ato-sess-race",
+                "_timestamp": time.time(),
+                "_iterm_session_id": "w0t0p0:real-uuid",
+                "_timeout_origin": 12345.0,
+            }
+            await inject_message(notif)
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app_fixture._send_approve.call_count == 1
+
+    async def test_ask_timeout_complete_no_keystroke_without_iterm(
+        self, app_fixture, inject_message
+    ):
+        """Without a detected iTerm2 session, ask_timeout_complete must not
+        attempt a keystroke — there's no transport to send it through."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app_fixture._iterm_available = False
+            app_fixture._send_approve = MagicMock()
+            event1 = _make_permission_event(session_id="ato-sess-3")
+            await inject_message(event1)
+            await pilot.pause()
+            await pilot.pause()
+
+            panel = app_fixture.panels["ato-sess-3"]
+            panel._pending_timeout = time.time() + 60
+            panel._timeout_origin = 12345.0
+
+            notif = {
+                "hook_event_name": "Notification",
+                "notification_type": "ask_timeout_complete",
+                "message": "Auto-accepted",
+                "session_id": "ato-sess-3",
+                "_timestamp": time.time(),
+                "_iterm_session_id": "w0t0p0:real-uuid",
+                "_timeout_origin": 12345.0,
+            }
+            await inject_message(notif)
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app_fixture._send_approve.call_count == 0
+
+    async def test_ask_timeout_complete_no_keystroke_when_paused(
+        self, app_fixture, inject_message
+    ):
+        """A paused pane must not receive the auto-accept keystroke even once
+        the countdown completes."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app_fixture._iterm_available = True
+            app_fixture._send_approve = MagicMock()
+            event1 = _make_permission_event(session_id="ato-sess-4")
+            await inject_message(event1)
+            await pilot.pause()
+            await pilot.pause()
+
+            app_fixture._paused_claude_sessions.add("ato-sess-4")
+            panel = app_fixture.panels["ato-sess-4"]
+            panel._pending_timeout = time.time() + 60
+            panel._timeout_origin = 12345.0
+
+            notif = {
+                "hook_event_name": "Notification",
+                "notification_type": "ask_timeout_complete",
+                "message": "Auto-accepted",
+                "session_id": "ato-sess-4",
+                "_timestamp": time.time(),
+                "_iterm_session_id": "w0t0p0:real-uuid",
+                "_timeout_origin": 12345.0,
+            }
+            await inject_message(notif)
+            await pilot.pause()
+            await pilot.pause()
+
+            assert app_fixture._send_approve.call_count == 0
 
 
 class TestTogglePause:

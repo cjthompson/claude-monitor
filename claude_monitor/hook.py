@@ -116,6 +116,7 @@ def main():
         completion = {
             "_timestamp": time.time(),
             "_iterm_session_id": data.get("_iterm_session_id"),
+            "session_id": data.get("session_id", ""),
             "hook_event_name": "Notification",
             "notification_type": "ask_timeout_complete",
             "message": f"AskUserQuestion auto-accepted after {ask_timeout}s",

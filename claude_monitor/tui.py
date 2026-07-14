@@ -701,15 +701,31 @@ class AutoAcceptTUI(MonitorApp):
                     panel.mark_idle()
                     self.update_tab_titles()
             elif ntype == "ask_timeout_complete":
-                # Clear pending timeout — the hook's sleep finished
+                # Clear pending timeout — the hook's sleep finished.
+                # Match on _timeout_origin, not "_pending_timeout is not None":
+                # the countdown display (SessionPanel._update_status) clears
+                # _pending_timeout on its own once wall-clock time passes the
+                # target, independent of whether this notification has
+                # arrived yet — racing against it here would silently drop
+                # the keystroke below whenever the display tick wins.
                 origin = data.get("_timeout_origin")
-                if (
-                    panel._pending_timeout is not None
-                    and getattr(panel, "_timeout_origin", None) == origin
-                ):
+                if origin is not None and getattr(panel, "_timeout_origin", None) == origin:
                     panel._pending_timeout = None
                     panel._timeout_origin = None
                     data["_auto_accepted"] = True  # Signal to _format_event
+                    # The hook's "allow" decision doesn't select an option in
+                    # AskUserQuestion's interactive menu — send the keystroke
+                    # that the permission_prompt branch withheld during the
+                    # countdown (see the skip below).
+                    iterm_sid = self._iterm_sid_from_event(data)
+                    if (
+                        iterm_sid
+                        and iterm_sid != _self_session_id
+                        and not self.is_pane_paused(iterm_sid)
+                        and not data.get("_replay")
+                    ):
+                        panel.accept_count += 1
+                        self._send_approve(iterm_sid)
             elif ntype == "permission_prompt":
                 iterm_sid = self._iterm_sid_from_event(data)
                 if (

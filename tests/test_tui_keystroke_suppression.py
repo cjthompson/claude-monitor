@@ -45,6 +45,15 @@ def _permission_prompt_event(iterm_sid="test-iterm-uuid-1234", ts=None):
     }
 
 
+def _ask_timeout_complete_event(iterm_sid="test-iterm-uuid-1234", origin=None):
+    return {
+        "hook_event_name": "Notification",
+        "notification_type": "ask_timeout_complete",
+        "_iterm_session_id": iterm_sid,
+        "_timeout_origin": origin,
+    }
+
+
 class TestPermissionPromptSuppression:
     def test_recent_deferred_suppresses_keystroke(self, app_and_panel):
         """A permission_prompt arriving shortly after a deferred PermissionRequest
@@ -231,6 +240,74 @@ class TestEndToEndScenarios:
         # _pending_timeout branch handles this — _pending_deferred_at remains None
         assert panel._pending_deferred_at is None
         assert panel._pending_timeout is not None  # still active until ask_timeout_complete fires
+
+    def test_ask_timeout_complete_fires_approve(self, app_and_panel):
+        """Once the hook's sleep finishes and ask_timeout_complete arrives with
+        a matching origin, the TUI must send the keystroke that was withheld
+        during the countdown — otherwise the AskUserQuestion prompt never
+        resolves and sits open indefinitely (the regression this guards)."""
+        app, panel = app_and_panel
+        origin = time.time()
+        panel._pending_timeout = origin + 120
+        panel._timeout_origin = origin
+
+        app._apply_event(
+            panel, _ask_timeout_complete_event(panel.session_id, origin), "Notification"
+        )
+
+        assert app._send_approve.call_count == 1
+        assert panel._pending_timeout is None
+        assert panel._timeout_origin is None
+
+    def test_ask_timeout_complete_fires_even_if_pending_timeout_already_cleared(
+        self, app_and_panel
+    ):
+        """SessionPanel._update_status clears _pending_timeout on its own once
+        wall-clock time passes the target — independent of whether
+        ask_timeout_complete has arrived yet. If that display tick wins the
+        race, _pending_timeout is already None by the time the real
+        notification shows up. The keystroke must still fire because
+        _timeout_origin (untouched by the tick) still matches — this is the
+        exact race that silently dropped the auto-accept in production."""
+        app, panel = app_and_panel
+        origin = time.time()
+        panel._pending_timeout = None  # display tick already cleared this
+        panel._timeout_origin = origin  # but the origin marker survives
+
+        app._apply_event(
+            panel, _ask_timeout_complete_event(panel.session_id, origin), "Notification"
+        )
+
+        assert app._send_approve.call_count == 1
+        assert panel._timeout_origin is None
+
+    def test_ask_timeout_complete_mismatched_origin_does_not_fire(self, app_and_panel):
+        """A stale/mismatched _timeout_origin (e.g. layout rebuild reset the
+        panel, or a newer timeout superseded this one) must not trigger a
+        keystroke for the wrong question."""
+        app, panel = app_and_panel
+        panel._pending_timeout = time.time() + 120
+        panel._timeout_origin = time.time()
+
+        app._apply_event(
+            panel, _ask_timeout_complete_event(panel.session_id, origin=None), "Notification"
+        )
+
+        assert app._send_approve.call_count == 0
+
+    def test_ask_timeout_complete_already_answered_does_not_fire(self, app_and_panel):
+        """If the user answered manually before the hook's sleep finished,
+        PostToolUse already cleared _pending_timeout — the late-arriving
+        ask_timeout_complete must be a no-op, not a spurious second Enter."""
+        app, panel = app_and_panel
+        panel._pending_timeout = None
+        panel._timeout_origin = None
+
+        app._apply_event(
+            panel, _ask_timeout_complete_event(panel.session_id, origin=time.time()), "Notification"
+        )
+
+        assert app._send_approve.call_count == 0
 
 
 class TestDeferredFlagSetter:

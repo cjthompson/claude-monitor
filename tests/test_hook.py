@@ -239,3 +239,41 @@ class TestHookDecisionLogic:
         # Second call: paused → no output
         stdout2, _ = _run_hook(data, monkeypatch)
         assert stdout2.strip() == ""
+
+    def test_ask_timeout_completion_includes_session_id(self, isolated_state, monkeypatch):
+        """The ask_timeout_complete completion event must carry the original
+        Claude session_id, not just _iterm_session_id.
+
+        SimpleTUI resolves panels by session_id alone (tui_simple.py's
+        _resolve_panel returns None without one) — a completion event
+        missing it means the auto-accept keystroke can never be wired to the
+        right panel, regardless of any fix in the TUI layer."""
+        import claude_monitor.hook as hook
+
+        monkeypatch.setattr(hook, "_tui_is_running", lambda: True)
+        monkeypatch.setattr(hook.time, "sleep", lambda secs: None)
+
+        state = {
+            "global_paused": False,
+            "paused_sessions": [],
+            "paused_claude_sessions": [],
+            "excluded_tools": [],
+            "ask_user_timeout": 5,
+            "ask_paused_sessions": [],
+        }
+        with open(isolated_state["state_file"], "w") as f:
+            json.dump(state, f)
+
+        data = {
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "AskUserQuestion",
+            "session_id": "sess-ask-1",
+            "cwd": "/tmp/test",
+            "tool_input": {"question": "Continue?"},
+        }
+        _, events = _run_hook(data, monkeypatch, env_vars={"ITERM_SESSION_ID": "w0t0p0:uuid-1"})
+
+        lines = [json.loads(line) for line in events.strip().split("\n")]
+        completion = next(e for e in lines if e.get("notification_type") == "ask_timeout_complete")
+        assert completion["session_id"] == "sess-ask-1"
+        assert completion["_iterm_session_id"] == "uuid-1"

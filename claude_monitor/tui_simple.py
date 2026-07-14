@@ -34,6 +34,7 @@ from claude_monitor import (
     LOG_FILE,
     SIGNAL_DIR,
     STATE_FILE,
+    extract_iterm_session_id,
     read_state,
 )
 from claude_monitor.app_base import MonitorApp
@@ -47,6 +48,11 @@ from claude_monitor.formatting import (
 )
 from claude_monitor.formatting import (
     format_event as _format_event_shared,
+)
+from claude_monitor.iterm2_layout import (
+    ITERM2_AVAILABLE,
+    KeystrokeSender,
+    start_persistent_connection,
 )
 from claude_monitor.messages import HookEvent
 from claude_monitor.screens import (  # noqa: F401
@@ -227,6 +233,8 @@ class SimpleTUI(MonitorApp):
         self._replay_closed_sessions: set[str] = set()
         # Last event timestamp per session during replay (for stale detection)
         self._session_last_ts: dict[str, float] = {}
+        # Set in on_mount once we know whether iTerm2 is actually reachable
+        self._iterm_available: bool = False
 
     # ------------------------------------------------------------------
     # Abstract method implementations
@@ -300,6 +308,14 @@ class SimpleTUI(MonitorApp):
         self._apply_dashboard_height()
         self._update_arrow()
         os.makedirs(SIGNAL_DIR, exist_ok=True)
+        # Simple mode doesn't require iTerm2, but if it's available (running
+        # inside an iTerm2 pane on macOS) we still use it to send the
+        # keystroke that resolves an AskUserQuestion prompt once its
+        # auto-accept timeout completes — the tabbed layout is cosmetic,
+        # not a reason to skip a keystroke transport that's actually there.
+        self._iterm_available = ITERM2_AVAILABLE and bool(os.environ.get("ITERM_SESSION_ID"))
+        if self._iterm_available:
+            start_persistent_connection()
         self._load_state()
         # Apply default mode from settings
         if self.settings.default_mode == "manual":
@@ -527,14 +543,30 @@ class SimpleTUI(MonitorApp):
                 if self.settings.tab_close_mode == "immediate" and not data.get("_replay"):
                     self.call_later(self._remove_session, panel.session_id)
             elif ntype == "ask_timeout_complete":
+                # Match on _timeout_origin, not "_pending_timeout is not None":
+                # the countdown display (SessionPanel._update_status) clears
+                # _pending_timeout on its own once wall-clock time passes the
+                # target, independent of whether this notification has
+                # arrived yet — racing against it here would silently drop
+                # the keystroke below whenever the display tick wins.
                 origin = data.get("_timeout_origin")
-                if (
-                    panel._pending_timeout is not None
-                    and getattr(panel, "_timeout_origin", None) == origin
-                ):
+                if origin is not None and getattr(panel, "_timeout_origin", None) == origin:
                     panel._pending_timeout = None
                     panel._timeout_origin = None
                     data["_auto_accepted"] = True
+                    # The hook's "allow" decision doesn't select an option in
+                    # AskUserQuestion's interactive menu — send the keystroke
+                    # if this session happens to be running inside iTerm2.
+                    claude_sid = data.get("session_id", "")
+                    iterm_sid = extract_iterm_session_id(data.get("_iterm_session_id") or "")
+                    if (
+                        self._iterm_available
+                        and iterm_sid
+                        and not self.is_pane_paused(claude_sid)
+                        and not data.get("_replay")
+                    ):
+                        panel.accept_count += 1
+                        self._send_approve(iterm_sid)
             elif ntype == "permission_prompt":
                 claude_sid = data.get("session_id", "")
                 if not self.is_pane_paused(claude_sid):
@@ -563,6 +595,17 @@ class SimpleTUI(MonitorApp):
         elif event_name == "SessionEnd":
             if self.settings.tab_close_mode == "immediate" and not data.get("_replay"):
                 self.call_later(self._remove_session, panel.session_id)
+
+    @work(thread=True, exit_on_error=False)
+    def _send_approve(self, iterm_session_id: str) -> None:
+        """Send Enter to an iTerm2 session, if one is available.
+
+        Simple mode has no pane layout of its own, but the underlying Claude
+        Code session may still be running inside iTerm2 — reuse the same
+        keystroke transport tui.py uses rather than leaving the prompt open.
+        """
+        ok = KeystrokeSender.send_approve(iterm_session_id)
+        log.debug(f"_send_approve: session={iterm_session_id[:8]} ok={ok}")
 
     def _format_event(self, data: dict, event_name: str):
         """Format a hook event into display text. Delegates to shared formatter."""
