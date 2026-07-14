@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-14
+
+### Fixes
+- Stop overwriting user-renamed iTerm tab titles (#iterm2)
+
 ## 2026-06-10
 
 ### Features
