@@ -104,14 +104,12 @@ class LayoutFetcher:
     """Fetch iTerm2 pane layout via the persistent websocket connection."""
 
     @staticmethod
-    def fetch_sync(
-        tab_titles: "dict[str, str] | None" = None,
-    ) -> "tuple[list[tuple], str | None, dict]":
+    def fetch_sync() -> "tuple[list[tuple], str | None, dict]":
         """Fetch the current iTerm2 layout.
 
-        Optionally sets *tab_titles* (tab_id -> title) in the same round-trip.
-        Returns ``(tabs, self_session_id, window_groups)`` where *tabs* is a
-        list of ``(tab_id, tab_name, root_splitter)`` tuples.
+        Reads tab titles only; never writes to iTerm2 to avoid clobbering
+        user-renamed tabs. Returns ``(tabs, self_session_id, window_groups)``
+        where *tabs* is a list of ``(tab_id, tab_name, root_splitter)`` tuples.
         """
 
         async def _do(app: "iterm2.App") -> "tuple[list, dict]":  # type: ignore[name-defined]
@@ -130,13 +128,6 @@ class LayoutFetcher:
                             tab_name = "Tab"
                         tabs.append((tab.tab_id, tab_name, tab.root))
                         win_tab_ids.append(tab.tab_id)
-                    if tab_titles and tab.tab_id in tab_titles:
-                        try:
-                            await tab.async_set_title(tab_titles[tab.tab_id])
-                        except Exception:
-                            log.debug(
-                                f"_fetch_layout_sync: failed to set title for tab {tab.tab_id}"
-                            )
                 if win_tab_ids:
                     window_groups[window.window_id] = win_tab_ids
             return tabs, window_groups
@@ -372,28 +363,6 @@ class KeystrokeSender:
         input where Enter generates CR, not LF.
         """
         return KeystrokeSender.send_text(session_id, "\r")
-
-
-# ---------------------------------------------------------------------------
-# Tab title helpers
-# ---------------------------------------------------------------------------
-
-
-def set_tab_titles(tab_titles: "dict[str, str]") -> None:
-    """Set iTerm2 tab titles using the persistent connection."""
-    if not tab_titles:
-        return
-
-    async def _do(app: "iterm2.App") -> None:  # type: ignore[name-defined]
-        for window in app.terminal_windows:
-            for tab in window.tabs:
-                if tab.tab_id in tab_titles:
-                    try:
-                        await tab.async_set_title(tab_titles[tab.tab_id])
-                    except Exception:
-                        log.debug(f"set_tab_titles: failed to set title for tab {tab.tab_id}")
-
-    _iterm2_call(_do)
 
 
 # ---------------------------------------------------------------------------

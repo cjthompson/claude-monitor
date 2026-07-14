@@ -48,7 +48,6 @@ from claude_monitor.iterm2_layout import (
     _iterm2_ready,
     collect_session_ids,
     filter_tabs_by_scope,
-    set_tab_titles,
     start_persistent_connection,
 )
 from claude_monitor.messages import HookEvent
@@ -417,14 +416,7 @@ class AutoAcceptTUI(MonitorApp):
             if self._stop_event.is_set():
                 break
             try:
-                # Compute tab titles and pass them to the layout fetch so both
-                # operations share a single websocket connection.
-                pending_titles = (
-                    self._compute_tab_titles()
-                    if self._tab_original_names and not self._rebuilding
-                    else None
-                )
-                tabs, self_sid, win_groups = LayoutFetcher.fetch_sync(tab_titles=pending_titles)
+                tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
                 tabs = filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
                 if tabs:
                     new_struct = LayoutFingerprint.structure(tabs)
@@ -797,22 +789,6 @@ class AutoAcceptTUI(MonitorApp):
     # Tab title updates
     # ------------------------------------------------------------------
 
-    def _compute_tab_titles(self) -> dict:
-        """Compute tab titles with active/total session counts. Pure computation, no I/O."""
-        tab_titles: dict[str, str] = {}
-        for tab_id, original_name in self._tab_original_names.items():
-            session_ids = self._tab_session_ids.get(tab_id, set())
-            total_count = sum(1 for sid in session_ids if sid in self.panels)
-            active_count = sum(
-                1
-                for sid in session_ids
-                if sid in self.panels
-                and (self.panels[sid]._state == "active" or len(self.panels[sid].active_agents) > 0)
-            )
-            title = f"{original_name} [{active_count}/{total_count}]"
-            tab_titles[tab_id] = title
-        return tab_titles
-
     def _update_textual_tab_labels(self) -> None:
         """Trim Textual TabbedContent tab labels so all tabs fit the terminal width.
 
@@ -871,10 +847,11 @@ class AutoAcceptTUI(MonitorApp):
 
     @work(thread=True, exit_on_error=False)
     def update_tab_titles(self) -> None:
-        """Compute active session count per tab and update iTerm2 tab titles.
+        """Update claude-monitor's own TabbedContent tab labels with active/total counts.
 
-        Also updates the Textual TabbedContent tab labels with trimmed versions
-        that fit within the available tab bar width.
+        Updates tab labels with trimmed versions that fit within the available
+        tab bar width. Never writes back to iTerm2 to avoid clobbering
+        user-renamed tabs.
 
         Coalesces rapid calls: if a call is already running, mark pending and return.
         The running call will re-check and apply after it finishes.
@@ -888,7 +865,6 @@ class AutoAcceptTUI(MonitorApp):
         try:
             while True:
                 self._tab_title_pending = False
-                set_tab_titles(self._compute_tab_titles())
                 self.call_from_thread(self._update_textual_tab_labels)
                 if not self._tab_title_pending:
                     break
