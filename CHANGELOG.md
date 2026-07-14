@@ -5,6 +5,9 @@
 ### Fixes
 - Stop overwriting user-renamed iTerm tab titles (#iterm2)
 
+### Tasks
+- Add visual separators between tabs and a dim background for inactive tabs (#ui, #tabs)
+
 ## 2026-06-10
 
 ### Features
