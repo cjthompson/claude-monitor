@@ -8,7 +8,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import RichLog, Static
 
-from claude_monitor import fmt_duration
+from claude_monitor import MAX_LOG_LINES, fmt_duration
 from claude_monitor.widgets.scrollbar import HorizontalScrollBarRender, VerticalScrollBarRender
 
 log = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ class SessionPanel(Static):
         self._pending_deferred_at: float | None = None  # last ts of deferred PermissionRequest
 
     def compose(self) -> ComposeResult:
-        yield RichLog(markup=True, wrap=False)
+        yield RichLog(markup=True, wrap=False, max_lines=MAX_LOG_LINES)
         yield Static("", classes="timeout-overlay")
         yield Static("", classes="countdown-bar")
         yield Static(self._render_status(), classes="panel-status")
@@ -127,6 +127,8 @@ class SessionPanel(Static):
 
     def write(self, text: str) -> None:
         self._event_log.append(text)
+        if len(self._event_log) > MAX_LOG_LINES:
+            del self._event_log[: -MAX_LOG_LINES]
         try:
             self.query_one(RichLog).write(text)
         except NoMatches:

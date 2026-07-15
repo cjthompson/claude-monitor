@@ -1,6 +1,6 @@
 """claude-monitor: shared constants and utilities."""
 
-__version__ = "1.0.62"
+__version__ = "1.0.63"
 
 import json
 import os
@@ -10,6 +10,7 @@ EVENTS_FILE = os.path.join(SIGNAL_DIR, "events.jsonl")
 STATE_FILE = os.path.join(SIGNAL_DIR, "state.json")
 LOG_FILE = os.path.join(SIGNAL_DIR, "tui-debug.log")
 API_PORT = 17233
+MAX_LOG_LINES = 2000
 RATE_LIMITS_CACHE_FILE = os.path.join(SIGNAL_DIR, "rate-limits-cache.json")
 
 _DEFAULT_STATE = {

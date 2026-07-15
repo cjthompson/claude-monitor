@@ -9,7 +9,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import RichLog, Static
 
-from claude_monitor import fmt_duration
+from claude_monitor import MAX_LOG_LINES, fmt_duration
 from claude_monitor.widgets.scrollbar import HorizontalScrollBarRender, VerticalScrollBarRender
 from claude_monitor.widgets.sparkline import FixedWidthSparkline
 
@@ -73,7 +73,7 @@ class DashboardPanel(Static):
             FixedWidthSparkline(self._scaled_data()),
             classes="dash-sparkline",
         )
-        yield RichLog(markup=True, wrap=False)
+        yield RichLog(markup=True, wrap=False, max_lines=MAX_LOG_LINES)
 
     def on_mount(self) -> None:
         rl = self.query_one(RichLog)
@@ -83,6 +83,8 @@ class DashboardPanel(Static):
     def record_event(self, text: str) -> None:
         """Add to combined feed and update sparkline data."""
         self._event_log.append(text)
+        if len(self._event_log) > MAX_LOG_LINES:
+            del self._event_log[: -MAX_LOG_LINES]
         try:
             self.query_one(RichLog).write(text)
         except NoMatches:
