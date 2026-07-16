@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-16
+
+### Tasks
+- Change tab text color for tabs with active claude sessions (#tabs, #ui)
+
 ## 2026-07-14
 
 ### Fixes
@@ -16,6 +21,7 @@
 - Add `-v`/`--verbose` to `claude-monitor-credentials` for send/receive diagnostics (target, timing, and the underlying error on failure) (#claude-credentials)
 
 ### Fixes
+- Python `--send` fails with 'No route to host' while bash `--send` succeeds (#credentials-helper, #tcp-transport)
 - Both `--receive` frontends (`claude-monitor-credentials` and `claude-credentials.sh`) now reject an authenticated-but-undecryptable frame (valid HMAC, but bad block length/padding) cleanly instead of crashing with a traceback; the keychain is left unchanged (#claude-credentials, #security)
 - Both `--receive` frontends now reject a decrypted payload that isn't a valid credential blob — raw JSON or hex-encoded JSON, the two forms Claude Code stores — before it can overwrite the keychain entry; empty, truncated, or garbage payloads (even with a valid HMAC) are refused. A data-loss guard that still accepts hex-encoded full transfers (#claude-credentials, #security)
 
