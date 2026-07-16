@@ -476,6 +476,62 @@ class TestUpdateTabLabel:
             # Just verify it doesn't crash
             app_fixture._update_tab_label("tab-sess")
 
+    async def test_active_session_gains_has_active_session_class(self, app_fixture, inject_message):
+        """A tab for an active session should gain the has-active-session class."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            event = _make_permission_event(session_id="active-tab-sess")
+            await inject_message(event)
+            await pilot.pause()
+            await pilot.pause()
+
+            panel = app_fixture.panels["active-tab-sess"]
+            # Panel is active due to the permission event
+            assert panel._state == "active" or len(panel.active_agents) > 0
+
+            from textual.widgets import Tab
+            from textual.widgets._tabbed_content import ContentTab
+
+            tab_pane_id = app_fixture._claude_to_tab.get("active-tab-sess")
+            tab_id = ContentTab.add_prefix(tab_pane_id)
+            tab = app_fixture.query_one(f"#{tab_id}", Tab)
+
+            # After updating the label, the tab should have the has-active-session class
+            app_fixture._update_tab_label("active-tab-sess")
+            assert "has-active-session" in tab.classes
+
+    async def test_idle_session_removes_has_active_session_class(self, app_fixture, inject_message):
+        """A tab for an idle session should not have the has-active-session class."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            event = _make_permission_event(session_id="idle-tab-sess")
+            await inject_message(event)
+            await pilot.pause()
+            await pilot.pause()
+
+            # Mark as idle
+            idle = _make_notification_event(
+                notification_type="idle_prompt",
+                session_id="idle-tab-sess",
+            )
+            await inject_message(idle)
+            await pilot.pause()
+            await pilot.pause()
+
+            panel = app_fixture.panels["idle-tab-sess"]
+            assert panel._state == "idle"
+
+            from textual.widgets import Tab
+            from textual.widgets._tabbed_content import ContentTab
+
+            tab_pane_id = app_fixture._claude_to_tab.get("idle-tab-sess")
+            tab_id = ContentTab.add_prefix(tab_pane_id)
+            tab = app_fixture.query_one(f"#{tab_id}", Tab)
+
+            # After updating the label, the tab should not have the has-active-session class
+            app_fixture._update_tab_label("idle-tab-sess")
+            assert "has-active-session" not in tab.classes
+
     async def test_unknown_session(self, app_fixture, isolated_state):
         async with app_fixture.run_test(size=(120, 40)) as pilot:
             await pilot.pause()

@@ -167,6 +167,9 @@ class AutoAcceptTUI(MonitorApp):
     #tab-content Tab:last-of-type {
         border-right: none;
     }
+    #tab-content Tab.has-active-session {
+        color: $success;
+    }
     SessionPanel.worktree {
         border: solid $secondary;
     }
@@ -914,7 +917,12 @@ class AutoAcceptTUI(MonitorApp):
                 trimmed_name = original_name
             label = f"{trimmed_name}{suffix}"
             try:
-                tc.get_tab(_safe_tab_css_id(tab_id)).label = label
+                tab_widget = tc.get_tab(_safe_tab_css_id(tab_id))
+                tab_widget.label = label
+                if active_count > 0:
+                    tab_widget.add_class("has-active-session")
+                else:
+                    tab_widget.remove_class("has-active-session")
             except Exception:
                 pass  # Tab may not exist yet during rebuild
 
