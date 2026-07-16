@@ -81,10 +81,19 @@ for _noisy in ("websockets", "asyncio", "iterm2.connection"):
 class LayoutChanged(Message):
     """Posted when iTerm2 layout structure has changed (panes added/removed/rearranged)."""
 
-    def __init__(self, tabs: list, self_session_id: "str | None") -> None:
+    def __init__(
+        self,
+        tabs: list,
+        self_session_id: "str | None",
+        all_iterm_sids: "set[str] | None" = None,
+    ) -> None:
         super().__init__()
         self.tabs = tabs
         self.self_session_id = self_session_id
+        # All iTerm2 session IDs from the live fetch, before scope filtering —
+        # used to detect sessions that exist but are outside the configured
+        # iterm_scope, so hook events for them don't spawn fallback panels.
+        self.all_iterm_sids = all_iterm_sids if all_iterm_sids is not None else set()
 
 
 class LayoutResized(Message):
@@ -236,6 +245,8 @@ class AutoAcceptTUI(MonitorApp):
         self._layout_session_ids: set[str] = set()
         # iTerm2 session IDs removed in the most recent layout rebuild
         self._removed_iterm_sids: set[str] = set()
+        # iTerm2 session IDs seen live but outside the configured iterm_scope
+        self._out_of_scope_iterm_sids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Abstract method implementations (required by MonitorApp)
@@ -455,14 +466,17 @@ class AutoAcceptTUI(MonitorApp):
             if self._stop_event.is_set():
                 break
             try:
-                tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
-                tabs = filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
+                all_tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
+                all_sids: set[str] = set()
+                for _, _, tree in all_tabs:
+                    all_sids |= collect_session_ids(tree)
+                tabs = filter_tabs_by_scope(all_tabs, self_sid, self.settings.iterm_scope, win_groups)
                 if tabs:
                     self._check_tab_name_changes(tabs)
                     new_struct = LayoutFingerprint.structure(tabs)
                     if new_struct != self._current_structure_fp:
                         log.debug("watch_layout: structure changed")
-                        self.post_message(LayoutChanged(tabs, self_sid))
+                        self.post_message(LayoutChanged(tabs, self_sid, all_sids))
                     else:
                         new_size = LayoutFingerprint.size(tabs)
                         if new_size != self._current_size_fp:
@@ -535,6 +549,10 @@ class AutoAcceptTUI(MonitorApp):
                 new_layout_sids |= collect_session_ids(tree)
             self._removed_iterm_sids = self._layout_session_ids - new_layout_sids
             self._layout_session_ids = new_layout_sids
+
+            # Sessions the live fetch found but that fell outside iterm_scope.
+            # Hook events for these must not create fallback panels either.
+            self._out_of_scope_iterm_sids = msg.all_iterm_sids - new_layout_sids
 
             # Preserve iterm→panel mappings for sessions that still exist
             self._iterm_to_panel = {
@@ -624,6 +642,9 @@ class AutoAcceptTUI(MonitorApp):
         if iterm_sid and iterm_sid in self._removed_iterm_sids:
             log.debug(f"_resolve_panel: dropping event for removed pane {iterm_sid[:8]}")
             return None
+        if iterm_sid and iterm_sid in self._out_of_scope_iterm_sids:
+            log.debug(f"_resolve_panel: dropping event for out-of-scope pane {iterm_sid[:8]}")
+            return None
 
         # No match — create a fallback panel
         cwd = data.get("cwd", "")
@@ -648,9 +669,16 @@ class AutoAcceptTUI(MonitorApp):
             panel.add_class("worktree")
         self.panels[claude_sid] = panel
         self._iterm_to_panel[claude_sid] = claude_sid
-        # Mount into layout root
+        # Mount into the active tab pane so the panel is only visible under
+        # the tab it appeared in, not glued outside the tab structure where
+        # it would render under every tab regardless of which is selected.
         try:
-            self.query_one("#layout-root").mount(panel)
+            tc = self.query_one("#tab-content", TabbedContent)
+            target = tc.get_pane(tc.active) if tc.active else None
+        except Exception:
+            target = None
+        try:
+            (target or self.query_one("#layout-root")).mount(panel)
         except Exception:
             log.warning(
                 f"_create_fallback_panel: layout-root mount failed for {claude_sid}, "
@@ -990,10 +1018,13 @@ class AutoAcceptTUI(MonitorApp):
         """Fetch layout in a thread (can't run iterm2 sync from Textual's event loop)."""
         error = False
         try:
-            tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
-            tabs = filter_tabs_by_scope(tabs, self_sid, self.settings.iterm_scope, win_groups)
+            all_tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
+            all_sids: set[str] = set()
+            for _, _, tree in all_tabs:
+                all_sids |= collect_session_ids(tree)
+            tabs = filter_tabs_by_scope(all_tabs, self_sid, self.settings.iterm_scope, win_groups)
             if tabs:
-                self.post_message(LayoutChanged(tabs, self_sid))
+                self.post_message(LayoutChanged(tabs, self_sid, all_sids))
             else:
                 error = True
         except Exception as e:

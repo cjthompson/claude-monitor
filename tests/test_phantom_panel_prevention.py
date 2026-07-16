@@ -1,6 +1,7 @@
 """Regression tests for phantom panel prevention in AutoAcceptTUI.
 
-Two code paths previously created phantom panels that persisted indefinitely:
+Three code paths previously created phantom panels that persisted indefinitely
+or rendered outside the tab structure:
 
 1. Startup replay: watch_events replays the last 50 events on startup.
    If those events reference sessions in now-closed iTerm2 panes,
@@ -10,7 +11,15 @@ Two code paths previously created phantom panels that persisted indefinitely:
    a hook event (e.g. SessionEnd) may arrive for that session.
    _resolve_panel must not create a fallback panel for those either.
 
-Both cases are prevented by checks in _resolve_panel that fire before
+3. Out-of-scope sessions: iterm_scope filters the layout fetch but hook
+   events aren't scope-filtered. A session outside the configured scope
+   can never legitimately enter self.panels, so every hook event for it
+   would create a fallback panel — and because it's mounted outside the
+   TabbedContent (a sibling of #tab-content under #layout-root), it
+   renders under every tab regardless of which one is selected, instead
+   of only the tab it belongs to.
+
+All three are prevented by checks in _resolve_panel that fire before
 any DOM mount operation, so tests can call _resolve_panel directly
 without a full Textual app lifecycle.
 """
@@ -189,3 +198,119 @@ class TestLayoutSessionTracking:
     def test_initial_removed_iterm_sids_is_empty(self, app):
         """On startup, nothing is pre-emptively blocked."""
         assert app._removed_iterm_sids == set()
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: out-of-scope events must not create phantom panels
+# ---------------------------------------------------------------------------
+
+
+class TestOutOfScopePhantomPrevention:
+    def test_event_for_out_of_scope_pane_returns_none(self, app):
+        """A non-replay event for a session outside iterm_scope must return None."""
+        app._out_of_scope_iterm_sids = {"iterm-elsewhere"}
+        data = _mk_event(claude_sid="c-oos", iterm_sid="iterm-elsewhere")
+        result = app._resolve_panel(data)
+        assert result is None
+
+    def test_event_for_out_of_scope_pane_does_not_add_to_panels(self, app):
+        app._out_of_scope_iterm_sids = {"iterm-elsewhere"}
+        data = _mk_event(claude_sid="c-oos2", iterm_sid="iterm-elsewhere")
+        app._resolve_panel(data)
+        assert "c-oos2" not in app.panels
+
+    def test_event_for_in_scope_pane_is_not_blocked(self, app):
+        """Only sessions actually marked out-of-scope are blocked."""
+        app._out_of_scope_iterm_sids = {"iterm-elsewhere"}
+        data = _mk_event(claude_sid="c-new", iterm_sid="iterm-other")
+
+        result = _patched_resolve(app, data)
+
+        assert result is not None
+        assert "c-new" in app.panels
+
+    def test_no_out_of_scope_sids_allows_fallback_creation(self, app):
+        """When _out_of_scope_iterm_sids is empty, normal fallback panels are created."""
+        assert app._out_of_scope_iterm_sids == set()  # default
+        data = _mk_event(claude_sid="c-fallback2", iterm_sid="iterm-unknown2")
+
+        result = _patched_resolve(app, data)
+
+        assert result is not None
+        assert "c-fallback2" in app.panels
+
+    def test_initial_out_of_scope_iterm_sids_is_empty(self, app):
+        """On startup, nothing is pre-emptively marked out of scope."""
+        assert app._out_of_scope_iterm_sids == set()
+
+    def test_out_of_scope_sids_computed_from_full_vs_scoped_layout(self, app):
+        """_out_of_scope_iterm_sids is the live universe minus the scope-filtered layout."""
+        all_iterm_sids = {"iterm-A", "iterm-B", "iterm-C"}
+        new_layout_sids = {"iterm-A"}  # only iterm-A survived scope filtering
+
+        app._out_of_scope_iterm_sids = all_iterm_sids - new_layout_sids
+
+        assert app._out_of_scope_iterm_sids == {"iterm-B", "iterm-C"}
+
+
+# ---------------------------------------------------------------------------
+# Fallback panels must mount into the active tab, not as a #layout-root
+# sibling of #tab-content (which would render under every tab).
+# ---------------------------------------------------------------------------
+
+
+def _patched_resolve_with_tabs(app, data):
+    """Call _resolve_panel with a TabbedContent + active TabPane mocked out.
+
+    Returns (result, mock_active_pane, mock_layout_root) so tests can assert
+    which one .mount() was actually called on.
+    """
+    mock_pane = MagicMock()
+    mock_tc = MagicMock()
+    mock_tc.active = "tab-1"
+    mock_tc.get_pane.return_value = mock_pane
+    mock_root = MagicMock()
+
+    def _query_one(selector, *args, **kwargs):
+        if selector == "#tab-content":
+            return mock_tc
+        return mock_root
+
+    app.query_one = MagicMock(side_effect=_query_one)
+    app.mount = MagicMock()
+    result = app._resolve_panel(data)
+    return result, mock_pane, mock_root
+
+
+class TestFallbackPanelMountTarget:
+    def test_fallback_panel_mounts_into_active_tab_pane(self, app):
+        """When a TabbedContent exists, the fallback panel mounts into its
+        active TabPane, not directly onto #layout-root — otherwise it would
+        render as a sibling of the tab structure, visible under every tab."""
+        data = _mk_event(claude_sid="c-tabbed", iterm_sid="iterm-unknown-tabbed")
+
+        result, mock_pane, mock_root = _patched_resolve_with_tabs(app, data)
+
+        assert result is not None
+        mock_pane.mount.assert_called_once_with(result)
+        mock_root.mount.assert_not_called()
+
+    def test_fallback_panel_mounts_into_layout_root_when_no_tabs(self, app):
+        """Single-tab layouts have no TabbedContent — #layout-root is the
+        correct (and only) mount target in that case."""
+        data = _mk_event(claude_sid="c-single", iterm_sid="iterm-unknown-single")
+
+        mock_root = MagicMock()
+
+        def _query_one(selector, *args, **kwargs):
+            if selector == "#tab-content":
+                raise Exception("no TabbedContent mounted")
+            return mock_root
+
+        app.query_one = MagicMock(side_effect=_query_one)
+        app.mount = MagicMock()
+
+        result = app._resolve_panel(data)
+
+        assert result is not None
+        mock_root.mount.assert_called_once_with(result)
