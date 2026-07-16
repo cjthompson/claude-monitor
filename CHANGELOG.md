@@ -2,6 +2,9 @@
 
 ## 2026-07-16
 
+### Fixes
+- Detect claude/codex sessions via process tree instead of jobName, fixing "hide empty tabs" hiding active tabs outside the current window (#iterm2, #settings)
+
 ### Tasks
 - Add "iTerm Scope" Settings option to ignore tabs/windows with no claude or codex sessions (#settings, #tabs)
 - Change tab text color for tabs with active claude sessions (#tabs, #ui)
