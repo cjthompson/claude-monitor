@@ -150,6 +150,9 @@ class SimpleTUI(MonitorApp):
     #tab-content Tab:last-of-type {
         border-right: none;
     }
+    #tab-content Tab.has-active-session {
+        color: $success;
+    }
     #sessions-area {
         height: 1fr;
     }
@@ -647,12 +650,17 @@ class SimpleTUI(MonitorApp):
             # Trim to reasonable length
             if len(base) > 20:
                 base = base[:19] + "…"
-            if panel._state == "active" or len(panel.active_agents) > 0:
+            is_active = panel._state == "active" or len(panel.active_agents) > 0
+            if is_active:
                 tab.label = f"▶ {base}"
             elif panel._state == "idle":
                 tab.label = f"⏸ {base}"
             else:
                 tab.label = base
+            if is_active:
+                tab.add_class("has-active-session")
+            else:
+                tab.remove_class("has-active-session")
         except (
             Exception
         ):  # Textual raises NoMatches or AttributeError for widget/attribute access failures

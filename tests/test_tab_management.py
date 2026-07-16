@@ -1,6 +1,6 @@
 """Tests for tab management."""
 
-from tests.conftest import _make_permission_event
+from tests.conftest import _make_notification_event, _make_permission_event
 
 
 async def _inject_and_process(app, pilot, inject_message, event_data):
@@ -65,3 +65,52 @@ class TestTabManagement:
             # Dashboard tab should be present
             pane_ids = [p.id for p in tc.query("TabPane") if p.id]
             assert app_fixture._dashboard_tab_pane_id in pane_ids
+
+    async def test_active_session_tab_gains_has_active_session_class(self, app_fixture, inject_message):
+        """A tab with an active session should gain the has-active-session class."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            e = _make_permission_event(session_id="active-iterm-sess", cwd="/tmp/proj")
+            await _inject_and_process(app_fixture, pilot, inject_message, e)
+
+            panel = app_fixture.panels["active-iterm-sess"]
+            # Panel is active due to the permission event
+            assert panel._state == "active" or len(panel.active_agents) > 0
+
+            from textual.widgets import TabbedContent
+
+            tc = app_fixture.query_one("#tab-content", TabbedContent)
+            tab_id = app_fixture._claude_to_tab["active-iterm-sess"]
+            tab_widget = tc.get_tab(tab_id)
+
+            # After updating the tab label, the tab should have the has-active-session class
+            app_fixture._update_tab_label("active-iterm-sess")
+            assert "has-active-session" in tab_widget.classes
+
+    async def test_idle_session_tab_removes_has_active_session_class(self, app_fixture, inject_message):
+        """A tab with no active sessions should not have the has-active-session class."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            e = _make_permission_event(session_id="idle-iterm-sess", cwd="/tmp/idle")
+            await _inject_and_process(app_fixture, pilot, inject_message, e)
+
+            # Mark as idle
+            idle = _make_notification_event(
+                notification_type="idle_prompt",
+                session_id="idle-iterm-sess",
+                message="Session is idle",
+            )
+            await _inject_and_process(app_fixture, pilot, inject_message, idle)
+
+            panel = app_fixture.panels["idle-iterm-sess"]
+            assert panel._state == "idle"
+
+            from textual.widgets import TabbedContent
+
+            tc = app_fixture.query_one("#tab-content", TabbedContent)
+            tab_id = app_fixture._claude_to_tab["idle-iterm-sess"]
+            tab_widget = tc.get_tab(tab_id)
+
+            # After updating the tab label, the tab should not have the has-active-session class
+            app_fixture._update_tab_label("idle-iterm-sess")
+            assert "has-active-session" not in tab_widget.classes
