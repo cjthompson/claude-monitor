@@ -48,6 +48,7 @@ from claude_monitor.iterm2_layout import (
     _iterm2_ready,
     collect_session_ids,
     filter_tabs_by_scope,
+    filter_tabs_hide_empty,
     start_persistent_connection,
 )
 from claude_monitor.messages import HookEvent
@@ -86,6 +87,7 @@ class LayoutChanged(Message):
         tabs: list,
         self_session_id: "str | None",
         all_iterm_sids: "set[str] | None" = None,
+        scoped_iterm_sids: "set[str] | None" = None,
     ) -> None:
         super().__init__()
         self.tabs = tabs
@@ -94,6 +96,12 @@ class LayoutChanged(Message):
         # used to detect sessions that exist but are outside the configured
         # iterm_scope, so hook events for them don't spawn fallback panels.
         self.all_iterm_sids = all_iterm_sids if all_iterm_sids is not None else set()
+        # iTerm2 session IDs that survive scope filtering (before the
+        # hide-empty-tabs filter). The difference between this and the final
+        # rendered layout identifies sessions in a hidden-because-empty tab —
+        # a hook event for one of those should re-render (so the tab
+        # reappears), not spawn a fallback panel.
+        self.scoped_iterm_sids = scoped_iterm_sids if scoped_iterm_sids is not None else set()
 
 
 class LayoutResized(Message):
@@ -102,6 +110,23 @@ class LayoutResized(Message):
     def __init__(self, tabs: list) -> None:
         super().__init__()
         self.tabs = tabs
+
+
+class ScopeSidsUpdated(Message):
+    """Posted every layout poll tick, independent of structure/size changes.
+
+    Keeps out-of-scope/hidden-tab session tracking fresh even when the
+    in-scope tab set is structurally stable for a long time — otherwise a
+    session that only exists outside the current scope (e.g. a sub-agent
+    whose events carry a parent pane's iTerm session ID from another,
+    out-of-scope tab or window) is never recognized as out-of-scope and
+    ends up spawning a stray fallback panel on whichever tab is active.
+    """
+
+    def __init__(self, all_iterm_sids: "set[str]", scoped_iterm_sids: "set[str]") -> None:
+        super().__init__()
+        self.all_iterm_sids = all_iterm_sids
+        self.scoped_iterm_sids = scoped_iterm_sids
 
 
 class TabNamesChanged(Message):
@@ -132,9 +157,12 @@ def fetch_iterm_layout() -> None:
     start_persistent_connection()
     if not _iterm2_ready.wait(timeout=5):
         raise ConnectionRefusedError("Could not connect to iTerm2")
-    tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
+    tabs, self_sid, win_groups, session_procs = LayoutFetcher.fetch_sync()
     settings = load_settings()
-    _layout_tabs = filter_tabs_by_scope(tabs, self_sid, settings.iterm_scope, win_groups)
+    scoped = filter_tabs_by_scope(tabs, self_sid, settings.iterm_scope, win_groups)
+    _layout_tabs = filter_tabs_hide_empty(
+        scoped, self_sid, session_procs, settings.iterm_hide_empty_tabs
+    )
     _self_session_id = self_sid
     log.debug(f"fetch_iterm_layout done: tabs={len(_layout_tabs)}, self={_self_session_id}")
 
@@ -247,6 +275,9 @@ class AutoAcceptTUI(MonitorApp):
         self._removed_iterm_sids: set[str] = set()
         # iTerm2 session IDs seen live but outside the configured iterm_scope
         self._out_of_scope_iterm_sids: set[str] = set()
+        # iTerm2 session IDs in-scope but in a tab hidden by iterm_hide_empty_tabs
+        # (no claude/codex process). A hook event for one triggers a refresh.
+        self._hidden_tab_iterm_sids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Abstract method implementations (required by MonitorApp)
@@ -466,17 +497,30 @@ class AutoAcceptTUI(MonitorApp):
             if self._stop_event.is_set():
                 break
             try:
-                all_tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
+                all_tabs, self_sid, win_groups, session_procs = LayoutFetcher.fetch_sync()
                 all_sids: set[str] = set()
                 for _, _, tree in all_tabs:
                     all_sids |= collect_session_ids(tree)
-                tabs = filter_tabs_by_scope(all_tabs, self_sid, self.settings.iterm_scope, win_groups)
+                scoped_tabs = filter_tabs_by_scope(
+                    all_tabs, self_sid, self.settings.iterm_scope, win_groups
+                )
+                scoped_sids: set[str] = set()
+                for _, _, tree in scoped_tabs:
+                    scoped_sids |= collect_session_ids(tree)
+                tabs = filter_tabs_hide_empty(
+                    scoped_tabs, self_sid, session_procs, self.settings.iterm_hide_empty_tabs
+                )
+                # Keep out-of-scope/hidden-tab tracking fresh on every tick,
+                # not only when the in-scope structure changes below — a
+                # session that only ever exists outside the current scope
+                # would otherwise never be recognized as out-of-scope.
+                self.post_message(ScopeSidsUpdated(all_sids, scoped_sids))
                 if tabs:
                     self._check_tab_name_changes(tabs)
                     new_struct = LayoutFingerprint.structure(tabs)
                     if new_struct != self._current_structure_fp:
                         log.debug("watch_layout: structure changed")
-                        self.post_message(LayoutChanged(tabs, self_sid, all_sids))
+                        self.post_message(LayoutChanged(tabs, self_sid, all_sids, scoped_sids))
                     else:
                         new_size = LayoutFingerprint.size(tabs)
                         if new_size != self._current_size_fp:
@@ -552,7 +596,15 @@ class AutoAcceptTUI(MonitorApp):
 
             # Sessions the live fetch found but that fell outside iterm_scope.
             # Hook events for these must not create fallback panels either.
-            self._out_of_scope_iterm_sids = msg.all_iterm_sids - new_layout_sids
+            # Computed against the scope-filtered universe (not the final
+            # rendered layout) so hide-empty-tab removals aren't misclassified
+            # as out-of-scope.
+            self._out_of_scope_iterm_sids = msg.all_iterm_sids - msg.scoped_iterm_sids
+
+            # Sessions that are in-scope but live in a tab hidden by the
+            # hide-empty-tabs filter. A hook event for one of these should
+            # trigger a refresh so the (now non-empty) tab reappears.
+            self._hidden_tab_iterm_sids = msg.scoped_iterm_sids - new_layout_sids
 
             # Preserve iterm→panel mappings for sessions that still exist
             self._iterm_to_panel = {
@@ -573,6 +625,22 @@ class AutoAcceptTUI(MonitorApp):
         self._current_size_fp = LayoutFingerprint.size(msg.tabs)
         for _tab_id, _tab_name, root in msg.tabs:
             self._apply_sizes(root)
+
+    def on_scope_sids_updated(self, msg: ScopeSidsUpdated) -> None:
+        """Refresh out-of-scope/hidden-tab tracking independent of rebuilds.
+
+        A full rebuild (on_layout_changed) also updates these sets, but only
+        runs when the in-scope tab structure changes. Without this handler, a
+        session that lives entirely outside the current scope (e.g. a
+        sub-agent whose events carry a parent pane's iTerm session ID from a
+        different, out-of-scope tab or window) would never be added to
+        _out_of_scope_iterm_sids, and its hook events would keep spawning a
+        stray fallback panel on whichever tab happens to be active.
+        """
+        if self._rebuilding:
+            return
+        self._out_of_scope_iterm_sids = msg.all_iterm_sids - msg.scoped_iterm_sids
+        self._hidden_tab_iterm_sids = msg.scoped_iterm_sids - self._layout_session_ids
 
     def on_tab_names_changed(self, msg: TabNamesChanged) -> None:
         """Pick up tabs the user renamed in iTerm2, without a full rebuild."""
@@ -644,6 +712,15 @@ class AutoAcceptTUI(MonitorApp):
             return None
         if iterm_sid and iterm_sid in self._out_of_scope_iterm_sids:
             log.debug(f"_resolve_panel: dropping event for out-of-scope pane {iterm_sid[:8]}")
+            return None
+        if iterm_sid and iterm_sid in self._hidden_tab_iterm_sids:
+            # The session lives in a tab hidden by iterm_hide_empty_tabs. It now
+            # has activity, so its tab is no longer empty — re-render so the tab
+            # reappears rather than spawning a detached fallback panel. Drop the
+            # sid first so we trigger a single refresh, not one per event.
+            self._hidden_tab_iterm_sids.discard(iterm_sid)
+            log.debug(f"_resolve_panel: refreshing for hidden-tab pane {iterm_sid[:8]}")
+            self._do_refresh()
             return None
 
         # No match — create a fallback panel
@@ -990,10 +1067,11 @@ class AutoAcceptTUI(MonitorApp):
         if result is None:
             return
         old_scope = self.settings.iterm_scope
+        old_hide_empty = self.settings.iterm_hide_empty_tabs
         old_oauth = self.settings.oauth_json
         self.settings = result
         self._apply_settings(result)
-        if result.iterm_scope != old_scope:
+        if result.iterm_scope != old_scope or result.iterm_hide_empty_tabs != old_hide_empty:
             self._current_structure_fp = None  # force rebuild on next poll
             self._do_refresh()
         if result.oauth_json != old_oauth and result.oauth_json and result.account_usage:
@@ -1018,13 +1096,21 @@ class AutoAcceptTUI(MonitorApp):
         """Fetch layout in a thread (can't run iterm2 sync from Textual's event loop)."""
         error = False
         try:
-            all_tabs, self_sid, win_groups = LayoutFetcher.fetch_sync()
+            all_tabs, self_sid, win_groups, session_procs = LayoutFetcher.fetch_sync()
             all_sids: set[str] = set()
             for _, _, tree in all_tabs:
                 all_sids |= collect_session_ids(tree)
-            tabs = filter_tabs_by_scope(all_tabs, self_sid, self.settings.iterm_scope, win_groups)
+            scoped_tabs = filter_tabs_by_scope(
+                all_tabs, self_sid, self.settings.iterm_scope, win_groups
+            )
+            scoped_sids: set[str] = set()
+            for _, _, tree in scoped_tabs:
+                scoped_sids |= collect_session_ids(tree)
+            tabs = filter_tabs_hide_empty(
+                scoped_tabs, self_sid, session_procs, self.settings.iterm_hide_empty_tabs
+            )
             if tabs:
-                self.post_message(LayoutChanged(tabs, self_sid, all_sids))
+                self.post_message(LayoutChanged(tabs, self_sid, all_sids, scoped_sids))
             else:
                 error = True
         except Exception as e:

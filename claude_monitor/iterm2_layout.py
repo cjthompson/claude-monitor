@@ -104,17 +104,21 @@ class LayoutFetcher:
     """Fetch iTerm2 pane layout via the persistent websocket connection."""
 
     @staticmethod
-    def fetch_sync() -> "tuple[list[tuple], str | None, dict]":
+    def fetch_sync() -> "tuple[list[tuple], str | None, dict, dict]":
         """Fetch the current iTerm2 layout.
 
-        Reads tab titles only; never writes to iTerm2 to avoid clobbering
-        user-renamed tabs. Returns ``(tabs, self_session_id, window_groups)``
-        where *tabs* is a list of ``(tab_id, tab_name, root_splitter)`` tuples.
+        Reads tab titles and per-session foreground job names only; never
+        writes to iTerm2 to avoid clobbering user-renamed tabs. Returns
+        ``(tabs, self_session_id, window_groups, session_procs)`` where *tabs*
+        is a list of ``(tab_id, tab_name, root_splitter)`` tuples and
+        *session_procs* maps each session ID (across all windows) to its
+        foreground job name.
         """
 
-        async def _do(app: "iterm2.App") -> "tuple[list, dict]":  # type: ignore[name-defined]
+        async def _do(app: "iterm2.App") -> "tuple[list, dict, dict]":  # type: ignore[name-defined]
             tabs = []
             window_groups: dict[str, list[str]] = {}
+            sessions_to_probe: list = []
             for window in app.terminal_windows:
                 win_tab_ids: list[str] = []
                 for tab in window.tabs:
@@ -128,17 +132,46 @@ class LayoutFetcher:
                             tab_name = "Tab"
                         tabs.append((tab.tab_id, tab_name, tab.root))
                         win_tab_ids.append(tab.tab_id)
+                        # tab.root.sessions returns every session in the tab,
+                        # in every window (not just the focused one).
+                        try:
+                            sessions_to_probe.extend(tab.root.sessions)
+                        except Exception:
+                            log.debug("_fetch_layout_sync: failed to enumerate tab sessions")
                 if win_tab_ids:
                     window_groups[window.window_id] = win_tab_ids
-            return tabs, window_groups
+
+            # Read each session's foreground job name independently, so a
+            # single failing/undefined variable (common for background-window
+            # sessions) can never blank out the rest of the batch. jobName is
+            # a per-session variable and resolves regardless of which window
+            # currently has focus.
+            async def _probe(session) -> "tuple[str, str]":
+                try:
+                    job = await session.async_get_variable("jobName")
+                except Exception:
+                    job = ""
+                return session.session_id, (job or "")
+
+            session_procs: dict[str, str] = {}
+            if sessions_to_probe:
+                results = await _asyncio.gather(
+                    *[_probe(s) for s in sessions_to_probe],
+                    return_exceptions=True,
+                )
+                for res in results:
+                    if isinstance(res, tuple):
+                        sid, job = res
+                        session_procs[sid] = job
+            return tabs, window_groups, session_procs
 
         raw = os.environ.get("ITERM_SESSION_ID", "")
         self_sid = extract_iterm_session_id(raw)
 
         result = _iterm2_call(_do)
         if result:
-            return result[0], self_sid, result[1]
-        return [], self_sid, {}
+            return result[0], self_sid, result[1], result[2]
+        return [], self_sid, {}, {}
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +403,19 @@ class KeystrokeSender:
 # ---------------------------------------------------------------------------
 
 
+# Foreground job names (case-insensitive substring match) that mark a session
+# as running an agent, for the "hide empty tabs" filter.
+ACTIVE_PROCESS_MARKERS = ("claude", "codex")
+
+
+def job_is_active(job_name: "str | None") -> bool:
+    """True if a session's foreground job name indicates a claude/codex process."""
+    if not job_name:
+        return False
+    lowered = job_name.lower()
+    return any(marker in lowered for marker in ACTIVE_PROCESS_MARKERS)
+
+
 def collect_session_ids(node) -> set:
     """Extract all session IDs from an iTerm2 Splitter/Session tree."""
     if isinstance(node, Session):
@@ -417,3 +463,37 @@ def filter_tabs_by_scope(
                 return [(tid, tn, r) for tid, tn, r in tabs if tid in allowed]
 
     return tabs
+
+
+def filter_tabs_hide_empty(
+    tabs: list,
+    self_sid: "str | None",
+    session_procs: "dict[str, str]",
+    enabled: bool,
+) -> list:
+    """Drop tabs whose sessions are all idle (no claude/codex process).
+
+    A tab is kept when it contains the TUI's own session, or when any of its
+    sessions has a foreground job name matching :data:`ACTIVE_PROCESS_MARKERS`
+    per *session_procs*.
+
+    This is orthogonal to :func:`filter_tabs_by_scope`: it removes tabs solely
+    by process activity, never by window identity, so a tab in any window is
+    kept as long as it has an active session. *session_procs* is expected to
+    cover every session across every window (see ``LayoutFetcher.fetch_sync``).
+
+    When *enabled* is ``False`` (or the TUI's own session can't be located)
+    the tabs are returned unchanged.
+    """
+    if not enabled or not self_sid:
+        return tabs
+
+    kept = []
+    for tab_id, tab_name, root in tabs:
+        sids = collect_session_ids(root)
+        if self_sid in sids:
+            kept.append((tab_id, tab_name, root))
+            continue
+        if any(job_is_active(session_procs.get(sid, "")) for sid in sids):
+            kept.append((tab_id, tab_name, root))
+    return kept

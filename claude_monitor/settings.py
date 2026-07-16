@@ -52,6 +52,7 @@ class Settings:
     theme: str = "textual-dark"
     debug: bool = False
     iterm_scope: str = "current_tab"  # current_tab / current_window / all_windows
+    iterm_hide_empty_tabs: bool = False  # hide tabs with no claude/codex session running
     timestamp_style: str = "24hr"  # 12hr / 24hr / date_time / auto
     account_usage: bool = False
     excluded_tools: list[str] | None = None  # tool names to skip auto-accepting
@@ -172,6 +173,13 @@ FIELD_DEFS: list[FieldDef] = [
         "label": "iTerm scope",
         "widget_type": "select",
         "options": SCOPE_OPTIONS,
+        "simple_mode_hidden": True,
+    },
+    {
+        "name": "iterm_hide_empty_tabs",
+        "label": "Hide empty tabs",
+        "widget_type": "switch",
+        "description": "Hide tabs/windows with no claude or codex session running",
         "simple_mode_hidden": True,
     },
     {
@@ -511,11 +519,15 @@ class SettingsScreen(ModalScreen[Settings | None]):
         else:
             oauth_json = oauth_text
 
-        # iterm_scope: hidden in simple mode → preserve original
+        # iterm_scope / iterm_hide_empty_tabs: hidden in simple mode → preserve original
         if self._simple_mode:
             iterm_scope = s.iterm_scope
+            iterm_hide_empty_tabs = s.iterm_hide_empty_tabs
         else:
             iterm_scope = self._get_select_value(_widget_id("iterm_scope"), s.iterm_scope)
+            iterm_hide_empty_tabs = self.query_one(
+                f"#{_widget_id('iterm_hide_empty_tabs')}", Switch
+            ).value
 
         # tab_idle_timeout_secs: integer input, clamped
         try:
@@ -533,6 +545,7 @@ class SettingsScreen(ModalScreen[Settings | None]):
             theme=self._get_select_value(_widget_id("theme"), s.theme),
             debug=self.query_one(f"#{_widget_id('debug')}", Switch).value,
             iterm_scope=iterm_scope,
+            iterm_hide_empty_tabs=iterm_hide_empty_tabs,
             timestamp_style=self._get_select_value(
                 _widget_id("timestamp_style"), s.timestamp_style
             ),
