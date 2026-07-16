@@ -6,6 +6,7 @@ Provides:
 - WidgetTreeBuilder: convert iTerm2 Splitter tree to Textual widgets
 - KeystrokeSender: send keystrokes to iTerm2 sessions
 - filter_tabs_by_scope: filter tabs by iTerm scope setting
+- filter_tabs_hide_empty: filter tabs by whether a claude/codex process is running
 
 All iTerm2 API calls are routed through a single persistent websocket
 connection managed by a daemon thread to avoid repeated connection
@@ -17,6 +18,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import logging
 import os
+import subprocess
 import threading
 from typing import TYPE_CHECKING
 
@@ -107,12 +109,17 @@ class LayoutFetcher:
     def fetch_sync() -> "tuple[list[tuple], str | None, dict, dict]":
         """Fetch the current iTerm2 layout.
 
-        Reads tab titles and per-session foreground job names only; never
-        writes to iTerm2 to avoid clobbering user-renamed tabs. Returns
-        ``(tabs, self_session_id, window_groups, session_procs)`` where *tabs*
+        Reads tab titles and each session's shell PID only; never writes to
+        iTerm2 to avoid clobbering user-renamed tabs. Returns
+        ``(tabs, self_session_id, window_groups, session_pids)`` where *tabs*
         is a list of ``(tab_id, tab_name, root_splitter)`` tuples and
-        *session_procs* maps each session ID (across all windows) to its
-        foreground job name.
+        *session_pids* maps each session ID (across all windows) to its
+        shell's PID (iTerm2's ``"pid"`` session variable). ``session_pids``
+        is used by ``filter_tabs_hide_empty`` to walk the real OS process
+        tree -- iTerm2's ``"jobName"`` variable reports whichever subprocess
+        is momentarily in the pane's foreground (an MCP server, a
+        ``caffeinate`` wrapper, ...), almost never claude/codex itself, so it
+        cannot be used directly to detect an active claude/codex session.
         """
 
         async def _do(app: "iterm2.App") -> "tuple[list, dict, dict]":  # type: ignore[name-defined]
@@ -141,19 +148,18 @@ class LayoutFetcher:
                 if win_tab_ids:
                     window_groups[window.window_id] = win_tab_ids
 
-            # Read each session's foreground job name independently, so a
-            # single failing/undefined variable (common for background-window
-            # sessions) can never blank out the rest of the batch. jobName is
-            # a per-session variable and resolves regardless of which window
-            # currently has focus.
-            async def _probe(session) -> "tuple[str, str]":
+            # Read each session's shell PID independently, so a single
+            # failing/undefined variable can never blank out the rest of the
+            # batch. "pid" is a per-session variable and resolves regardless
+            # of which window currently has focus.
+            async def _probe(session) -> "tuple[str, int | None]":
                 try:
-                    job = await session.async_get_variable("jobName")
+                    pid = await session.async_get_variable("pid")
                 except Exception:
-                    job = ""
-                return session.session_id, (job or "")
+                    pid = None
+                return session.session_id, pid
 
-            session_procs: dict[str, str] = {}
+            session_pids: dict[str, int] = {}
             if sessions_to_probe:
                 results = await _asyncio.gather(
                     *[_probe(s) for s in sessions_to_probe],
@@ -161,9 +167,10 @@ class LayoutFetcher:
                 )
                 for res in results:
                     if isinstance(res, tuple):
-                        sid, job = res
-                        session_procs[sid] = job
-            return tabs, window_groups, session_procs
+                        sid, pid = res
+                        if pid is not None:
+                            session_pids[sid] = pid
+            return tabs, window_groups, session_pids
 
         raw = os.environ.get("ITERM_SESSION_ID", "")
         self_sid = extract_iterm_session_id(raw)
@@ -403,17 +410,70 @@ class KeystrokeSender:
 # ---------------------------------------------------------------------------
 
 
-# Foreground job names (case-insensitive substring match) that mark a session
-# as running an agent, for the "hide empty tabs" filter.
+# Process names (exact match, case-insensitive, basename only) that mark a
+# claude/codex agent for the "hide empty tabs" filter.
 ACTIVE_PROCESS_MARKERS = ("claude", "codex")
 
 
-def job_is_active(job_name: "str | None") -> bool:
-    """True if a session's foreground job name indicates a claude/codex process."""
-    if not job_name:
+def _snapshot_process_tree() -> "tuple[dict[int, list[int]], dict[int, str]]":
+    """Take a one-shot snapshot of the local process tree.
+
+    Returns ``(children, comm)``: *children* maps a PID to its direct child
+    PIDs, *comm* maps a PID to its process name (basename only).
+
+    A claude/codex CLI process normally sits as a direct child of the pane's
+    shell and stays there for the life of the session; iTerm2's "jobName"
+    session variable instead reports whatever subprocess is momentarily in
+    the pane's foreground (an MCP server, a ``caffeinate`` wrapper, a shell
+    snapshot script, ...), which is almost never claude/codex itself. Walking
+    the real process tree from the shell's PID is the only reliable signal.
+    """
+    children: dict[int, list[int]] = {}
+    comm: dict[int, str] = {}
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout
+    except Exception:
+        log.debug("_snapshot_process_tree: ps invocation failed")
+        return children, comm
+
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        comm[pid] = os.path.basename(parts[2].strip())
+        children.setdefault(ppid, []).append(pid)
+    return children, comm
+
+
+def _process_tree_has_target(
+    root_pid: "int | None",
+    children: "dict[int, list[int]]",
+    comm: "dict[int, str]",
+) -> bool:
+    """True if *root_pid* or any of its descendants is a claude/codex process."""
+    if root_pid is None:
         return False
-    lowered = job_name.lower()
-    return any(marker in lowered for marker in ACTIVE_PROCESS_MARKERS)
+    seen: set[int] = set()
+    queue = [root_pid]
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if comm.get(pid, "").lower() in ACTIVE_PROCESS_MARKERS:
+            return True
+        queue.extend(children.get(pid, []))
+    return False
 
 
 def collect_session_ids(node) -> set:
@@ -468,18 +528,21 @@ def filter_tabs_by_scope(
 def filter_tabs_hide_empty(
     tabs: list,
     self_sid: "str | None",
-    session_procs: "dict[str, str]",
+    session_pids: "dict[str, int]",
+    children: "dict[int, list[int]]",
+    comm: "dict[int, str]",
     enabled: bool,
 ) -> list:
-    """Drop tabs whose sessions are all idle (no claude/codex process).
+    """Drop tabs with no claude/codex process running anywhere in them.
 
     A tab is kept when it contains the TUI's own session, or when any of its
-    sessions has a foreground job name matching :data:`ACTIVE_PROCESS_MARKERS`
-    per *session_procs*.
+    sessions' shell PID (per *session_pids*) has a claude/codex process
+    anywhere in its descendant tree (per *children*/*comm*, from
+    :func:`_snapshot_process_tree`).
 
     This is orthogonal to :func:`filter_tabs_by_scope`: it removes tabs solely
     by process activity, never by window identity, so a tab in any window is
-    kept as long as it has an active session. *session_procs* is expected to
+    kept as long as it has an active session. *session_pids* is expected to
     cover every session across every window (see ``LayoutFetcher.fetch_sync``).
 
     When *enabled* is ``False`` (or the TUI's own session can't be located)
@@ -494,6 +557,6 @@ def filter_tabs_hide_empty(
         if self_sid in sids:
             kept.append((tab_id, tab_name, root))
             continue
-        if any(job_is_active(session_procs.get(sid, "")) for sid in sids):
+        if any(_process_tree_has_target(session_pids.get(sid), children, comm) for sid in sids):
             kept.append((tab_id, tab_name, root))
     return kept

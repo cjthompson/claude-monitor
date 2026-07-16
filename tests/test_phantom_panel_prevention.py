@@ -253,6 +253,52 @@ class TestOutOfScopePhantomPrevention:
         assert app._out_of_scope_iterm_sids == {"iterm-B", "iterm-C"}
 
 
+class TestScopeSidsUpdatedPhantomPrevention:
+    """A session that is out-of-scope from the very first poll — before any
+    structural change has ever triggered on_layout_changed — must still be
+    suppressed. This is the case a sub-agent event surfaces: it carries its
+    parent pane's real iTerm session ID from a tab/window that was never
+    in-scope, so the in-scope tab structure never changes and
+    on_layout_changed never runs to populate _out_of_scope_iterm_sids.
+    ScopeSidsUpdated (posted every poll tick) is the only thing that catches
+    this case.
+    """
+
+    def test_scope_sids_updated_alone_marks_session_out_of_scope(self, app):
+        from claude_monitor.tui import ScopeSidsUpdated
+
+        assert app._out_of_scope_iterm_sids == set()  # no rebuild has ever run
+        msg = ScopeSidsUpdated(
+            all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set()
+        )
+        app.on_scope_sids_updated(msg)
+        assert app._out_of_scope_iterm_sids == {"iterm-elsewhere"}
+
+    def test_event_for_pane_only_known_via_scope_sids_updated_returns_none(self, app):
+        from claude_monitor.tui import ScopeSidsUpdated
+
+        msg = ScopeSidsUpdated(
+            all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set()
+        )
+        app.on_scope_sids_updated(msg)
+
+        data = _mk_event(claude_sid="c-subagent", iterm_sid="iterm-elsewhere")
+        result = app._resolve_panel(data)
+
+        assert result is None
+        assert "c-subagent" not in app.panels
+
+    def test_scope_sids_updated_ignored_while_rebuilding(self, app):
+        from claude_monitor.tui import ScopeSidsUpdated
+
+        app._rebuilding = True
+        msg = ScopeSidsUpdated(
+            all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set()
+        )
+        app.on_scope_sids_updated(msg)
+        assert app._out_of_scope_iterm_sids == set()
+
+
 # ---------------------------------------------------------------------------
 # Fallback panels must mount into the active tab, not as a #layout-root
 # sibling of #tab-content (which would render under every tab).

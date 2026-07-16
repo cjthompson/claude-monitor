@@ -3,24 +3,35 @@
 The setting hides tabs/windows that have no claude or codex session running.
 It must compose orthogonally with iterm_scope: a tab is hidden ONLY when it is
 genuinely empty (no active process in ANY of its sessions), never because of
-which iTerm2 window it lives in. This directly guards the reverted bug where
-non-self-window tabs with active sessions were being hidden.
+which iTerm2 window it lives in.
+
+Detection walks the real OS process tree from each session's shell PID rather
+than matching iTerm2's "jobName" variable. jobName reports whichever
+subprocess is momentarily in the pane's foreground (an MCP server, a
+`caffeinate` wrapper, a shell snapshot script, ...) — verified against a live
+iTerm2 session, an active claude session's jobName is "node", "caffeinate", or
+similar, essentially never "claude" itself, which instead sits as a stable
+direct child of the pane's shell. A prior fix keyed on jobName and appeared to
+work only because the TUI's own tab is unconditionally kept — every other
+window's genuinely-active tabs were still hidden. These tests guard the actual
+fix (process-tree walk) against that exact failure mode.
 
 Also covers the runtime path: a hook event for a session in a currently hidden
 (empty) tab must trigger a layout refresh (so the tab reappears) rather than
 spawning a detached fallback panel.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import iterm2.api_pb2
 import pytest
 from iterm2.session import Session, Splitter
 
 from claude_monitor.iterm2_layout import (
+    _process_tree_has_target,
+    _snapshot_process_tree,
     filter_tabs_by_scope,
     filter_tabs_hide_empty,
-    job_is_active,
 )
 from claude_monitor.settings import Settings
 from claude_monitor.tui import AutoAcceptTUI
@@ -60,18 +71,89 @@ class TestSettingsField:
 
 
 # ---------------------------------------------------------------------------
-# job_is_active marker matching
+# _snapshot_process_tree — parses `ps -A -o pid=,ppid=,comm=` output
 # ---------------------------------------------------------------------------
 
 
-class TestJobIsActive:
-    @pytest.mark.parametrize("job", ["claude", "Claude", "codex", "CODEX", "node claude wrapper"])
-    def test_active_markers(self, job):
-        assert job_is_active(job) is True
+class TestSnapshotProcessTree:
+    def test_parses_ps_output(self):
+        fake_stdout = (
+            "    1     0 launchd\n"
+            "93496 93495 -fish\n"
+            "94118 93496 claude\n"
+            "94210 94118 npm exec chrome-devtools-mcp@1.6.0\n"
+            "94395 94210 chrome-devtools-mcp\n"
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=fake_stdout)
+            children, comm = _snapshot_process_tree()
+        assert comm[94118] == "claude"
+        assert comm[94395] == "chrome-devtools-mcp"
+        assert 94118 in children[93496]
+        assert 94210 in children[94118]
 
-    @pytest.mark.parametrize("job", ["", None, "node", "bash", "-zsh", "python"])
-    def test_inactive(self, job):
-        assert job_is_active(job) is False
+    def test_full_path_comm_is_basenamed(self):
+        """Some claude processes report comm as a full app-bundle path."""
+        fake_stdout = (
+            "68907     1 /Users/x/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude\n"
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=fake_stdout)
+            _children, comm = _snapshot_process_tree()
+        assert comm[68907] == "claude"
+
+    def test_ps_failure_returns_empty(self):
+        with patch("subprocess.run", side_effect=OSError("no ps")):
+            children, comm = _snapshot_process_tree()
+        assert children == {}
+        assert comm == {}
+
+
+# ---------------------------------------------------------------------------
+# _process_tree_has_target — descendant-tree walk
+# ---------------------------------------------------------------------------
+
+
+class TestProcessTreeHasTarget:
+    def test_none_root_pid_is_false(self):
+        assert _process_tree_has_target(None, {}, {}) is False
+
+    def test_root_itself_matches(self):
+        assert _process_tree_has_target(1, {}, {1: "claude"}) is True
+
+    def test_direct_child_matches(self):
+        children = {1: [2]}
+        comm = {1: "-fish", 2: "claude"}
+        assert _process_tree_has_target(1, children, comm) is True
+
+    def test_no_match_in_tree(self):
+        children = {1: [2, 3]}
+        comm = {1: "-fish", 2: "node", 3: "caffeinate"}
+        assert _process_tree_has_target(1, children, comm) is False
+
+    def test_case_insensitive(self):
+        children = {1: [2]}
+        comm = {1: "-fish", 2: "Codex"}
+        assert _process_tree_has_target(1, children, comm) is True
+
+    def test_target_buried_under_unrelated_foreground_job(self):
+        """REGRESSION: the real-world shape of the bug. The pane's current
+        foreground job (what iTerm2's jobName would report) is an MCP server
+        subprocess two levels below the shell; claude itself is a direct
+        child of the shell, sitting above the transient foreground job.
+        A jobName string match would see "chrome-devtools-mcp" and never
+        find "claude" — the tree walk starting from the shell PID does.
+        """
+        # shell(1) -> claude(2) -> npm-exec(3) -> chrome-devtools-mcp(4) -> watchdog(5)
+        children = {1: [2], 2: [3], 3: [4], 4: [5]}
+        comm = {
+            1: "-fish",
+            2: "claude",
+            3: "npm exec chrome-devtools-mcp@1.6.0",
+            4: "chrome-devtools-mcp",
+            5: "node",
+        }
+        assert _process_tree_has_target(1, children, comm) is True
 
 
 # ---------------------------------------------------------------------------
@@ -79,18 +161,32 @@ class TestJobIsActive:
 # ---------------------------------------------------------------------------
 
 
+def _pids_children_comm(sid_to_pid: dict, active_pids: set) -> tuple:
+    """Build (session_pids, children, comm) where each pid in active_pids
+    has a direct "claude" child, and all other pids have only a shell."""
+    children: dict = {}
+    comm: dict = {}
+    next_pid = max(sid_to_pid.values(), default=0) + 1000
+    for pid in sid_to_pid.values():
+        comm[pid] = "-fish"
+        if pid in active_pids:
+            comm[next_pid] = "claude"
+            children[pid] = [next_pid]
+            next_pid += 1
+    return dict(sid_to_pid), children, comm
+
+
 class TestFilterTabsHideEmpty:
     def test_disabled_is_noop(self):
         """When the setting is off, every tab is returned unchanged."""
         tabs = [_mk_tab("t1", "a"), _mk_tab("t2", "b")]
-        procs = {}  # no active processes anywhere
-        result = filter_tabs_hide_empty(tabs, "self", procs, enabled=False)
+        result = filter_tabs_hide_empty(tabs, "self", {}, {}, {}, enabled=False)
         assert result == tabs
 
     def test_no_self_sid_is_noop(self):
         """Without a locatable self session, nothing is hidden (safe fallback)."""
         tabs = [_mk_tab("t1", "a")]
-        result = filter_tabs_hide_empty(tabs, None, {}, enabled=True)
+        result = filter_tabs_hide_empty(tabs, None, {}, {}, {}, enabled=True)
         assert result == tabs
 
     def test_empty_tab_is_hidden(self):
@@ -98,8 +194,10 @@ class TestFilterTabsHideEmpty:
         self_tab = _mk_tab("self", "self-sid")
         idle_tab = _mk_tab("idle", "idle-a", "idle-b")
         tabs = [self_tab, idle_tab]
-        procs = {"idle-a": "node", "idle-b": "bash"}  # no claude/codex
-        result = filter_tabs_hide_empty(tabs, "self-sid", procs, enabled=True)
+        pids, children, comm = _pids_children_comm(
+            {"self-sid": 1, "idle-a": 2, "idle-b": 3}, active_pids=set()
+        )
+        result = filter_tabs_hide_empty(tabs, "self-sid", pids, children, comm, enabled=True)
         assert result == [self_tab]
 
     def test_active_tab_is_kept(self):
@@ -107,16 +205,16 @@ class TestFilterTabsHideEmpty:
         self_tab = _mk_tab("self", "self-sid")
         active_tab = _mk_tab("active", "act-a")
         tabs = [self_tab, active_tab]
-        procs = {"act-a": "claude"}
-        result = filter_tabs_hide_empty(tabs, "self-sid", procs, enabled=True)
+        pids, children, comm = _pids_children_comm({"self-sid": 1, "act-a": 2}, active_pids={2})
+        result = filter_tabs_hide_empty(tabs, "self-sid", pids, children, comm, enabled=True)
         assert result == tabs
 
     def test_self_tab_always_kept_even_if_idle(self):
         """The TUI's own tab is never hidden, even with no active process."""
         self_tab = _mk_tab("self", "self-sid")
         tabs = [self_tab]
-        procs = {"self-sid": "python"}  # self is idle
-        result = filter_tabs_hide_empty(tabs, "self-sid", procs, enabled=True)
+        pids, children, comm = _pids_children_comm({"self-sid": 1}, active_pids=set())
+        result = filter_tabs_hide_empty(tabs, "self-sid", pids, children, comm, enabled=True)
         assert result == [self_tab]
 
     def test_multi_window_active_tab_not_hidden(self):
@@ -125,8 +223,8 @@ class TestFilterTabsHideEmpty:
         the TUI's own iTerm2 window was dropped even with running sessions.
 
         filter_tabs_hide_empty has no notion of windows at all — it only sees
-        the flat tab list and the process map — so a tab is kept purely on
-        process activity, regardless of which window it came from.
+        the flat tab list and each session's process tree — so a tab is kept
+        purely on process activity, regardless of which window it came from.
         """
         # scope=all_windows: three windows' worth of tabs are all in scope.
         self_tab = _mk_tab("w1-self", "self-sid")  # window 1 (TUI's own)
@@ -134,23 +232,41 @@ class TestFilterTabsHideEmpty:
         other_win_active2 = _mk_tab("w3-active", "w3-sid")  # window 3, running codex
         other_win_idle = _mk_tab("w2-idle", "w2-idle-sid")  # window 2, idle
         tabs = [self_tab, other_win_active, other_win_active2, other_win_idle]
-        procs = {
-            "self-sid": "python",
-            "w2-sid": "claude",
-            "w3-sid": "codex",
-            "w2-idle-sid": "node",
-        }
-        result = filter_tabs_hide_empty(tabs, "self-sid", procs, enabled=True)
+        pids, children, comm = _pids_children_comm(
+            {"self-sid": 1, "w2-sid": 2, "w3-sid": 3, "w2-idle-sid": 4},
+            active_pids={2, 3},
+        )
+        result = filter_tabs_hide_empty(tabs, "self-sid", pids, children, comm, enabled=True)
         # Self tab + both active non-self-window tabs kept; only the idle one dropped.
         assert result == [self_tab, other_win_active, other_win_active2]
+
+    def test_active_process_buried_under_transient_foreground_job(self):
+        """REGRESSION: mirrors the real bug shape end-to-end through the
+        filter, not just the tree walk. A non-self-window session's momentary
+        foreground job is an unrelated wrapper (e.g. `caffeinate`), with the
+        actual claude process sitting one level up as a direct shell child.
+        The tab must still be kept.
+        """
+        self_tab = _mk_tab("w1-self", "self-sid")
+        other_win_active = _mk_tab("w2-active", "w2-sid")
+        tabs = [self_tab, other_win_active]
+        # w2-sid's shell (pid 10) -> claude (pid 11) -> caffeinate (pid 12, the
+        # transient foreground job a jobName-based check would see instead).
+        pids = {"self-sid": 1, "w2-sid": 10}
+        children = {1: [], 10: [11], 11: [12]}
+        comm = {1: "-fish", 10: "-fish", 11: "claude", 12: "caffeinate"}
+        result = filter_tabs_hide_empty(tabs, "self-sid", pids, children, comm, enabled=True)
+        assert result == tabs
 
     def test_partial_active_session_keeps_tab(self):
         """A tab with a mix of idle and active sessions is kept."""
         self_tab = _mk_tab("self", "self-sid")
         mixed_tab = _mk_tab("mixed", "idle-x", "active-y")
         tabs = [self_tab, mixed_tab]
-        procs = {"idle-x": "bash", "active-y": "claude"}
-        result = filter_tabs_hide_empty(tabs, "self-sid", procs, enabled=True)
+        pids, children, comm = _pids_children_comm(
+            {"self-sid": 1, "idle-x": 2, "active-y": 3}, active_pids={3}
+        )
+        result = filter_tabs_hide_empty(tabs, "self-sid", pids, children, comm, enabled=True)
         assert result == tabs
 
     def test_composes_with_scope_all_windows(self):
@@ -163,8 +279,10 @@ class TestFilterTabsHideEmpty:
         scoped = filter_tabs_by_scope(all_tabs, "self-sid", "all_windows", {})
         assert scoped == all_tabs
         # ...then hide_empty drops only the idle tab (window identity ignored).
-        procs = {"self-sid": "python", "w2-sid": "codex", "w2-idle-sid": "bash"}
-        result = filter_tabs_hide_empty(scoped, "self-sid", procs, enabled=True)
+        pids, children, comm = _pids_children_comm(
+            {"self-sid": 1, "w2-sid": 2, "w2-idle-sid": 3}, active_pids={2}
+        )
+        result = filter_tabs_hide_empty(scoped, "self-sid", pids, children, comm, enabled=True)
         assert result == [self_tab, w2_active]
 
 

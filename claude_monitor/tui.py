@@ -46,6 +46,7 @@ from claude_monitor.iterm2_layout import (
     LayoutFingerprint,
     WidgetTreeBuilder,
     _iterm2_ready,
+    _snapshot_process_tree,
     collect_session_ids,
     filter_tabs_by_scope,
     filter_tabs_hide_empty,
@@ -157,11 +158,12 @@ def fetch_iterm_layout() -> None:
     start_persistent_connection()
     if not _iterm2_ready.wait(timeout=5):
         raise ConnectionRefusedError("Could not connect to iTerm2")
-    tabs, self_sid, win_groups, session_procs = LayoutFetcher.fetch_sync()
+    tabs, self_sid, win_groups, session_pids = LayoutFetcher.fetch_sync()
     settings = load_settings()
     scoped = filter_tabs_by_scope(tabs, self_sid, settings.iterm_scope, win_groups)
+    children, comm = _snapshot_process_tree() if settings.iterm_hide_empty_tabs else ({}, {})
     _layout_tabs = filter_tabs_hide_empty(
-        scoped, self_sid, session_procs, settings.iterm_hide_empty_tabs
+        scoped, self_sid, session_pids, children, comm, settings.iterm_hide_empty_tabs
     )
     _self_session_id = self_sid
     log.debug(f"fetch_iterm_layout done: tabs={len(_layout_tabs)}, self={_self_session_id}")
@@ -235,6 +237,9 @@ class AutoAcceptTUI(MonitorApp):
     TITLE = "Claude Monitor (Auto)"
 
     COMMANDS = {MonitorCommands}
+
+    BACKGROUND_AGENTS_TAB_ID = "tab-background-agents"
+    BACKGROUND_AGENTS_CONTAINER_ID = "background-agents-container"
 
     BINDINGS = [
         Binding("a", "toggle_pause", "Auto/Manual"),
@@ -399,7 +404,7 @@ class AutoAcceptTUI(MonitorApp):
         old_panels: "dict | None" = None,
         old_dashboard: "DashboardPanel | None" = None,
     ) -> None:
-        """Mount tab layout into a container. Handles single-tab and multi-tab cases."""
+        """Mount tab layout into a TabbedContent, plus a fixed Background Agents tab."""
         # Record original tab names and which sessions belong to each tab
         for tab_id, tab_name, tree in tabs:
             # Always refresh from the live iTerm2 read — claude-monitor never
@@ -407,9 +412,9 @@ class AutoAcceptTUI(MonitorApp):
             self._tab_original_names[tab_id] = _clean_tab_name(tab_name)
             self._tab_session_ids[tab_id] = collect_session_ids(tree)
 
-        if len(tabs) == 1:
-            # Single tab — render directly without tab wrapper
-            _tab_id, _tab_name, tree = tabs[0]
+        tc = TabbedContent(id="tab-content")
+        await root.mount(tc)
+        for tab_id, tab_name, tree in tabs:
             layout, dash = WidgetTreeBuilder.build(
                 tree,
                 self_session_id,
@@ -418,25 +423,21 @@ class AutoAcceptTUI(MonitorApp):
                 old_dashboard=old_dashboard,
                 settings=self.settings,
             )
-            self.dashboard = dash
-            await root.mount(layout)
-        else:
-            # Multiple tabs — wrap in TabbedContent
-            tc = TabbedContent(id="tab-content")
-            await root.mount(tc)
-            for tab_id, tab_name, tree in tabs:
-                layout, dash = WidgetTreeBuilder.build(
-                    tree,
-                    self_session_id,
-                    self.panels,
-                    old_panels=old_panels,
-                    old_dashboard=old_dashboard,
-                    settings=self.settings,
-                )
-                if dash:
-                    self.dashboard = dash
-                pane = TabPane(tab_name, layout, id=_safe_tab_css_id(tab_id))
-                await tc.add_pane(pane)
+            if dash:
+                self.dashboard = dash
+            pane = TabPane(tab_name, layout, id=_safe_tab_css_id(tab_id))
+            await tc.add_pane(pane)
+
+        # Always-present tab for sessions that can't be attributed to any
+        # tracked pane (e.g. a detached/background sub-agent with no iTerm
+        # session ID to match). Fixed location, so these never get pinned
+        # onto whichever real tab happens to be active.
+        bg_pane = TabPane(
+            "Background Agents",
+            Vertical(id=self.BACKGROUND_AGENTS_CONTAINER_ID),
+            id=self.BACKGROUND_AGENTS_TAB_ID,
+        )
+        await tc.add_pane(bg_pane)
 
         self.update_tab_titles()
 
@@ -497,7 +498,7 @@ class AutoAcceptTUI(MonitorApp):
             if self._stop_event.is_set():
                 break
             try:
-                all_tabs, self_sid, win_groups, session_procs = LayoutFetcher.fetch_sync()
+                all_tabs, self_sid, win_groups, session_pids = LayoutFetcher.fetch_sync()
                 all_sids: set[str] = set()
                 for _, _, tree in all_tabs:
                     all_sids |= collect_session_ids(tree)
@@ -507,8 +508,16 @@ class AutoAcceptTUI(MonitorApp):
                 scoped_sids: set[str] = set()
                 for _, _, tree in scoped_tabs:
                     scoped_sids |= collect_session_ids(tree)
+                children, comm = (
+                    _snapshot_process_tree() if self.settings.iterm_hide_empty_tabs else ({}, {})
+                )
                 tabs = filter_tabs_hide_empty(
-                    scoped_tabs, self_sid, session_procs, self.settings.iterm_hide_empty_tabs
+                    scoped_tabs,
+                    self_sid,
+                    session_pids,
+                    children,
+                    comm,
+                    self.settings.iterm_hide_empty_tabs,
                 )
                 # Keep out-of-scope/hidden-tab tracking fresh on every tick,
                 # not only when the in-scope structure changes below — a
@@ -746,12 +755,12 @@ class AutoAcceptTUI(MonitorApp):
             panel.add_class("worktree")
         self.panels[claude_sid] = panel
         self._iterm_to_panel[claude_sid] = claude_sid
-        # Mount into the active tab pane so the panel is only visible under
-        # the tab it appeared in, not glued outside the tab structure where
-        # it would render under every tab regardless of which is selected.
+        # Mount into the fixed Background Agents tab — not whichever tab
+        # happens to be active — since a session that reaches this point
+        # can't be attributed to any tracked pane and guessing "active tab"
+        # produces a panel pinned somewhere unrelated to where it belongs.
         try:
-            tc = self.query_one("#tab-content", TabbedContent)
-            target = tc.get_pane(tc.active) if tc.active else None
+            target = self.query_one(f"#{self.BACKGROUND_AGENTS_CONTAINER_ID}")
         except Exception:
             target = None
         try:
@@ -975,10 +984,12 @@ class AutoAcceptTUI(MonitorApp):
             )
             counts[tab_id] = (active_count, total_count)
 
-        # Each tab gets an equal share of the terminal width.
-        # Subtract 2 for the per-tab padding (1 char left, 1 char right).
+        # Each tab gets an equal share of the terminal width. +1 accounts for
+        # the always-present Background Agents tab, which isn't in
+        # _tab_original_names. Subtract 2 for the per-tab padding (1 char
+        # left, 1 char right).
         terminal_width = self.size.width
-        per_tab_width = max(6, (terminal_width // num_tabs) - 2)
+        per_tab_width = max(6, (terminal_width // (num_tabs + 1)) - 2)
 
         for tab_id, original_name in self._tab_original_names.items():
             active_count, total_count = counts[tab_id]
@@ -1096,7 +1107,7 @@ class AutoAcceptTUI(MonitorApp):
         """Fetch layout in a thread (can't run iterm2 sync from Textual's event loop)."""
         error = False
         try:
-            all_tabs, self_sid, win_groups, session_procs = LayoutFetcher.fetch_sync()
+            all_tabs, self_sid, win_groups, session_pids = LayoutFetcher.fetch_sync()
             all_sids: set[str] = set()
             for _, _, tree in all_tabs:
                 all_sids |= collect_session_ids(tree)
@@ -1106,8 +1117,16 @@ class AutoAcceptTUI(MonitorApp):
             scoped_sids: set[str] = set()
             for _, _, tree in scoped_tabs:
                 scoped_sids |= collect_session_ids(tree)
+            children, comm = (
+                _snapshot_process_tree() if self.settings.iterm_hide_empty_tabs else ({}, {})
+            )
             tabs = filter_tabs_hide_empty(
-                scoped_tabs, self_sid, session_procs, self.settings.iterm_hide_empty_tabs
+                scoped_tabs,
+                self_sid,
+                session_pids,
+                children,
+                comm,
+                self.settings.iterm_hide_empty_tabs,
             )
             if tabs:
                 self.post_message(LayoutChanged(tabs, self_sid, all_sids, scoped_sids))
