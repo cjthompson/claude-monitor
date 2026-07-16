@@ -3,6 +3,7 @@
 ## 2026-07-16
 
 ### Tasks
+- Add "iTerm Scope" Settings option to ignore tabs/windows with no claude or codex sessions (#settings, #tabs)
 - Change tab text color for tabs with active claude sessions (#tabs, #ui)
 
 ## 2026-07-14
