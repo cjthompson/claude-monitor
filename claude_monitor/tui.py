@@ -184,21 +184,32 @@ class AutoAcceptTUI(MonitorApp):
     #tab-content TabPane {
         padding: 0;
     }
-    #tab-content Tab.-active {
-        background: $accent;
-        color: $text;
-        text-style: bold;
-    }
     #tab-content Tab {
         text-style: none;
         background: $panel;
+        color: $foreground 35%;
         border-right: solid $foreground 30%;
+    }
+    #tab-content Tab.has-agents {
+        color: $foreground 70%;
+    }
+    #tab-content Tab.has-active-session {
+        color: $success;
     }
     #tab-content Tab:last-of-type {
         border-right: none;
     }
-    #tab-content Tab.has-active-session {
-        color: $success;
+    #tab-content Tab.-active {
+        background: $accent;
+        color: auto 70%;
+        text-style: bold;
+    }
+    #tab-content Tab.-active.has-agents {
+        color: auto;
+    }
+    #tab-content Tab.-active.has-active-session {
+        background: $success;
+        color: auto;
     }
     SessionPanel.worktree {
         border: solid $secondary;
@@ -1007,12 +1018,27 @@ class AutoAcceptTUI(MonitorApp):
             try:
                 tab_widget = tc.get_tab(_safe_tab_css_id(tab_id))
                 tab_widget.label = label
-                if active_count > 0:
-                    tab_widget.add_class("has-active-session")
-                else:
-                    tab_widget.remove_class("has-active-session")
+                tab_widget.set_class(total_count > 0, "has-agents")
+                tab_widget.set_class(active_count > 0, "has-active-session")
             except Exception:
                 pass  # Tab may not exist yet during rebuild
+
+        # Background Agents tab: count panels not attributed to any tracked
+        # real tab (i.e. every fallback panel, regardless of which case
+        # produced it).
+        real_tab_sids: set[str] = set()
+        for sids in self._tab_session_ids.values():
+            real_tab_sids |= sids
+        background_count = sum(1 for sid in self.panels if sid not in real_tab_sids)
+        bg_suffix = f" [{background_count}]"
+        bg_name = "Background Agents"
+        max_bg_name_chars = max(6, per_tab_width - len(bg_suffix))
+        if len(bg_name) > max_bg_name_chars:
+            bg_name = bg_name[: max(6, max_bg_name_chars - 1)] + "…"
+        try:
+            tc.get_tab(self.BACKGROUND_AGENTS_TAB_ID).label = f"{bg_name}{bg_suffix}"
+        except Exception:
+            pass  # Tab may not exist yet during rebuild
 
     @work(thread=True, exit_on_error=False)
     def update_tab_titles(self) -> None:

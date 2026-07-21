@@ -22,6 +22,19 @@ or rendered outside the tab structure:
 All three are prevented by checks in _resolve_panel that fire before
 any DOM mount operation, so tests can call _resolve_panel directly
 without a full Textual app lifecycle.
+
+A fourth class, covered separately below:
+
+4. Sessions that never get a structural rebuild to react to (e.g. a
+   sub-agent whose events carry a parent pane's iTerm session ID from an
+   out-of-scope tab/window): ScopeSidsUpdated keeps out-of-scope/hidden-tab
+   tracking fresh on every poll tick, not only when on_layout_changed runs.
+
+Any hook event that still can't be attributed to a tracked pane (e.g. a
+detached/background sub-agent with no iTerm session ID at all) creates a
+fallback panel, but it always mounts into the fixed Background Agents tab
+rather than whichever tab happens to be active — see
+TestFallbackPanelMountTarget.
 """
 
 from unittest.mock import MagicMock
@@ -300,57 +313,58 @@ class TestScopeSidsUpdatedPhantomPrevention:
 
 
 # ---------------------------------------------------------------------------
-# Fallback panels must mount into the active tab, not as a #layout-root
-# sibling of #tab-content (which would render under every tab).
+# Fallback panels must mount into the fixed Background Agents tab, not
+# whichever tab happens to be active — a session that reaches this path
+# can't be attributed to any tracked pane, so guessing "active tab" pins
+# it somewhere unrelated to where it actually belongs.
 # ---------------------------------------------------------------------------
 
 
-def _patched_resolve_with_tabs(app, data):
-    """Call _resolve_panel with a TabbedContent + active TabPane mocked out.
+def _patched_resolve_with_background_tab(app, data):
+    """Call _resolve_panel with the Background Agents container mocked out.
 
-    Returns (result, mock_active_pane, mock_layout_root) so tests can assert
+    Returns (result, mock_container, mock_layout_root) so tests can assert
     which one .mount() was actually called on.
     """
-    mock_pane = MagicMock()
-    mock_tc = MagicMock()
-    mock_tc.active = "tab-1"
-    mock_tc.get_pane.return_value = mock_pane
+    mock_container = MagicMock()
     mock_root = MagicMock()
 
     def _query_one(selector, *args, **kwargs):
-        if selector == "#tab-content":
-            return mock_tc
+        if selector == f"#{app.BACKGROUND_AGENTS_CONTAINER_ID}":
+            return mock_container
         return mock_root
 
     app.query_one = MagicMock(side_effect=_query_one)
     app.mount = MagicMock()
     result = app._resolve_panel(data)
-    return result, mock_pane, mock_root
+    return result, mock_container, mock_root
 
 
 class TestFallbackPanelMountTarget:
-    def test_fallback_panel_mounts_into_active_tab_pane(self, app):
-        """When a TabbedContent exists, the fallback panel mounts into its
-        active TabPane, not directly onto #layout-root — otherwise it would
-        render as a sibling of the tab structure, visible under every tab."""
+    def test_fallback_panel_mounts_into_background_agents_container(self, app):
+        """The fallback panel always mounts into the fixed Background Agents
+        tab's container, never onto #layout-root directly (which would render
+        as a sibling of the tab structure, visible under every tab)."""
         data = _mk_event(claude_sid="c-tabbed", iterm_sid="iterm-unknown-tabbed")
 
-        result, mock_pane, mock_root = _patched_resolve_with_tabs(app, data)
+        result, mock_container, mock_root = _patched_resolve_with_background_tab(app, data)
 
         assert result is not None
-        mock_pane.mount.assert_called_once_with(result)
+        mock_container.mount.assert_called_once_with(result)
         mock_root.mount.assert_not_called()
 
-    def test_fallback_panel_mounts_into_layout_root_when_no_tabs(self, app):
-        """Single-tab layouts have no TabbedContent — #layout-root is the
-        correct (and only) mount target in that case."""
+    def test_fallback_panel_mounts_into_layout_root_when_background_container_missing(
+        self, app
+    ):
+        """If the Background Agents container can't be found (e.g. some
+        startup edge case), #layout-root is the fallback mount target."""
         data = _mk_event(claude_sid="c-single", iterm_sid="iterm-unknown-single")
 
         mock_root = MagicMock()
 
         def _query_one(selector, *args, **kwargs):
-            if selector == "#tab-content":
-                raise Exception("no TabbedContent mounted")
+            if selector == f"#{app.BACKGROUND_AGENTS_CONTAINER_ID}":
+                raise Exception("Background Agents container not mounted")
             return mock_root
 
         app.query_one = MagicMock(side_effect=_query_one)
