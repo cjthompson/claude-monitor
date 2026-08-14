@@ -41,6 +41,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from claude_monitor.messages import HookEvent
 from claude_monitor.tui import AutoAcceptTUI
 from claude_monitor.widgets import SessionPanel
 
@@ -281,18 +282,14 @@ class TestScopeSidsUpdatedPhantomPrevention:
         from claude_monitor.tui import ScopeSidsUpdated
 
         assert app._out_of_scope_iterm_sids == set()  # no rebuild has ever run
-        msg = ScopeSidsUpdated(
-            all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set()
-        )
+        msg = ScopeSidsUpdated(all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set())
         app.on_scope_sids_updated(msg)
         assert app._out_of_scope_iterm_sids == {"iterm-elsewhere"}
 
     def test_event_for_pane_only_known_via_scope_sids_updated_returns_none(self, app):
         from claude_monitor.tui import ScopeSidsUpdated
 
-        msg = ScopeSidsUpdated(
-            all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set()
-        )
+        msg = ScopeSidsUpdated(all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set())
         app.on_scope_sids_updated(msg)
 
         data = _mk_event(claude_sid="c-subagent", iterm_sid="iterm-elsewhere")
@@ -305,9 +302,7 @@ class TestScopeSidsUpdatedPhantomPrevention:
         from claude_monitor.tui import ScopeSidsUpdated
 
         app._rebuilding = True
-        msg = ScopeSidsUpdated(
-            all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set()
-        )
+        msg = ScopeSidsUpdated(all_iterm_sids={"iterm-elsewhere"}, scoped_iterm_sids=set())
         app.on_scope_sids_updated(msg)
         assert app._out_of_scope_iterm_sids == set()
 
@@ -353,9 +348,7 @@ class TestFallbackPanelMountTarget:
         mock_container.mount.assert_called_once_with(result)
         mock_root.mount.assert_not_called()
 
-    def test_fallback_panel_mounts_into_layout_root_when_background_container_missing(
-        self, app
-    ):
+    def test_fallback_panel_mounts_into_layout_root_when_background_container_missing(self, app):
         """If the Background Agents container can't be found (e.g. some
         startup edge case), #layout-root is the fallback mount target."""
         data = _mk_event(claude_sid="c-single", iterm_sid="iterm-unknown-single")
@@ -374,3 +367,43 @@ class TestFallbackPanelMountTarget:
 
         assert result is not None
         mock_root.mount.assert_called_once_with(result)
+
+
+class TestSessionEndPanelPruning:
+    def test_session_end_removes_detached_background_panel(self, app):
+        """A finished detached session must not keep its panel or route alive."""
+        panel = _patched_resolve(
+            app,
+            _mk_event(claude_sid="background-finished", iterm_sid="iterm-unknown"),
+        )
+        panel.write = lambda _text: None
+        panel._update_status = lambda: None
+        app.update_tab_titles = lambda: None
+
+        app.on_hook_event(
+            HookEvent(
+                _mk_event("background-finished", "iterm-unknown")
+                | {"hook_event_name": "SessionEnd"}
+            )
+        )
+
+        assert "background-finished" not in app.panels
+        assert "background-finished" not in app._iterm_to_panel
+
+    def test_session_end_keeps_live_iterm_pane(self, app):
+        """A finished Claude session must not delete the still-open iTerm pane."""
+        live_panel = SessionPanel("iterm-live", "Live iTerm pane")
+        live_panel.write = lambda _text: None
+        live_panel._update_status = lambda: None
+        app.panels["iterm-live"] = live_panel
+        app._iterm_to_panel["claude-finished"] = "iterm-live"
+        app.update_tab_titles = lambda: None
+
+        app.on_hook_event(
+            HookEvent(
+                _mk_event("claude-finished", "iterm-live") | {"hook_event_name": "SessionEnd"}
+            )
+        )
+
+        assert app.panels["iterm-live"] is live_panel
+        assert "claude-finished" not in app._iterm_to_panel

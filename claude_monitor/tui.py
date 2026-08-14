@@ -792,6 +792,17 @@ class AutoAcceptTUI(MonitorApp):
         iterm_sid = self._iterm_sid_from_event(data)
         return bool(iterm_sid and iterm_sid == _self_session_id)
 
+    def _prune_ended_session(self, claude_sid: str) -> None:
+        """Forget a finished Claude session and remove its detached panel, if any."""
+        if not claude_sid:
+            return
+        panel_id = self._iterm_to_panel.pop(claude_sid, None)
+        if panel_id != claude_sid:
+            return
+        panel = self.panels.pop(claude_sid, None)
+        if panel and panel.is_mounted:
+            panel.remove()
+
     def on_hook_event(self, msg: HookEvent) -> None:
         if self._rebuilding:
             return
@@ -831,6 +842,8 @@ class AutoAcceptTUI(MonitorApp):
                 sid_short = panel.session_id[:8]
                 self.dashboard.record_event(f"[{t}] [{sid_short}] {label} {detail}")
 
+        if event_name == "SessionEnd":
+            self._prune_ended_session(data.get("session_id", ""))
         self.update_tab_titles()
 
     def _handle_dashboard_event(self, data: dict, event_name: str, t: str) -> None:
