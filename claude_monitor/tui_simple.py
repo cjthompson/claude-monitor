@@ -57,6 +57,7 @@ from claude_monitor.iterm2_layout import (
 from claude_monitor.messages import HookEvent
 from claude_monitor.screens import (  # noqa: F401
     ChoicesScreen,
+    HandoffPanel,
     HelpScreen,
     PaneContextMenu,
     QuestionsScreen,
@@ -219,6 +220,8 @@ class SimpleTUI(MonitorApp):
         Binding("right_square_bracket", "next_tab", "Next Tab", show=False),
         Binding("left_square_bracket", "prev_tab", "Prev Tab", show=False),
         Binding("x", "close_tab", "Close Tab", show=False),
+        Binding("h", "show_handoff", "Hand-off", show=False),
+        Binding("H", "capture_handoff", "Capture Hand-off", show=False),
         Binding("question_mark", "show_help", "Help"),
         Binding("q", "quit", "Quit"),
     ]
@@ -309,9 +312,17 @@ class SimpleTUI(MonitorApp):
                 yield DraggableDashboard(id="dashboard-panel")
         yield Footer()
 
+    HANDOFF_TAB_ID = "tab-handoff"
+
     async def on_mount(self) -> None:
         self._apply_settings(self.settings)
         self.dashboard = self.query_one("#dashboard-panel", DashboardPanel)
+        # Fixed Hand-off tab, mirroring the auto-mode TUI.
+        try:
+            tc = self.query_one("#tab-content", TabbedContent)
+            await tc.add_pane(TabPane("Hand-off", HandoffPanel(), id=self.HANDOFF_TAB_ID))
+        except Exception as e:  # noqa: BLE001 - the tab is optional
+            log.debug(f"on_mount: could not add Hand-off tab: {e}")
         # Apply persisted dashboard height
         self._apply_dashboard_height()
         self._update_arrow()
@@ -336,6 +347,7 @@ class SimpleTUI(MonitorApp):
         # Start background workers
         self.watch_events()
         # poll_usage is started by _apply_settings if account_usage is on
+        self._start_handoff_polling()
         self.set_interval(1.0, self._tick_status)
         self.serve_api()
 
@@ -494,7 +506,16 @@ class SimpleTUI(MonitorApp):
         tab_pane = TabPane(tab_title, panel, id=tab_pane_id)
         try:
             tc = self.query_one("#tab-content", TabbedContent)
-            await tc.add_pane(tab_pane)
+            # Keep the fixed Hand-off pane last, and make sure the first
+            # session tab steals focus from it the way it used to when it was
+            # the only pane in the tree.
+            was_handoff = tc.active == self.HANDOFF_TAB_ID
+            try:
+                await tc.add_pane(tab_pane, before=self.HANDOFF_TAB_ID)
+            except Exception:
+                await tc.add_pane(tab_pane)
+            if was_handoff or not tc.active:
+                tc.active = tab_pane_id
             log.debug(f"_resolve_panel: added tab for session {claude_sid[:8]}")
         except Exception as e:  # Textual raises generic Exception for add_pane failures
             log.warning(f"_resolve_panel: failed to add tab pane: {e}")
@@ -507,6 +528,7 @@ class SimpleTUI(MonitorApp):
 
     async def on_hook_event(self, msg: HookEvent) -> None:
         data = msg.data
+        self._record_session_meta(data)
         event_name = data.get("hook_event_name", "")
         event_ts = datetime.fromtimestamp(data.get("_timestamp", time.time()))
         t = self._format_ts(event_ts)

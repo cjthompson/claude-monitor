@@ -53,6 +53,7 @@ from claude_monitor.iterm2_layout import (
     start_persistent_connection,
 )
 from claude_monitor.messages import HookEvent
+from claude_monitor.screens.handoff import HandoffPanel
 from claude_monitor.settings import Settings, load_settings
 from claude_monitor.usage import (
     fetch_usage,
@@ -254,6 +255,7 @@ class AutoAcceptTUI(MonitorApp):
 
     BACKGROUND_AGENTS_TAB_ID = "tab-background-agents"
     BACKGROUND_AGENTS_CONTAINER_ID = "background-agents-container"
+    HANDOFF_TAB_ID = "tab-handoff"
 
     BINDINGS = [
         Binding("a", "toggle_pause", "Auto/Manual"),
@@ -270,6 +272,8 @@ class AutoAcceptTUI(MonitorApp):
         Binding("right_square_bracket", "next_tab", "Next Tab", show=False),
         Binding("left_square_bracket", "prev_tab", "Prev Tab", show=False),
         Binding("x", "close_tab", "Close Tab", show=False),
+        Binding("h", "show_handoff", "Hand-off", show=False),
+        Binding("H", "capture_handoff", "Capture Hand-off", show=False),
         Binding("question_mark", "show_help", "Help"),
         Binding("q", "quit", "Quit"),
     ]
@@ -407,6 +411,7 @@ class AutoAcceptTUI(MonitorApp):
         if self.settings.account_usage:
             self._usage_polling = True
             self.poll_usage()
+        self._start_handoff_polling()
         self.set_interval(1.0, self._tick_status)
         self.serve_api()
 
@@ -452,6 +457,10 @@ class AutoAcceptTUI(MonitorApp):
             id=self.BACKGROUND_AGENTS_TAB_ID,
         )
         await tc.add_pane(bg_pane)
+
+        # Fixed Hand-off tab: "where did we leave off" for every session the
+        # monitor has recorded, across projects.
+        await tc.add_pane(TabPane("Hand-off", HandoffPanel(), id=self.HANDOFF_TAB_ID))
 
         self.update_tab_titles()
 
@@ -807,6 +816,7 @@ class AutoAcceptTUI(MonitorApp):
         if self._rebuilding:
             return
         data = msg.data
+        self._record_session_meta(data)
         event_name = data.get("hook_event_name", "")
         event_ts = datetime.fromtimestamp(data.get("_timestamp", time.time()))
         t = self._format_ts(event_ts)

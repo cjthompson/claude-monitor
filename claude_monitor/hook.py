@@ -72,6 +72,89 @@ def decide_permission(state: dict, event: dict) -> tuple[str, int]:
     return "allowed", 0
 
 
+def _handle_session_end(data: dict) -> None:
+    """Capture a hand-off snapshot on SessionEnd, best-effort only.
+
+    Imports are lazy so PermissionRequest (the hot path) never pays for
+    this. Any failure — settings load, missing handoff module, capture
+    errors — is swallowed so a hand-off bug can never block session
+    teardown.
+    """
+    try:
+        from claude_monitor.settings import load_settings
+
+        settings = load_settings()
+    except Exception:
+        return
+
+    if not getattr(settings, "handoff_enabled", False):
+        return
+    if not getattr(settings, "handoff_capture_on_session_end", True):
+        return
+
+    try:
+        from claude_monitor import handoff
+
+        handoff.capture(
+            data.get("session_id", ""),
+            data.get("cwd", ""),
+            transcript_path=data.get("transcript_path"),
+            reason="session_end",
+            with_llm=False,
+            settings=settings,
+        )
+    except Exception:
+        pass
+
+
+def _handle_session_start(data: dict) -> None:
+    """Inject prior-session hand-off context on SessionStart, best-effort only.
+
+    Imports are lazy so PermissionRequest (the hot path) never pays for
+    this. Any failure is swallowed — a hand-off bug must never block a
+    session lifecycle event.
+    """
+    try:
+        from claude_monitor.settings import load_settings
+
+        settings = load_settings()
+    except Exception:
+        return
+
+    if not getattr(settings, "handoff_enabled", False):
+        return
+    if not getattr(settings, "handoff_inject_on_start", False):
+        return
+
+    try:
+        from claude_monitor import handoff
+
+        session_id = data.get("session_id", "")
+        context = handoff.injection_context(
+            data.get("cwd", ""),
+            exclude_session_id=session_id,
+            max_age_hours=getattr(settings, "handoff_inject_max_age_hours", 72),
+        )
+    except Exception:
+        return
+
+    if not context:
+        return
+
+    try:
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": context,
+                }
+            },
+            sys.stdout,
+        )
+    except Exception:
+        pass
+
+
 def main():
     os.makedirs(SIGNAL_DIR, exist_ok=True)
 
@@ -105,6 +188,14 @@ def main():
     # Log the event
     with open(EVENTS_FILE, "a") as f:
         f.write(json.dumps(data) + "\n")
+
+    if event_name == "SessionEnd":
+        _handle_session_end(data)
+        return
+
+    if event_name == "SessionStart":
+        _handle_session_start(data)
+        return
 
     # Only auto-allow for PermissionRequest when monitor is running and not paused
     if event_name != "PermissionRequest" or data.get("_decision") in ("deferred", "no_monitor"):

@@ -163,6 +163,12 @@ class MonitorApp(App):
         # HTTP API server handle
         self._api_server = None
 
+        # Hand-off: session_id → {cwd, transcript_path, last_event_ts,
+        # last_capture_ts}.  Populated from hook events; consumed by the
+        # ``poll_handoff`` worker and by ``action_capture_handoff``.
+        self._session_meta: dict[str, dict] = {}
+        self._handoff_polling: bool = False
+
     # ------------------------------------------------------------------
     # Abstract interface — subclasses MUST implement these
     # ------------------------------------------------------------------
@@ -303,9 +309,7 @@ class MonitorApp(App):
             n_paused = sum(1 for sid in self.panels if self.is_pane_paused(sid))
             # Count only per-pane ask pauses (exclude global \u2014 shown separately)
             n_ask_paused = sum(
-                1
-                for sid in self.panels
-                if not self._global_ask_paused and self.is_ask_paused(sid)
+                1 for sid in self.panels if not self._global_ask_paused and self.is_ask_paused(sid)
             )
             if self.paused:
                 mode_text = "[bold]MANUAL[/]"
@@ -359,6 +363,7 @@ class MonitorApp(App):
         if settings.account_usage and not self._usage_polling:
             self._usage_polling = True
             self.poll_usage()
+        self._start_handoff_polling()
         if not settings.account_usage and self._last_usage_data:
             self._last_usage_data = None
             self._update_status_bar()
@@ -563,6 +568,156 @@ class MonitorApp(App):
             self.call_from_thread(self._update_status_bar)
             self._stop_event.wait(300)
         log.debug("poll_usage: stopped")
+
+    # ------------------------------------------------------------------
+    # Hand-off summaries
+    # ------------------------------------------------------------------
+
+    def _record_session_meta(self, data: dict) -> None:
+        """Remember cwd/transcript/last-activity for a hook event's session.
+
+        Cheap and called for every event, so it must never raise.
+        """
+        try:
+            sid = data.get("session_id")
+            if not sid:
+                return
+            meta = self._session_meta.setdefault(sid, {})
+            cwd = data.get("cwd")
+            if cwd:
+                meta["cwd"] = cwd
+            transcript_path = data.get("transcript_path")
+            if transcript_path:
+                meta["transcript_path"] = transcript_path
+            meta["last_event_ts"] = data.get("_timestamp") or time.time()
+        except Exception as e:  # noqa: BLE001 - never break event handling
+            log.debug(f"_record_session_meta: {e}")
+
+    def _capture_handoff(self, session_id: str, *, reason: str) -> bool:
+        """Capture one hand-off entry. Returns True if an entry was written."""
+        from claude_monitor import handoff
+
+        meta = self._session_meta.get(session_id) or {}
+        cwd = meta.get("cwd")
+        if not cwd:
+            return False
+        with_llm = reason != "session_end" and bool(
+            getattr(self.settings, "handoff_llm_enabled", False)
+        )
+        entry = handoff.capture(
+            session_id,
+            cwd,
+            transcript_path=meta.get("transcript_path"),
+            reason=reason,
+            with_llm=with_llm,
+            settings=self.settings,
+        )
+        if entry is not None:
+            meta["last_capture_ts"] = time.time()
+        return entry is not None
+
+    @work(thread=True, exit_on_error=False)
+    def poll_handoff(self) -> None:
+        """Capture hand-off entries for sessions that have gone idle."""
+        log.debug("poll_handoff: started")
+        while not self._stop_event.is_set():
+            idle_mins = int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0)
+            if not getattr(self.settings, "handoff_enabled", False) or idle_mins <= 0:
+                self._handoff_polling = False
+                break
+
+            now = time.time()
+            cutoff = idle_mins * 60
+            for sid, meta in list(self._session_meta.items()):
+                last_event = meta.get("last_event_ts") or 0
+                if not last_event or (now - last_event) < cutoff:
+                    continue
+                # Nothing new since the last capture — don't rewrite the entry.
+                if meta.get("last_capture_ts", 0) >= last_event:
+                    continue
+                try:
+                    self._capture_handoff(sid, reason="idle")
+                except Exception as e:  # noqa: BLE001 - one bad session must not stop the loop
+                    log.warning(f"poll_handoff: capture failed for {sid}: {e}")
+
+            self._stop_event.wait(60)
+        log.debug("poll_handoff: stopped")
+
+    def _start_handoff_polling(self) -> None:
+        """Start ``poll_handoff`` if enabled and not already running."""
+        if self._handoff_polling:
+            return
+        if not getattr(self.settings, "handoff_enabled", False):
+            return
+        if int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0) <= 0:
+            return
+        self._handoff_polling = True
+        self.poll_handoff()
+
+    def _handoff_panel(self):
+        """Return the mounted ``HandoffPanel``, or None."""
+        from claude_monitor.screens.handoff import HandoffPanel
+
+        try:
+            return self.query_one(HandoffPanel)
+        except Exception:
+            return None
+
+    def action_show_handoff(self) -> None:
+        """Open/focus the Hand-off tab."""
+        panel = self._handoff_panel()
+        if panel is None:
+            self.notify("Hand-off tab is not available.", severity="warning")
+            return
+        try:
+            from textual.widgets import TabbedContent, TabPane
+
+            pane = panel
+            while pane is not None and not isinstance(pane, TabPane):
+                pane = pane.parent
+            if pane is not None:
+                tc = pane.parent
+                while tc is not None and not isinstance(tc, TabbedContent):
+                    tc = tc.parent
+                if tc is not None and pane.id:
+                    tc.active = pane.id
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"action_show_handoff: {e}")
+        panel.refresh_entries()
+
+    def action_refresh_handoff(self) -> None:
+        """Reload the hand-off list from disk."""
+        panel = self._handoff_panel()
+        if panel is not None:
+            panel.refresh_entries()
+
+    def action_capture_handoff(self) -> None:
+        """Capture hand-off entries for all tracked sessions right now."""
+        if not getattr(self.settings, "handoff_enabled", False):
+            self.notify("Hand-off summaries are disabled in Settings.", severity="warning")
+            return
+        self._capture_handoff_worker()
+
+    @work(thread=True, exit_on_error=False)
+    def _capture_handoff_worker(self) -> None:
+        """Run manual captures off the UI thread (may call an LLM)."""
+        written = 0
+        for sid in list(self._session_meta):
+            try:
+                if self._capture_handoff(sid, reason="manual"):
+                    written += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"action_capture_handoff: capture failed for {sid}: {e}")
+
+        def _done() -> None:
+            self.notify(
+                f"Captured {written} hand-off {'entry' if written == 1 else 'entries'}."
+                if written
+                else "Nothing to capture yet."
+            )
+            self.action_refresh_handoff()
+
+        self.call_from_thread(_done)
 
     @work(thread=True, exit_on_error=False)
     def _refresh_usage(self) -> None:

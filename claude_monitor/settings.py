@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 CONFIG_DIR = os.path.expanduser("~/.config/claude-monitor")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
+HANDOFF_TRANSPORTS = ("minimax", "openai", "claude_cli")
+
 THEMES = [
     "textual-dark",
     "textual-light",
@@ -66,6 +68,17 @@ class Settings:
         300  # seconds of idle before closing tab (when tab_close_mode="idle")
     )
     web_lan_access: bool = False  # bind HTTP API to 0.0.0.0 instead of localhost
+    handoff_enabled: bool = False  # master switch for session hand-off capture/injection
+    handoff_capture_on_session_end: bool = True  # capture a hand-off entry when a session ends
+    handoff_capture_idle_mins: int = 0  # mins idle before auto-capture; 0 = off, clamp 0..1440
+    handoff_llm_enabled: bool = False  # use an LLM to summarize captured sessions
+    handoff_llm_transport: str = "minimax"  # minimax / openai / claude_cli
+    handoff_model: str = ""  # model name override; "" = provider default
+    handoff_llm_timeout_secs: int = 30  # seconds to wait for the LLM summary, clamp 5..300
+    handoff_inject_on_start: bool = False  # inject prior session summary into new sessions
+    handoff_inject_max_age_hours: int = 72  # max age of entry to inject, clamp 1..8760
+    handoff_markdown_enabled: bool = True  # write handoff.md / per-project digest files
+    handoff_retain_per_project: int = 5  # number of entries to keep per project, clamp 1..100
 
     def __post_init__(self) -> None:
         if self.excluded_tools is None:
@@ -84,6 +97,15 @@ class Settings:
         if self.tab_close_mode not in ("none", "idle", "immediate"):
             self.tab_close_mode = "none"
         self.tab_idle_timeout_secs = max(10, min(3600, int(self.tab_idle_timeout_secs)))
+        # Hand-off fields
+        self.handoff_capture_idle_mins = max(0, min(1440, int(self.handoff_capture_idle_mins)))
+        self.handoff_llm_timeout_secs = max(5, min(300, int(self.handoff_llm_timeout_secs)))
+        self.handoff_inject_max_age_hours = max(
+            1, min(8760, int(self.handoff_inject_max_age_hours))
+        )
+        self.handoff_retain_per_project = max(1, min(100, int(self.handoff_retain_per_project)))
+        if self.handoff_llm_transport not in HANDOFF_TRANSPORTS:
+            self.handoff_llm_transport = "minimax"
 
 
 def load_settings() -> Settings:
@@ -138,6 +160,11 @@ TAB_CLOSE_OPTIONS = [
     ("No auto-close", "none"),
     ("On idle (idle_prompt)", "idle"),
     ("Immediate (on close hook)", "immediate"),
+]
+HANDOFF_TRANSPORT_OPTIONS = [
+    ("MiniMax (MINIMAX_API_KEY)", "minimax"),
+    ("OpenAI (OPENAI_API_KEY)", "openai"),
+    ("Claude CLI (no key needed)", "claude_cli"),
 ]
 
 
@@ -240,6 +267,88 @@ FIELD_DEFS: list[FieldDef] = [
         "placeholder": "300",
         "input_type": "integer",
         "description": "Seconds of inactivity before auto-closing tab (when mode is 'On idle')",
+    },
+    {
+        "name": "handoff_enabled",
+        "label": "Session hand-off",
+        "widget_type": "switch",
+        "description": "Master switch: capture session summaries on end/idle and offer them"
+        " when you start a new session in the same project",
+    },
+    {
+        "name": "handoff_capture_on_session_end",
+        "label": "Capture on session end",
+        "widget_type": "switch",
+        "description": "Write a hand-off entry automatically when a monitored session ends",
+    },
+    {
+        "name": "handoff_capture_idle_mins",
+        "label": "Idle capture (mins)",
+        "widget_type": "input",
+        "placeholder": "0",
+        "input_type": "integer",
+        "description": "Minutes of session inactivity before auto-capturing a hand-off entry"
+        " (0 disables idle capture, max 1440)",
+    },
+    {
+        "name": "handoff_llm_enabled",
+        "label": "LLM summaries",
+        "widget_type": "switch",
+        "description": "Use an LLM to write a short summary of each captured session."
+        " WARNING: enabling this sends session excerpts (prompts, assistant"
+        " messages, file paths) to a third-party API provider",
+    },
+    {
+        "name": "handoff_llm_transport",
+        "label": "LLM provider",
+        "widget_type": "select",
+        "options": HANDOFF_TRANSPORT_OPTIONS,
+        "description": "Which API to use for LLM summaries",
+    },
+    {
+        "name": "handoff_model",
+        "label": "LLM model",
+        "widget_type": "input",
+        "placeholder": "leave blank for provider default",
+        "description": "Override the model name used for summaries",
+    },
+    {
+        "name": "handoff_llm_timeout_secs",
+        "label": "LLM timeout",
+        "widget_type": "input",
+        "placeholder": "30",
+        "input_type": "integer",
+        "description": "Seconds to wait for the LLM summary before giving up (5..300)",
+    },
+    {
+        "name": "handoff_inject_on_start",
+        "label": "Inject on start",
+        "widget_type": "switch",
+        "description": "Feed the previous session's hand-off summary into new sessions"
+        " started in the same project directory",
+    },
+    {
+        "name": "handoff_inject_max_age_hours",
+        "label": "Inject max age (hrs)",
+        "widget_type": "input",
+        "placeholder": "72",
+        "input_type": "integer",
+        "description": "Only inject a prior hand-off entry if it is newer than this"
+        " many hours (1..8760)",
+    },
+    {
+        "name": "handoff_markdown_enabled",
+        "label": "Write markdown digest",
+        "widget_type": "switch",
+        "description": "Write handoff.md and per-project digest files alongside the JSON entries",
+    },
+    {
+        "name": "handoff_retain_per_project",
+        "label": "Retain per project",
+        "widget_type": "input",
+        "placeholder": "5",
+        "input_type": "integer",
+        "description": "Number of hand-off entries to keep per project before pruning (1..100)",
     },
 ]
 
@@ -540,6 +649,26 @@ class SettingsScreen(ModalScreen[Settings | None]):
         except (ValueError, TypeError):
             tab_idle_timeout = 300
 
+        # Hand-off integer inputs, clamped
+        def _int_field(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                return max(lo, min(hi, int(self.query_one(f"#{_widget_id(name)}", Input).value)))
+            except (ValueError, TypeError):
+                return default
+
+        handoff_capture_idle_mins = _int_field(
+            "handoff_capture_idle_mins", s.handoff_capture_idle_mins, 0, 1440
+        )
+        handoff_llm_timeout_secs = _int_field(
+            "handoff_llm_timeout_secs", s.handoff_llm_timeout_secs, 5, 300
+        )
+        handoff_inject_max_age_hours = _int_field(
+            "handoff_inject_max_age_hours", s.handoff_inject_max_age_hours, 1, 8760
+        )
+        handoff_retain_per_project = _int_field(
+            "handoff_retain_per_project", s.handoff_retain_per_project, 1, 100
+        )
+
         return Settings(
             default_mode=self._get_select_value(_widget_id("default_mode"), s.default_mode),
             theme=self._get_select_value(_widget_id("theme"), s.theme),
@@ -561,6 +690,27 @@ class SettingsScreen(ModalScreen[Settings | None]):
             tab_close_mode=self._get_select_value(_widget_id("tab_close_mode"), s.tab_close_mode),
             tab_idle_timeout_secs=tab_idle_timeout,
             web_lan_access=self.query_one(f"#{_widget_id('web_lan_access')}", Switch).value,
+            handoff_enabled=self.query_one(f"#{_widget_id('handoff_enabled')}", Switch).value,
+            handoff_capture_on_session_end=self.query_one(
+                f"#{_widget_id('handoff_capture_on_session_end')}", Switch
+            ).value,
+            handoff_capture_idle_mins=handoff_capture_idle_mins,
+            handoff_llm_enabled=self.query_one(
+                f"#{_widget_id('handoff_llm_enabled')}", Switch
+            ).value,
+            handoff_llm_transport=self._get_select_value(
+                _widget_id("handoff_llm_transport"), s.handoff_llm_transport
+            ),
+            handoff_model=self.query_one(f"#{_widget_id('handoff_model')}", Input).value,
+            handoff_llm_timeout_secs=handoff_llm_timeout_secs,
+            handoff_inject_on_start=self.query_one(
+                f"#{_widget_id('handoff_inject_on_start')}", Switch
+            ).value,
+            handoff_inject_max_age_hours=handoff_inject_max_age_hours,
+            handoff_markdown_enabled=self.query_one(
+                f"#{_widget_id('handoff_markdown_enabled')}", Switch
+            ).value,
+            handoff_retain_per_project=handoff_retain_per_project,
         )
 
     # ------------------------------------------------------------------

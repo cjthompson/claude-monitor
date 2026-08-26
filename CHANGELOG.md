@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-25
+
+### Features
+- Session hand-off summaries: capture where each session left off (goal, stopping point, files touched, git state, agent activity, open questions) and read it back from the Hand-off tab, the new `claude-monitor-handoff` CLI, generated markdown digests, or injected into the next session in that directory (#handoff, #tui, #cli, #settings)
+- Optional LLM prose summaries via pluggable transports (MiniMax, OpenAI, `claude -p`). Off by default; enabling it sends session excerpts to a third-party provider. Keys are read from the environment at call time and never logged (#handoff, #llm)
+
 ## 2026-07-16
 
 ### Fixes

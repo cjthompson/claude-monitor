@@ -1,0 +1,28 @@
+{"type":"system","sessionId":"sess-1","timestamp":"2026-08-25T10:00:00.000Z"}
+{"type":"user","isMeta":true,"uuid":"u0","sessionId":"sess-1","timestamp":"2026-08-25T10:00:00.100Z","cwd":"/Users/chris/dev/project","message":{"role":"user","content":"<local-command-caveat>Caveat: ignore</local-command-caveat>"}}
+{"type":"user","uuid":"u1","sessionId":"sess-1","timestamp":"2026-08-25T10:00:00.200Z","cwd":"/Users/chris/dev/project","message":{"role":"user","content":"<command-name>/model</command-name>"}}
+{"type":"user","uuid":"u2","sessionId":"sess-1","timestamp":"2026-08-25T10:00:00.300Z","cwd":"/Users/chris/dev/project","message":{"role":"user","content":"<local-command-stdout>Set model to Opus</local-command-stdout>"}}
+{this line is not valid json at all
+{"type":"user","uuid":"u3","sessionId":"sess-1","timestamp":"2026-08-25T10:00:01.000Z","cwd":"/Users/chris/dev/project","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"Please fix the flaky test in test_widgets.py"}}
+{"type":"ai-title","aiTitle":"Fix flaky widget test","sessionId":"sess-1"}
+{"type":"last-prompt","leafUuid":"abc","sessionId":"sess-1"}
+{"type":"last-prompt","sessionId":"sess-1"}
+{"type":"assistant","uuid":"a1","sessionId":"sess-1","timestamp":"2026-08-25T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I'll take a look at the test file."}]}}
+{"type":"assistant","uuid":"a2","sessionId":"sess-1","timestamp":"2026-08-25T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_edit1","name":"Edit","input":{"file_path":"/Users/chris/dev/project/test_widgets.py","old_string":"a","new_string":"b"}}]}}
+{"type":"user","uuid":"u4","sessionId":"sess-1","timestamp":"2026-08-25T10:00:03.500Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_edit1","content":"Edit applied"}]}}
+{"type":"assistant","uuid":"a3","sessionId":"sess-1","timestamp":"2026-08-25T10:00:04.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_write1","name":"Write","input":{"file_path":"/Users/chris/dev/project/new_file.py","content":"print(1)"}}]}}
+{"type":"user","uuid":"u5","sessionId":"sess-1","timestamp":"2026-08-25T10:00:04.500Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_write1","content":"File written"}]}}
+{"type":"assistant","uuid":"a4","sessionId":"sess-1","timestamp":"2026-08-25T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_edit2","name":"Edit","input":{"file_path":"/Users/chris/dev/project/test_widgets.py","old_string":"b","new_string":"c"}}]}}
+{"type":"user","uuid":"u6","sessionId":"sess-1","timestamp":"2026-08-25T10:00:05.500Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_edit2","content":"Edit applied"}]}}
+{"type":"assistant","uuid":"a5","sessionId":"sess-1","timestamp":"2026-08-25T10:00:06.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_agent1","name":"Agent","input":{"subagent_type":"code-reviewer","description":"Review the fix"}}]}}
+{"type":"user","uuid":"u7","sessionId":"sess-1","timestamp":"2026-08-25T10:00:07.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_agent1","content":[{"type":"text","text":"Looks good, one nit about naming."}]}]}}
+{"type":"assistant","uuid":"a6","sessionId":"sess-1","timestamp":"2026-08-25T10:00:08.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_agent2","name":"Agent","input":{"subagent_type":"general-purpose","description":"Investigate a second thing"}}]}}
+{"type":"assistant","uuid":"a7","sessionId":"sess-1","timestamp":"2026-08-25T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_ask1","name":"AskUserQuestion","input":{"questions":[{"question":"Should I also update the docs?","header":"Docs","options":[{"label":"Yes"},{"label":"No"}]}]}}]}}
+{"type":"assistant","uuid":"a8","sessionId":"sess-1","timestamp":"2026-08-25T10:00:10.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_plan1","name":"ExitPlanMode","input":{"plan":"# Plan\n\nDo the thing."}}]}}
+{"type":"file-history-snapshot","messageId":"m1","snapshot":{"messageId":"m1","trackedFileBackups":{"/Users/chris/dev/project/config.yaml":{}},"timestamp":"2026-08-25T10:00:10.500Z"},"isSnapshotUpdate":false}
+{"type":"user","uuid":"u8","sessionId":"sess-1","timestamp":"2026-08-25T10:00:11.000Z","cwd":"/Users/chris/dev/project","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"turnCompanion note"},"turnCompanion":true}
+{"type":"assistant","uuid":"a9","sessionId":"sess-1","timestamp":"2026-08-25T10:00:12.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Applied the fix, ran the tests, and they now pass consistently."}]}}
+{"type":"ai-title","aiTitle":"Fix flaky widget test in test_widgets.py","sessionId":"sess-1"}
+{"type":"last-prompt","leafUuid":"final","lastPrompt":"Please fix the flaky test in test_widgets.py","sessionId":"sess-1"}
+{"type": "not even close to valid json"
+{"type":"user","uuid":"u9"

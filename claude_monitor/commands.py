@@ -7,12 +7,15 @@ class MonitorCommands(Provider):
     """Command palette provider exposing all TUI actions."""
 
     COMMANDS_LIST = [
+        ("Capture Hand-off Now", "capture_handoff"),
         ("Next Tab", "next_tab"),
         ("Open Settings", "open_settings"),
         ("Previous Tab", "prev_tab"),
         ("Quit", "quit"),
+        ("Refresh Hand-off List", "refresh_handoff"),
         ("Refresh Layout", "refresh_layout"),
         ("Show Choices Log", "show_choices"),
+        ("Show Hand-off Tab", "show_handoff"),
         ("Show Help", "show_help"),
         ("Show Questions Log", "show_questions"),
         ("Toggle Auto/Manual (global)", "toggle_pause"),

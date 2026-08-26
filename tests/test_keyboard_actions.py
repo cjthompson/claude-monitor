@@ -87,12 +87,13 @@ class TestKeyboardActions:
 
             tc = app_fixture.query_one("#tab-content", TabbedContent)
             first_active = tc.active
+            pane_count = len(tc.query("TabPane"))
 
-            # Press ] twice to wrap around (2 tabs)
-            await pilot.press("right_square_bracket")
-            await pilot.pause()
-            await pilot.press("right_square_bracket")
-            await pilot.pause()
+            # Press ] once per pane to wrap all the way around. Two session
+            # tabs plus the fixed Hand-off tab means three presses.
+            for _ in range(pane_count):
+                await pilot.press("right_square_bracket")
+                await pilot.pause()
             assert tc.active == first_active
 
     async def test_close_tab(self, app_fixture, inject_message):

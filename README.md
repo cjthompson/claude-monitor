@@ -20,6 +20,7 @@ claude-monitor runs alongside your Claude Code sessions. It auto-accepts permiss
 - **Agent tracking** — Tracks subagent lifecycle (start/stop) per session with active counts, type breakdowns, and completion totals.
 - **API usage bar** — Optional status bar widget showing 5-hour and 7-day Anthropic API quota utilization with progress bars, color coding, and reset countdowns. Uses your OAuth token from the macOS Keychain.
 - **Settings modal** — Configure mode, theme, iTerm scope, timestamp style, and more. Persists across sessions.
+- **Session hand-offs** — Records where each session left off (goal, stopping point, files touched, git branch, agent activity, open questions) so you can pick up the next morning without asking "where did we leave off?". Browse in the Hand-off tab, read from the `claude-monitor-handoff` CLI or generated markdown, or have the summary injected into the next session in that directory. Off by default.
 - **Command palette** — Quick access to all commands via `Ctrl+P`.
 - **Worktree detection** — Sessions running in git worktrees are detected and displayed with distinct `WT:` titles and styling.
 - **Smart layout polling** — Detects pane adds/removes every 3 seconds and rebuilds the layout while preserving event history, panel state, active tab, and focused panel. Resizes update CSS proportions without rebuilding. Unmatched sessions automatically get fallback panels.
@@ -125,6 +126,8 @@ On macOS with iTerm2, run this in an iTerm2 pane alongside your Claude Code sess
 | `s` | Open settings |
 | `c` | View choices log |
 | `u` | View questions log |
+| `h` | Show Hand-off tab |
+| `H` | Capture hand-off for the current sessions now |
 | `]` | Next tab |
 | `[` | Previous tab |
 | `x` | Close current session tab (auto-recreates if session is still active) |
@@ -152,10 +155,70 @@ Press `s` to open the settings modal. Settings persist to `~/.config/claude-moni
 | iTerm scope | `current_tab`, `current_window`, `all_windows` | `current_tab` | Which iTerm2 tabs to monitor |
 | Timestamp style | `12hr`, `24hr`, `date_time`, `auto` | `24hr` | How timestamps are formatted in event logs |
 | Account usage | on/off | off | Show API usage bar |
+| Hand-off summaries | on/off | off | Master switch for session hand-off capture |
+| Capture on session end | on/off | on | Write a hand-off entry when a session ends (heuristics only, never an LLM call) |
+| Idle capture (mins) | 0-1440 | 0 | Auto-capture a session after this many idle minutes; 0 disables |
+| LLM summaries | on/off | off | **Sends session excerpts to a third-party API.** See below |
+| LLM transport | `minimax`, `openai`, `claude_cli` | `minimax` | Which provider generates the prose summary |
+| Hand-off model | free text | *(provider default)* | Model override, e.g. `MiniMax-M3` |
+| LLM timeout (secs) | 5-300 | 30 | Give up on the summary after this long |
+| Inject on session start | on/off | off | Prepend the previous hand-off to new sessions in a known directory |
+| Inject max age (hours) | 1-8760 | 72 | Don't inject anything older than this |
+| Write markdown digests | on/off | on | Regenerate `handoff.md` and per-project digests on capture |
+| Retain per project | 1-100 | 5 | How many entries to keep for each project |
 
 ### Available themes
 
 textual-dark, textual-light, textual-ansi, atom-one-dark, atom-one-light, catppuccin-frappe, catppuccin-latte, catppuccin-macchiato, catppuccin-mocha, dracula, flexoki, gruvbox, monokai, nord, rose-pine, rose-pine-dawn, rose-pine-moon, solarized-dark, solarized-light, tokyo-night
+
+## Session hand-offs
+
+Answers "where did we leave off?" without asking an agent. Every setting is off by
+default; turn on **Hand-off summaries** in Settings (`s`) to start recording.
+
+### What gets captured
+
+Each entry is built from the hook events the monitor already sees, enriched by reading
+the session's own transcript in `~/.claude/projects/`:
+
+- Title, first prompt, last prompt, last assistant message
+- Files touched, plus the git branch and dirty/ahead state at capture time
+- Subagent activity (type, label, last message)
+- Open questions and blockers — trailing `AskUserQuestion` / `ExitPlanMode` calls with no answer
+- Approved/deferred permission counts
+
+Capture runs on `SessionEnd`, after a configurable idle period, or on demand (`H`,
+or *Capture Hand-off Now* in the command palette).
+
+### Where to read it
+
+| Surface | How |
+|---|---|
+| TUI | The **Hand-off** tab, or press `h` |
+| CLI | `claude-monitor-handoff list` / `show <id>` / `digest` / `capture` / `prune` |
+| Markdown | `~/.config/claude-monitor/handoff/handoff.md` and `projects/<slug>.md` |
+| Next session | Injected as `additionalContext` on `SessionStart` when **Inject on session start** is on |
+
+Entries live in `~/.config/claude-monitor/handoff/sessions/<project-slug>/<session_id>.json`.
+
+### Optional LLM summaries
+
+The captured facts above are all heuristic — no network access, always available.
+Turning on **LLM summaries** adds a short `goal` / `stopping point` / `next steps`
+narrative on top.
+
+> **This sends data off your machine.** Excerpts from the session — your prompts,
+> Claude's replies, and the paths of files you edited — are posted to the configured
+> third-party provider. It is off by default, and stays off unless you turn it on.
+
+Credentials come from the environment at call time (`MINIMAX_API_KEY`, `OPENAI_API_KEY`),
+are never written to disk or logs, and are read only when a summary is actually
+generated. The `claude_cli` transport shells out to `claude -p` instead and needs no key.
+
+LLM summarization only ever runs from the TUI and the CLI — never from the `SessionEnd`
+hook, which must not block a session teardown (and may not inherit your shell
+environment anyway). If the provider errors, times out, or the key is missing, the entry
+silently keeps its heuristic content.
 
 ## API Usage Bar
 
@@ -325,6 +388,10 @@ claude_monitor/
   tui_simple.py    # Simple TUI — tabbed layout, works on any platform
   tui_common.py    # Shared widgets: SessionPanel, DashboardPanel, modals, commands
   settings.py      # Settings dataclass, persistence, and modal screen
+  handoff.py       # Hand-off store: capture, retention, markdown, injection
+  transcript.py    # Read-only parser for ~/.claude/projects transcripts
+  llm.py           # Pluggable LLM transports (minimax / openai / claude_cli)
+  cli_handoff.py   # claude-monitor-handoff CLI
   usage.py         # OAuth token extraction, API usage fetching, usage bar widget
 install.py         # Setup script — venv, symlinks, hook configuration
 run.sh             # Wrapper script — auto-restarts on quit
