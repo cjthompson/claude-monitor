@@ -15,6 +15,8 @@ import time
 
 from claude_monitor import API_PORT, EVENTS_FILE, SIGNAL_DIR, extract_iterm_session_id, read_state
 
+SESSION_END_CAPTURE_BUDGET_SECS = 3.0
+
 
 def _tui_is_running() -> bool:
     """Check if the TUI is running by probing its API port.
@@ -102,6 +104,7 @@ def _handle_session_end(data: dict) -> None:
             reason="session_end",
             with_llm=False,
             settings=settings,
+            max_seconds=SESSION_END_CAPTURE_BUDGET_SECS,
         )
     except Exception:
         pass

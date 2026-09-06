@@ -101,6 +101,7 @@ class TestSessionEnd:
         assert kwargs["reason"] == "session_end"
         assert kwargs["with_llm"] is False
         assert kwargs["settings"] is settings
+        assert 0 < kwargs["max_seconds"] < 5
 
     def test_no_capture_when_handoff_disabled(self, isolated_state, monkeypatch, stub_handoff):
         settings = _settings(handoff_enabled=False)

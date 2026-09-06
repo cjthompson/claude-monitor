@@ -1,10 +1,12 @@
 """Tests for claude_monitor.handoff."""
 
+import json
 import os
 import subprocess
 import sys
 import types
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -112,43 +114,64 @@ def test_project_slug_differs_for_different_paths():
 
 
 def test_git_info_in_repo(tmp_path):
-    result_branch = mock.Mock(returncode=0, stdout="main\n")
-    result_status = mock.Mock(returncode=0, stdout="")
-    with mock.patch("subprocess.run", side_effect=[result_branch, result_status]):
-        branch, dirty = handoff._git_info(str(tmp_path))
+    result = mock.Mock(returncode=0, stdout="## main\n")
+    with mock.patch("subprocess.run", return_value=result):
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
     assert branch == "main"
     assert dirty is False
+    assert ahead == 0
+
+
+def test_git_info_initial_branch(tmp_path):
+    result = mock.Mock(returncode=0, stdout="## No commits yet on main\n")
+    with mock.patch("subprocess.run", return_value=result):
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
+    assert branch == "main"
+    assert dirty is False
+    assert ahead == 0
 
 
 def test_git_info_dirty(tmp_path):
-    result_branch = mock.Mock(returncode=0, stdout="feature\n")
-    result_status = mock.Mock(returncode=0, stdout=" M file.py\n")
-    with mock.patch("subprocess.run", side_effect=[result_branch, result_status]):
-        branch, dirty = handoff._git_info(str(tmp_path))
+    result = mock.Mock(returncode=0, stdout="## feature...origin/feature [ahead 2]\n M file.py\n")
+    with mock.patch("subprocess.run", return_value=result):
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
     assert branch == "feature"
     assert dirty is True
+    assert ahead == 2
 
 
 def test_git_info_not_a_repo(tmp_path):
     result = mock.Mock(returncode=128, stdout="")
-    with mock.patch("subprocess.run", side_effect=[result, result]):
-        branch, dirty = handoff._git_info(str(tmp_path))
+    with mock.patch("subprocess.run", return_value=result):
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
     assert branch is None
     assert dirty is False
+    assert ahead == 0
 
 
 def test_git_info_timeout(tmp_path):
     with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=2)):
-        branch, dirty = handoff._git_info(str(tmp_path))
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
     assert branch is None
     assert dirty is False
+    assert ahead == 0
+
+
+def test_git_info_detached_head(tmp_path):
+    result = mock.Mock(returncode=0, stdout="## HEAD (no branch)\n")
+    with mock.patch("subprocess.run", return_value=result):
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
+    assert branch is None
+    assert dirty is False
+    assert ahead == 0
 
 
 def test_git_info_git_missing(tmp_path):
     with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
-        branch, dirty = handoff._git_info(str(tmp_path))
+        branch, dirty, ahead = handoff._git_info(str(tmp_path))
     assert branch is None
     assert dirty is False
+    assert ahead == 0
 
 
 # --- capture ----------------------------------------------------------------
@@ -168,7 +191,7 @@ def test_capture_with_transcript_facts(tmp_path):
     )
     _install_fake_transcript_module(facts)
 
-    with mock.patch.object(handoff, "_git_info", return_value=("main", False)):
+    with mock.patch.object(handoff, "_git_info", return_value=("main", False, 2)):
         entry = handoff.capture(
             "sess-1",
             str(tmp_path),
@@ -178,18 +201,114 @@ def test_capture_with_transcript_facts(tmp_path):
 
     assert entry is not None
     assert entry.title == "Fix the widget"
+    assert entry.first_user_prompt == "please fix widget"
     assert entry.git_branch == "main"
+    assert entry.git_ahead == 2
     assert entry.files_touched == ["a.py", "b.py"]
     assert entry.event_stats["approved"] == 3
 
     loaded = handoff.load_entry("sess-1", slug=entry.project_slug)
     assert loaded is not None
     assert loaded.title == "Fix the widget"
+    assert loaded.first_user_prompt == "please fix widget"
+
+
+def test_capture_derives_event_stats_from_event_log(tmp_path, monkeypatch):
+    _install_fake_transcript_module(FakeFacts(ai_title="T"))
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "session_id": "sess-events",
+                        "hook_event_name": "PermissionRequest",
+                        "_decision": "allowed",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "session_id": "sess-events",
+                        "hook_event_name": "PermissionRequest",
+                        "_decision": "deferred",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "session_id": "sess-events",
+                        "hook_event_name": "SubagentStart",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "session_id": "other-session",
+                        "hook_event_name": "PermissionRequest",
+                        "_decision": "allowed",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(handoff, "EVENTS_FILE", str(events_file), raising=False)
+
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
+        entry = handoff.capture("sess-events", str(tmp_path), event_stats=None)
+
+    assert entry is not None
+    assert entry.event_stats == {"approved": 1, "deferred": 1, "agents_spawned": 1}
+
+
+def test_capture_honors_with_llm_when_setting_is_off(tmp_path):
+    _install_fake_transcript_module(FakeFacts(ai_title="T"))
+    _install_fake_llm_module(
+        complete_return='{"goal": "g", "stopping_point": "s", "next_steps": []}'
+    )
+    settings = SimpleNamespace(
+        handoff_llm_enabled=False,
+        handoff_llm_transport="minimax",
+        handoff_model="",
+        handoff_llm_timeout_secs=30,
+        handoff_markdown_enabled=False,
+        handoff_retain_per_project=5,
+    )
+
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
+        entry = handoff.capture(
+            "sess-llm",
+            str(tmp_path),
+            with_llm=True,
+            settings=settings,
+            event_stats={"approved": 0, "deferred": 0, "agents_spawned": 0},
+        )
+
+    assert entry is not None
+    assert entry.summary == {"goal": "g", "stopping_point": "s", "next_steps": []}
+
+
+def test_capture_saves_entry_when_budget_is_exhausted(tmp_path):
+    _install_fake_transcript_module(FakeFacts(ai_title="T"))
+    with (
+        mock.patch.object(handoff, "_git_info") as git_info,
+        mock.patch.object(handoff, "prune") as prune,
+        mock.patch.object(handoff, "write_markdown") as write_markdown,
+    ):
+        entry = handoff.capture(
+            "sess-budget",
+            str(tmp_path),
+            max_seconds=0,
+            event_stats={"approved": 0, "deferred": 0, "agents_spawned": 0},
+        )
+
+    assert entry is not None
+    git_info.assert_not_called()
+    prune.assert_not_called()
+    write_markdown.assert_not_called()
 
 
 def test_capture_survives_parse_session_none_with_event_stats(tmp_path):
     _install_fake_transcript_module(None)
-    with mock.patch.object(handoff, "_git_info", return_value=(None, False)):
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
         entry = handoff.capture(
             "sess-2",
             str(tmp_path),
@@ -201,7 +320,7 @@ def test_capture_survives_parse_session_none_with_event_stats(tmp_path):
 
 def test_capture_returns_none_when_nothing_known(tmp_path):
     _install_fake_transcript_module(None)
-    with mock.patch.object(handoff, "_git_info", return_value=(None, False)):
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
         entry = handoff.capture("sess-3", str(tmp_path), event_stats=None)
     assert entry is None
 
@@ -209,7 +328,7 @@ def test_capture_returns_none_when_nothing_known(tmp_path):
 def test_capture_title_falls_back_to_first_prompt(tmp_path):
     facts = FakeFacts(ai_title=None, first_user_prompt="do the thing please, this is long")
     _install_fake_transcript_module(facts)
-    with mock.patch.object(handoff, "_git_info", return_value=(None, False)):
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
         entry = handoff.capture("sess-4", str(tmp_path), event_stats={"approved": 1})
     assert entry is not None
     assert entry.title.startswith("do the thing")
@@ -218,7 +337,7 @@ def test_capture_title_falls_back_to_first_prompt(tmp_path):
 def test_capture_writes_markdown(tmp_path):
     facts = FakeFacts(ai_title="Title", started_at=1.0, ended_at=2.0)
     _install_fake_transcript_module(facts)
-    with mock.patch.object(handoff, "_git_info", return_value=(None, False)):
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
         handoff.capture("sess-5", str(tmp_path), event_stats={"approved": 1})
     assert os.path.exists(handoff.DIGEST_FILE)
 
@@ -410,6 +529,17 @@ def test_summarize_happy_path(tmp_path):
     }
 
 
+def test_summary_prompt_includes_first_user_prompt():
+    entry = handoff.HandoffEntry(
+        session_id="s1",
+        project_path="/proj",
+        project_slug="-proj",
+        title="T",
+        first_user_prompt="start here",
+    )
+    assert "First user prompt: start here" in handoff._build_summary_prompt(entry)
+
+
 def test_summarize_llm_error_returns_none(tmp_path):
     mod = _install_fake_llm_module()
 
@@ -466,6 +596,8 @@ def test_render_entry_populated_nonempty():
         ended_at=2.0,
         git_branch="main",
         git_dirty=True,
+        git_ahead=2,
+        first_user_prompt="first prompt",
         last_prompt="prompt",
         last_assistant_message="response",
         files_touched=["a.py"],
@@ -477,6 +609,8 @@ def test_render_entry_populated_nonempty():
     rendered = handoff.render_entry(entry)
     assert rendered.strip()
     assert "Do a thing" in rendered
+    assert "First prompt: first prompt" in rendered
+    assert "ahead 2" in rendered
     assert "goal" in rendered
 
 
@@ -510,5 +644,11 @@ def test_write_markdown_produces_files(tmp_path):
 
 
 def test_write_markdown_no_entries_no_crash(tmp_path):
+    os.makedirs(handoff.PROJECTS_DIR)
+    stale_project_file = os.path.join(handoff.PROJECTS_DIR, "-stale.md")
+    with open(stale_project_file, "w") as f:
+        f.write("stale")
+
     handoff.write_markdown(None)
     assert os.path.exists(handoff.DIGEST_FILE)
+    assert not os.path.exists(stale_project_file)

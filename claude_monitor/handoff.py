@@ -28,6 +28,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 
+from claude_monitor import EVENTS_FILE
 from claude_monitor.settings import CONFIG_DIR
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class HandoffEntry:
     project_path: str
     project_slug: str
     title: str | None = None
+    first_user_prompt: str | None = None
     started_at: float | None = None
     ended_at: float | None = None
     capture_reason: str = "manual"  # session_end | idle | manual
@@ -54,6 +56,7 @@ class HandoffEntry:
     last_assistant_message: str | None = None
     git_branch: str | None = None
     git_dirty: bool = False
+    git_ahead: int = 0
     files_touched: list[str] = field(default_factory=list)
     agents: list[dict] = field(default_factory=list)
     open_items: list[dict] = field(default_factory=list)
@@ -118,6 +121,33 @@ def _entry_from_dict(data: dict) -> HandoffEntry | None:
     except TypeError as e:
         log.warning(f"Corrupt handoff entry data: {e}")
         return None
+
+
+def _event_stats_for_session(session_id: str) -> dict | None:
+    """Return monitor event counts for *session_id*, or None if unobserved."""
+    stats = dict(_DEFAULT_EVENT_STATS)
+    found = False
+    try:
+        with open(EVENTS_FILE, encoding="utf-8") as events_file:
+            for raw_line in events_file:
+                try:
+                    event = json.loads(raw_line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(event, dict) or event.get("session_id") != session_id:
+                    continue
+                found = True
+                if event.get("hook_event_name") == "PermissionRequest":
+                    decision = event.get("_decision")
+                    if decision in ("allowed", "timeout"):
+                        stats["approved"] += 1
+                    elif decision == "deferred":
+                        stats["deferred"] += 1
+                elif event.get("hook_event_name") == "SubagentStart":
+                    stats["agents_spawned"] += 1
+    except OSError:
+        return None
+    return stats if found else None
 
 
 def _save_entry(entry: HandoffEntry) -> None:
@@ -265,37 +295,41 @@ def prune(slug: str, keep: int) -> None:
 # --- git helpers -------------------------------------------------------------
 
 
-def _git_info(cwd: str) -> tuple[str | None, bool]:
-    """Return (git_branch, git_dirty) for *cwd*. Never raises."""
+def _git_info(cwd: str, *, timeout: float = 2.0) -> tuple[str | None, bool, int]:
+    """Return (git_branch, git_dirty, git_ahead) for *cwd*. Never raises."""
+    if timeout <= 0:
+        return None, False, 0
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--branch"],
+            cwd=cwd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None, False, 0
+    except (OSError, subprocess.SubprocessError):
+        return None, False, 0
+
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None, False, 0
+
+    status_line = lines[0]
     branch: str | None = None
-    dirty = False
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=cwd,
-            timeout=2,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            branch = result.stdout.strip() or None
-    except (OSError, subprocess.SubprocessError):
-        branch = None
+    if status_line.startswith("## "):
+        branch_text = status_line[3:]
+        if branch_text.startswith("No commits yet on "):
+            branch = branch_text.removeprefix("No commits yet on ").split(" ", 1)[0] or None
+        elif branch_text != "HEAD (no branch)":
+            branch = branch_text.split("...", 1)[0].split(" ", 1)[0] or None
 
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=cwd,
-            timeout=2,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            dirty = bool(result.stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        dirty = False
-
-    return branch, dirty
+    ahead_match = re.search(r"\bahead (\d+)\b", status_line)
+    ahead = int(ahead_match.group(1)) if ahead_match else 0
+    dirty = any(line.strip() for line in lines[1:])
+    return branch, dirty, ahead
 
 
 # --- capture -----------------------------------------------------------------
@@ -310,15 +344,21 @@ def capture(
     with_llm: bool = False,
     settings=None,
     event_stats: dict | None = None,
+    max_seconds: float | None = None,
 ) -> HandoffEntry | None:
     """Capture a hand-off entry for *session_id* running in *cwd*.
 
     Resolves transcript facts (if the transcript module/session is
-    available), merges in git state and caller-supplied event stats,
-    optionally asks the LLM for a summary, then persists the entry, prunes
-    old entries for the project, and regenerates markdown digests.
+    available), derives event stats when the caller does not provide them,
+    merges in git state, optionally asks the LLM for a summary, then persists
+    the entry, prunes old entries for the project, and regenerates markdown
+    digests. When *max_seconds* is provided, the remaining budget limits
+    optional Git, pruning, and Markdown work; persistence remains best-effort
+    so a timed-out capture can still save its heuristic entry.
     Returns None only if there is genuinely nothing to record.
     """
+    deadline = time.monotonic() + max(0.0, max_seconds) if max_seconds is not None else None
+
     facts = None
     try:
         from claude_monitor import transcript
@@ -327,6 +367,9 @@ def capture(
     except Exception as e:  # noqa: BLE001 - transcript module may not exist yet / may fail
         log.warning(f"Failed to parse transcript for {session_id}: {e}")
         facts = None
+
+    if event_stats is None:
+        event_stats = _event_stats_for_session(session_id)
 
     stats = dict(_DEFAULT_EVENT_STATS)
     if event_stats:
@@ -364,13 +407,20 @@ def capture(
         else:
             title = os.path.basename(os.path.abspath(cwd)) or cwd
 
-    git_branch, git_dirty = _git_info(cwd)
+    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+    if remaining is None or remaining > 0:
+        git_branch, git_dirty, git_ahead = _git_info(
+            cwd, timeout=2.0 if remaining is None else min(2.0, remaining)
+        )
+    else:
+        git_branch, git_dirty, git_ahead = None, False, 0
 
     entry = HandoffEntry(
         session_id=session_id,
         project_path=os.path.abspath(cwd),
         project_slug=slug,
         title=title,
+        first_user_prompt=first_user_prompt,
         started_at=started_at,
         ended_at=ended_at if ended_at is not None else time.time(),
         capture_reason=reason,
@@ -378,14 +428,14 @@ def capture(
         last_assistant_message=last_assistant_message,
         git_branch=git_branch,
         git_dirty=git_dirty,
+        git_ahead=git_ahead,
         files_touched=files_touched,
         agents=agents,
         open_items=open_items,
         event_stats=stats,
     )
 
-    llm_enabled = bool(getattr(settings, "handoff_llm_enabled", False)) if settings else False
-    if with_llm and llm_enabled:
+    if with_llm:
         try:
             summary = summarize(entry, settings=settings)
         except Exception as e:  # noqa: BLE001 - summarize should not be fatal to capture
@@ -399,13 +449,16 @@ def capture(
     _save_entry(entry)
 
     keep = getattr(settings, "handoff_retain_per_project", 5) if settings else 5
-    try:
-        prune(slug, int(keep))
-    except Exception as e:  # noqa: BLE001
-        log.warning(f"Prune failed for {slug}: {e}")
+    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+    if remaining is None or remaining > 0:
+        try:
+            prune(slug, int(keep))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Prune failed for {slug}: {e}")
 
     markdown_enabled = getattr(settings, "handoff_markdown_enabled", True) if settings else True
-    if markdown_enabled:
+    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+    if markdown_enabled and (remaining is None or remaining > 0):
         try:
             write_markdown(settings)
         except Exception as e:  # noqa: BLE001 - markdown regen must not break capture
@@ -438,6 +491,8 @@ def _truncate(text: str | None, limit: int) -> str:
 
 def _build_summary_prompt(entry: HandoffEntry) -> str:
     parts = [f"Title: {entry.title or '(untitled)'}"]
+    if entry.first_user_prompt:
+        parts.append(f"First user prompt: {_truncate(entry.first_user_prompt, _EXCERPT_CHARS)}")
     if entry.last_prompt:
         parts.append(f"Last user prompt: {_truncate(entry.last_prompt, _EXCERPT_CHARS)}")
     if entry.last_assistant_message:
@@ -572,6 +627,9 @@ def _render_injection(entry: HandoffEntry, now: float) -> str:
     when = f"{fmt_duration(max(now - ts, 0), compact=True)} ago" if ts else "recently"
     lines.append(f"**{entry.title or 'Untitled session'}** ({when})")
 
+    if entry.first_user_prompt:
+        lines.append(f"- First prompt: {_truncate(entry.first_user_prompt, 250)}")
+
     if entry.summary:
         goal = entry.summary.get("goal")
         stopping = entry.summary.get("stopping_point")
@@ -606,8 +664,13 @@ def _render_injection(entry: HandoffEntry, now: float) -> str:
             lines.append(f"  - [{item.get('kind', '?')}] {_truncate(item.get('text'), 150)}")
 
     if entry.git_branch:
-        dirty = " (dirty)" if entry.git_dirty else ""
-        lines.append(f"- Git branch: {entry.git_branch}{dirty}")
+        git_state = []
+        if entry.git_dirty:
+            git_state.append("dirty")
+        if entry.git_ahead:
+            git_state.append(f"ahead {entry.git_ahead}")
+        suffix = f" ({', '.join(git_state)})" if git_state else ""
+        lines.append(f"- Git branch: {entry.git_branch}{suffix}")
 
     text = "\n".join(lines)
     if len(text) > 1500:
@@ -635,8 +698,16 @@ def render_entry(entry: HandoffEntry) -> str:
 
     lines.append(f"- Project: `{entry.project_path}`")
     if entry.git_branch:
-        dirty = " (dirty)" if entry.git_dirty else ""
-        lines.append(f"- Git: `{entry.git_branch}`{dirty}")
+        git_state = []
+        if entry.git_dirty:
+            git_state.append("dirty")
+        if entry.git_ahead:
+            git_state.append(f"ahead {entry.git_ahead}")
+        suffix = f" ({', '.join(git_state)})" if git_state else ""
+        lines.append(f"- Git: `{entry.git_branch}`{suffix}")
+
+    if entry.first_user_prompt:
+        lines.append(f"- First prompt: {_truncate(entry.first_user_prompt, 300)}")
 
     if entry.summary:
         goal = entry.summary.get("goal")
@@ -717,3 +788,18 @@ def write_markdown(settings=None) -> None:
         content = render_digest(project_entries)
         path = os.path.join(PROJECTS_DIR, f"{slug}.md")
         _atomic_write(path, content)
+
+    try:
+        project_files = os.listdir(PROJECTS_DIR)
+    except OSError:
+        project_files = []
+    for name in project_files:
+        if not name.endswith(".md"):
+            continue
+        slug = name[:-3]
+        if slug in by_slug:
+            continue
+        try:
+            os.remove(os.path.join(PROJECTS_DIR, name))
+        except OSError as e:
+            log.warning(f"Failed to remove stale markdown digest {name}: {e}")

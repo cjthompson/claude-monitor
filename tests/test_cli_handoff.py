@@ -7,11 +7,13 @@ module attributes per test — never into ``sys.modules``, which would leak the
 fakes into every other test module in the suite.
 """
 
+import json
 import os
 import sys
 import time
 import types
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +108,7 @@ def _reset_stubs(monkeypatch):
         fake_handoff.latest_for_cwd,
         fake_handoff.render_entry,
         fake_handoff.render_digest,
+        fake_handoff.write_markdown,
         fake_handoff.prune,
         fake_llm.available,
     ):
@@ -116,6 +119,7 @@ def _reset_stubs(monkeypatch):
     fake_handoff.capture.return_value = None
     fake_handoff.render_entry.return_value = "# Entry\n\nsome **bold** text"
     fake_handoff.render_digest.return_value = "# Digest\n\nsome **bold** text"
+    fake_handoff.write_markdown.return_value = None
     fake_llm.available.return_value = True
     yield
 
@@ -243,42 +247,97 @@ def test_digest_days_reaches_list_entries(capsys):
 # --- capture ---------------------------------------------------------------
 
 
-def test_capture_resolves_session_from_cwd(capsys, tmp_path):
+def _write_events(path, *events):
+    path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+
+
+def test_capture_resolves_live_session_from_cwd(capsys, tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {
+            "session_id": "sess-live",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_timestamp": 1.0,
+        },
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
     fake_handoff.latest_for_cwd.return_value = FakeHandoffEntry(
-        session_id="sess-latest", project_path=str(tmp_path), project_slug="proj-a"
+        session_id="sess-old", project_path=str(tmp_path), project_slug="proj-a"
     )
     fake_handoff.capture.return_value = FakeHandoffEntry(
-        session_id="sess-latest", project_path=str(tmp_path), project_slug="proj-a"
+        session_id="sess-live", project_path=str(tmp_path), project_slug="proj-a"
     )
     rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path)])
     assert rc == 0
     fake_handoff.capture.assert_called_once()
     args, kwargs = fake_handoff.capture.call_args
-    assert args[0] == "sess-latest"
+    assert args[0] == "sess-live"
     assert args[1] == str(tmp_path)
     assert kwargs["with_llm"] is False
+    fake_handoff.latest_for_cwd.assert_not_called()
     out = capsys.readouterr().out
-    assert "sess-latest" in out
+    assert "sess-live" in out
+
+
+def test_capture_ignores_ended_session_when_resolving_live_session(capsys, tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {
+            "session_id": "sess-ended",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_timestamp": 3.0,
+        },
+        {
+            "session_id": "sess-ended",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionEnd",
+            "_timestamp": 4.0,
+        },
+        {
+            "session_id": "sess-live",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_timestamp": 1.0,
+        },
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    fake_handoff.capture.return_value = FakeHandoffEntry(
+        session_id="sess-live", project_path=str(tmp_path), project_slug="proj-a"
+    )
+
+    rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path)])
+
+    assert rc == 0
+    assert fake_handoff.capture.call_args.args[0] == "sess-live"
+    assert "sess-live" in capsys.readouterr().out
 
 
 def test_capture_defaults_cwd_to_getcwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    fake_handoff.latest_for_cwd.return_value = FakeHandoffEntry(
-        session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {"session_id": "sess-1", "cwd": str(tmp_path), "hook_event_name": "SessionStart"},
     )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
     fake_handoff.capture.return_value = FakeHandoffEntry(
         session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
     )
     rc = cli_handoff.main(["--no-color", "capture"])
     assert rc == 0
-    (cwd_arg,), _ = fake_handoff.latest_for_cwd.call_args
-    assert os.path.realpath(cwd_arg) == os.path.realpath(str(tmp_path))
+    fake_handoff.latest_for_cwd.assert_not_called()
+    args, _ = fake_handoff.capture.call_args
+    assert os.path.realpath(args[1]) == os.path.realpath(str(tmp_path))
 
 
-def test_capture_llm_flag_forces_with_llm_true(tmp_path):
-    fake_handoff.latest_for_cwd.return_value = FakeHandoffEntry(
-        session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
-    )
+def test_capture_llm_flag_forces_with_llm_true(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(events_file, {"session_id": "sess-1", "cwd": str(tmp_path)})
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
     fake_handoff.capture.return_value = FakeHandoffEntry(
         session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
     )
@@ -289,10 +348,10 @@ def test_capture_llm_flag_forces_with_llm_true(tmp_path):
     assert kwargs["with_llm"] is True
 
 
-def test_capture_llm_missing_api_key_errors_clearly(tmp_path, capsys):
-    fake_handoff.latest_for_cwd.return_value = FakeHandoffEntry(
-        session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
-    )
+def test_capture_llm_missing_api_key_errors_clearly(tmp_path, capsys, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(events_file, {"session_id": "sess-1", "cwd": str(tmp_path)})
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
     fake_llm.available.return_value = False
     rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path), "--llm"])
     assert rc == 1
@@ -306,8 +365,29 @@ def test_capture_cannot_resolve_session_errors(tmp_path, capsys):
     rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path)])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "could not determine a session id" in err
+    assert "could not determine a live session id" in err
     fake_handoff.capture.assert_not_called()
+
+
+def test_capture_configured_llm_failure_keeps_heuristic_entry(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(events_file, {"session_id": "sess-1", "cwd": str(tmp_path)})
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    monkeypatch.setattr(
+        cli_handoff,
+        "load_settings",
+        lambda: SimpleNamespace(handoff_llm_enabled=True, handoff_llm_transport="minimax"),
+    )
+    fake_llm.available.return_value = False
+    fake_handoff.capture.return_value = FakeHandoffEntry(
+        session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
+    )
+
+    rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path)])
+
+    assert rc == 0
+    fake_llm.available.assert_not_called()
+    assert fake_handoff.capture.call_args[1]["with_llm"] is True
 
 
 def test_capture_explicit_session_skips_resolution(tmp_path):
@@ -323,10 +403,10 @@ def test_capture_explicit_session_skips_resolution(tmp_path):
     assert args[0] == "sess-explicit"
 
 
-def test_capture_none_result_errors(tmp_path, capsys):
-    fake_handoff.latest_for_cwd.return_value = FakeHandoffEntry(
-        session_id="sess-1", project_path=str(tmp_path), project_slug="proj-a"
-    )
+def test_capture_none_result_errors(tmp_path, capsys, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(events_file, {"session_id": "sess-1", "cwd": str(tmp_path)})
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
     fake_handoff.capture.return_value = None
     rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path)])
     assert rc == 1
@@ -347,6 +427,7 @@ def test_prune_happy_path(capsys):
     assert fake_handoff.prune.call_count == 2
     fake_handoff.prune.assert_any_call("proj-a", 3)
     fake_handoff.prune.assert_any_call("proj-b", 3)
+    fake_handoff.write_markdown.assert_called_once()
     out = capsys.readouterr().out
     assert "Pruned 2 project" in out
 
@@ -357,6 +438,7 @@ def test_prune_empty_store(capsys):
     out = capsys.readouterr().out
     assert "No hand-off sessions recorded" in out
     fake_handoff.prune.assert_not_called()
+    fake_handoff.write_markdown.assert_called_once()
 
 
 # --- color handling ---------------------------------------------------------

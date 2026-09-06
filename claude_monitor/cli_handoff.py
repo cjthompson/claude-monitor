@@ -20,13 +20,14 @@ when ``NO_COLOR`` is set, or when ``--no-color`` is passed.
 """
 
 import argparse
+import json
 import logging
 import os
 import re
 import sys
 import time
 
-from claude_monitor import fmt_duration, handoff, llm
+from claude_monitor import EVENTS_FILE, fmt_duration, handoff, llm
 from claude_monitor.settings import load_settings
 
 log = logging.getLogger("claude_monitor.cli_handoff")
@@ -95,6 +96,53 @@ def _since_from_days(days: int | None) -> float | None:
     return time.time() - days * 86400
 
 
+def _normalized_cwd(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(path))))
+
+
+def _latest_live_session_for_cwd(cwd: str) -> str | None:
+    """Return the newest non-ended session observed in *cwd*."""
+    wanted_cwd = _normalized_cwd(cwd)
+    sessions: dict[str, tuple[bool, float, int]] = {}
+    try:
+        with open(EVENTS_FILE, encoding="utf-8") as events_file:
+            for order, raw_line in enumerate(events_file):
+                try:
+                    event = json.loads(raw_line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                session_id = event.get("session_id")
+                event_cwd = event.get("cwd")
+                if (
+                    not isinstance(session_id, str)
+                    or not session_id
+                    or not isinstance(event_cwd, str)
+                ):
+                    continue
+                if _normalized_cwd(event_cwd) != wanted_cwd:
+                    continue
+                timestamp = event.get("_timestamp")
+                if not isinstance(timestamp, (int, float)):
+                    timestamp = 0.0
+                sessions[session_id] = (
+                    event.get("hook_event_name") != "SessionEnd",
+                    float(timestamp),
+                    order,
+                )
+    except OSError:
+        return None
+
+    live = (
+        (timestamp, order, session_id)
+        for session_id, (active, timestamp, order) in sessions.items()
+        if active
+    )
+    newest = max(live, default=None)
+    return newest[2] if newest is not None else None
+
+
 # --- subcommands ---------------------------------------------------------
 
 
@@ -159,17 +207,16 @@ def cmd_capture(args: argparse.Namespace, use_color: bool) -> int:
 
     session_id = args.session
     if not session_id:
-        latest = handoff.latest_for_cwd(cwd)
-        if latest is None:
+        session_id = _latest_live_session_for_cwd(cwd)
+        if session_id is None:
             _err(
-                f"Error: could not determine a session id for '{cwd}'; "
+                f"Error: could not determine a live session id for '{cwd}'; "
                 "pass --session <id> explicitly"
             )
             return 1
-        session_id = latest.session_id
 
     with_llm = True if args.llm else bool(getattr(settings, "handoff_llm_enabled", False))
-    if with_llm:
+    if args.llm:
         transport = getattr(settings, "handoff_llm_transport", "minimax")
         if not llm.available(transport):
             provider = llm.PROVIDERS.get(transport)
@@ -203,12 +250,23 @@ def cmd_prune(args: argparse.Namespace, use_color: bool) -> int:
 
     entries = handoff.list_entries()
     if not entries:
+        if getattr(settings, "handoff_markdown_enabled", True):
+            try:
+                handoff.write_markdown(settings)
+            except Exception as e:  # noqa: BLE001 - pruning must remain complete
+                log.warning(f"Markdown refresh after prune failed: {e}")
         print(_empty_store_message())
         return 0
 
     slugs = sorted({e.project_slug for e in entries})
     for slug in slugs:
         handoff.prune(slug, keep)
+
+    if getattr(settings, "handoff_markdown_enabled", True):
+        try:
+            handoff.write_markdown(settings)
+        except Exception as e:  # noqa: BLE001 - pruning must remain complete
+            log.warning(f"Markdown refresh after prune failed: {e}")
 
     noun = "entry" if keep == 1 else "entries"
     print(f"Pruned {len(slugs)} project(s) to {keep} {noun} each.")
@@ -247,7 +305,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_capture = sub.add_parser("capture", help="manually capture a session now")
     p_capture.add_argument(
-        "--session", metavar="ID", help="session id (default: most recent for --cwd)"
+        "--session", metavar="ID", help="session id (default: most recent live session for --cwd)"
     )
     p_capture.add_argument(
         "--cwd", metavar="PATH", help="working directory (default: current directory)"
