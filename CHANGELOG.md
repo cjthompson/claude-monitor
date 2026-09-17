@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-17
+
+### Live per-session hand-offs and idle rotation (P001)
+- Targeted hand-off delivery and CLI rotation (#handoff, #cli)
+
 ## 2026-08-25
 
 ### Features
