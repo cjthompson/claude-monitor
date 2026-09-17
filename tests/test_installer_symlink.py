@@ -12,6 +12,7 @@ EXPECTED_COMMANDS = (
     "claude-monitor-hook",
     "claude-monitor-statusline",
     "claude-monitor-credentials",
+    "claude-monitor-handoff",
 )
 
 
@@ -37,6 +38,7 @@ def test_symlink_credentials_matches_pyproject_entry_point():
     # The installer must expose exactly the console scripts declared in pyproject.
     pyproject = (Path(install.__file__).parent / "pyproject.toml").read_text()
     assert 'claude-monitor-credentials = "claude_monitor.cli_credentials:main"' in pyproject
+    assert 'claude-monitor-handoff = "claude_monitor.cli_handoff:main"' in pyproject
 
 
 def test_python_version_gate_boundary():

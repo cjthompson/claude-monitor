@@ -75,8 +75,9 @@ class Settings:
     handoff_llm_transport: str = "minimax"  # minimax / openai / claude_cli
     handoff_model: str = ""  # model name override; "" = provider default
     handoff_llm_timeout_secs: int = 30  # seconds to wait for the LLM summary, clamp 5..300
-    handoff_inject_on_start: bool = False  # inject prior session summary into new sessions
-    handoff_inject_max_age_hours: int = 72  # max age of entry to inject, clamp 1..8760
+    handoff_rotation_mode: str = "clear"  # clear / compact for targeted pane rotation
+    handoff_inject_on_start: bool = False  # deprecated one-release compatibility no-op
+    handoff_inject_max_age_hours: int = 72  # legacy age setting; clamp 1..8760
     handoff_markdown_enabled: bool = True  # write handoff.md / per-project digest files
     handoff_retain_per_project: int = 5  # number of entries to keep per project, clamp 1..100
 
@@ -100,6 +101,8 @@ class Settings:
         # Hand-off fields
         self.handoff_capture_idle_mins = max(0, min(1440, int(self.handoff_capture_idle_mins)))
         self.handoff_llm_timeout_secs = max(5, min(300, int(self.handoff_llm_timeout_secs)))
+        if self.handoff_rotation_mode not in ("clear", "compact"):
+            self.handoff_rotation_mode = "clear"
         self.handoff_inject_max_age_hours = max(
             1, min(8760, int(self.handoff_inject_max_age_hours))
         )
@@ -322,10 +325,21 @@ FIELD_DEFS: list[FieldDef] = [
     },
     {
         "name": "handoff_inject_on_start",
-        "label": "Inject on start",
+        "label": "Inject on start (deprecated)",
         "widget_type": "switch",
-        "description": "Feed the previous session's hand-off summary into new sessions"
-        " started in the same project directory",
+        "description": (
+            "Deprecated one-release no-op; targeted rotation delivers only to its exact pane"
+        ),
+    },
+    {
+        "name": "handoff_rotation_mode",
+        "label": "Rotation mode",
+        "widget_type": "select",
+        "options": [
+            ("Clear (new conversation)", "clear"),
+            ("Compact (same conversation)", "compact"),
+        ],
+        "description": "Command used by claude-monitor-handoff rotate when --mode is omitted",
     },
     {
         "name": "handoff_inject_max_age_hours",
@@ -333,8 +347,7 @@ FIELD_DEFS: list[FieldDef] = [
         "widget_type": "input",
         "placeholder": "72",
         "input_type": "integer",
-        "description": "Only inject a prior hand-off entry if it is newer than this"
-        " many hours (1..8760)",
+        "description": "Legacy setting; targeted hand-offs always expire after 72 hours",
     },
     {
         "name": "handoff_markdown_enabled",
@@ -703,6 +716,9 @@ class SettingsScreen(ModalScreen[Settings | None]):
             ),
             handoff_model=self.query_one(f"#{_widget_id('handoff_model')}", Input).value,
             handoff_llm_timeout_secs=handoff_llm_timeout_secs,
+            handoff_rotation_mode=self._get_select_value(
+                _widget_id("handoff_rotation_mode"), s.handoff_rotation_mode
+            ),
             handoff_inject_on_start=self.query_one(
                 f"#{_widget_id('handoff_inject_on_start')}", Switch
             ).value,

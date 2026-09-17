@@ -22,11 +22,13 @@ def _isolated_handoff_dir(tmp_path, monkeypatch):
     sessions_dir = handoff_dir / "sessions"
     projects_dir = handoff_dir / "projects"
     digest_file = handoff_dir / "handoff.md"
+    pending_dir = handoff_dir / "pending"
 
     monkeypatch.setattr(handoff, "HANDOFF_DIR", str(handoff_dir))
     monkeypatch.setattr(handoff, "SESSIONS_DIR", str(sessions_dir))
     monkeypatch.setattr(handoff, "PROJECTS_DIR", str(projects_dir))
     monkeypatch.setattr(handoff, "DIGEST_FILE", str(digest_file))
+    monkeypatch.setattr(handoff, "PENDING_DIR", str(pending_dir), raising=False)
     yield
 
 
@@ -353,6 +355,411 @@ def _make_entry(session_id, slug, ended_at, project_path="/proj"):
         title=f"Title {session_id}",
         ended_at=ended_at,
     )
+
+
+def test_pending_round_trip_and_exact_compact_consumption(tmp_path, monkeypatch):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    handoff._save_entry(entry)
+    pending = handoff.stage_pending(
+        entry,
+        iterm_session_id="pane/unsafe",
+        originating_session_id="source",
+        rotation_mode="compact",
+        now=1000.0,
+    )
+
+    assert pending is not None
+    assert pending.generation_token
+    assert pending.delivery_context.startswith(handoff.HANDOFF_ACTION_LABEL)
+    files = list((tmp_path / "handoff" / "pending").glob("*.json"))
+    assert len(files) == 1
+    assert "/" not in files[0].name
+
+    consumed = handoff.consume_pending_session_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "session_id": "source",
+            "cwd": str(tmp_path),
+            "_iterm_session_id": "pane/unsafe",
+        },
+        now=1001.0,
+    )
+    assert consumed is not None
+    assert consumed.delivery_context == pending.delivery_context
+    assert (
+        handoff.consume_pending_session_start(
+            {
+                "source": "compact",
+                "session_id": "source",
+                "cwd": str(tmp_path),
+                "_iterm_session_id": "pane/unsafe",
+            },
+            now=1001.0,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"hook_event_name": "Notification"},
+        {"source": "startup"},
+        {"source": "clear"},
+        {"session_id": "other-session"},
+        {"cwd": "/other-project"},
+        {"_iterm_session_id": "other-pane"},
+    ],
+)
+def test_pending_compact_rejects_nonmatching_session_start(tmp_path, overrides):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    handoff._save_entry(entry)
+    handoff.stage_pending(
+        entry,
+        iterm_session_id="pane-1",
+        originating_session_id="source",
+        rotation_mode="compact",
+        now=1000.0,
+    )
+    event = {
+        "hook_event_name": "SessionStart",
+        "source": "compact",
+        "session_id": "source",
+        "cwd": str(tmp_path),
+        "_iterm_session_id": "pane-1",
+    }
+    event.update(overrides)
+
+    assert handoff.consume_pending_session_start(event, now=1001.0) is None
+    assert list((tmp_path / "handoff" / "pending").glob("*.json"))
+
+
+def test_malformed_pending_record_fails_closed_and_is_removed(tmp_path):
+    pending_dir = tmp_path / "handoff" / "pending"
+    pending_dir.mkdir(parents=True)
+    pending_path = pending_dir / "malformed.json"
+    pending_path.write_text(
+        json.dumps(
+            {
+                "entry_session_id": "source",
+                "originating_session_id": "source",
+                "target_iterm_session_id": "pane-1",
+                "project_path": str(tmp_path),
+                "project_slug": handoff.project_slug(str(tmp_path)),
+                "rotation_mode": "compact",
+                "created_at": 1000.0,
+                "expires_at": "never",
+            }
+        )
+    )
+
+    assert (
+        handoff.consume_pending_session_start(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+                "session_id": "source",
+                "cwd": str(tmp_path),
+                "_iterm_session_id": "pane-1",
+            },
+            now=1001.0,
+        )
+        is None
+    )
+    assert not pending_path.exists()
+
+
+def test_pending_clear_requires_predecessor_and_rejects_wrong_target(tmp_path, monkeypatch):
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(handoff, "EVENTS_FILE", str(events), raising=False)
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    handoff._save_entry(entry)
+    assert (
+        handoff.stage_pending(
+            entry,
+            iterm_session_id="pane-1",
+            originating_session_id="source",
+            rotation_mode="clear",
+            now=1000.0,
+        )
+        is not None
+    )
+    events.write_text(
+        json.dumps(
+            {
+                "hook_event_name": "SessionEnd",
+                "session_id": "source",
+                "cwd": str(tmp_path),
+                "_iterm_session_id": "pane-1",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "hook_event_name": "SessionStart",
+                "source": "clear",
+                "session_id": "new",
+                "cwd": str(tmp_path),
+                "_iterm_session_id": "pane-1",
+            }
+        )
+        + "\n"
+    )
+    consumed = handoff.consume_pending_session_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "clear",
+            "session_id": "new",
+            "cwd": str(tmp_path),
+            "_iterm_session_id": "pane-1",
+        },
+        now=1001.0,
+    )
+    assert consumed is not None
+    assert consumed.delivery_context == handoff.render_delivery_context(entry)
+
+
+def test_pending_clear_consumes_without_predecessor(tmp_path, monkeypatch):
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(handoff, "EVENTS_FILE", str(events), raising=False)
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    handoff.stage_pending(
+        entry,
+        iterm_session_id="pane-1",
+        originating_session_id="source",
+        rotation_mode="clear",
+        now=1000.0,
+    )
+    consumed = handoff.consume_pending_session_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "clear",
+            "session_id": "new",
+            "cwd": str(tmp_path),
+            "_iterm_session_id": "pane-1",
+        },
+        now=1001.0,
+    )
+    assert consumed is not None
+    assert consumed.originating_session_id == "source"
+    assert not list((tmp_path / "handoff" / "pending").glob("*.json"))
+
+
+def test_pending_has_no_time_expiry_and_render_is_bounded_and_labeled(tmp_path):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    entry.summary = {"goal": "ship feature", "stopping_point": "tests", "next_steps": ["review"]}
+    entry.files_touched = ["src/feature.py"]
+    handoff.stage_pending(
+        entry,
+        iterm_session_id="pane-1",
+        originating_session_id="source",
+        rotation_mode="compact",
+        now=1000.0,
+    )
+    consumed = handoff.consume_pending_session_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "session_id": "source",
+            "cwd": str(tmp_path),
+            "_iterm_session_id": "pane-1",
+        },
+        now=1000.0 + 365 * 24 * 3600,
+    )
+    assert consumed is not None
+    assert not list((tmp_path / "handoff" / "pending").glob("*.json"))
+    rendered = handoff.render_delivery_context(entry)
+    assert rendered.startswith(handoff.HANDOFF_ACTION_LABEL)
+    assert "ship feature" in rendered and "src/feature.py" in rendered
+    assert len(rendered) <= 1500
+
+
+def test_pending_delivery_survives_source_entry_pruning(tmp_path):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    pending = handoff.stage_pending(
+        entry,
+        iterm_session_id="pane-1",
+        originating_session_id="source",
+        rotation_mode="compact",
+        now=1000.0,
+    )
+    assert pending is not None
+
+    source_path = handoff._session_path(entry.project_slug, entry.session_id)
+    assert not os.path.exists(source_path)
+
+    consumed = handoff.consume_pending_session_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "session_id": "source",
+            "cwd": str(tmp_path),
+            "_iterm_session_id": "pane-1",
+        },
+        now=1001.0,
+    )
+    assert consumed is not None
+    assert consumed.delivery_context == pending.delivery_context
+
+
+def test_discard_pending_requires_generation_and_preserves_newer_record(tmp_path):
+    first = _make_entry(
+        "source-1", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    second = _make_entry(
+        "source-2", handoff.project_slug(str(tmp_path)), 200.0, project_path=str(tmp_path)
+    )
+    first_pending = handoff.stage_pending(
+        first,
+        iterm_session_id="pane-1",
+        originating_session_id="source-1",
+        rotation_mode="compact",
+        now=1000.0,
+    )
+    second_pending = handoff.stage_pending(
+        second,
+        iterm_session_id="pane-1",
+        originating_session_id="source-2",
+        rotation_mode="compact",
+        now=1001.0,
+    )
+    assert first_pending is not None and second_pending is not None
+    assert first_pending.generation_token != second_pending.generation_token
+
+    handoff.discard_pending(
+        iterm_session_id="pane-1",
+        originating_session_id="source-1",
+        generation_token=first_pending.generation_token,
+    )
+    still_pending = handoff.consume_pending_session_start(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "session_id": "source-2",
+            "cwd": str(tmp_path),
+            "_iterm_session_id": "pane-1",
+        },
+        now=1002.0,
+    )
+    assert still_pending is not None
+    assert still_pending.delivery_context == second_pending.delivery_context
+
+
+def test_pending_delivery_failure_keeps_record_for_retry(tmp_path):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    pending = handoff.stage_pending(
+        entry,
+        iterm_session_id="pane-1",
+        originating_session_id="source",
+        rotation_mode="compact",
+        now=1000.0,
+    )
+    assert pending is not None
+    event = {
+        "hook_event_name": "SessionStart",
+        "source": "compact",
+        "session_id": "source",
+        "cwd": str(tmp_path),
+        "_iterm_session_id": "pane-1",
+    }
+
+    def fail_delivery(_pending):
+        raise OSError("stdout closed")
+
+    with pytest.raises(OSError, match="stdout closed"):
+        handoff.deliver_pending_session_start(event, fail_delivery)
+
+    delivered = []
+    assert handoff.deliver_pending_session_start(event, delivered.append)
+    assert delivered == [pending]
+    assert not list((tmp_path / "handoff" / "pending").glob("*.json"))
+
+
+def test_pending_clear_rejects_an_intervening_different_session(tmp_path, monkeypatch):
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(handoff, "EVENTS_FILE", str(events), raising=False)
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    pending = handoff.stage_pending(
+        entry,
+        iterm_session_id="pane-1",
+        originating_session_id="source",
+        rotation_mode="clear",
+        now=1000.0,
+    )
+    assert pending is not None
+    current_start = {
+        "hook_event_name": "SessionStart",
+        "source": "clear",
+        "session_id": "new-clear-session",
+        "cwd": str(tmp_path),
+        "_iterm_session_id": "pane-1",
+        "_timestamp": 1002.0,
+    }
+    events.write_text(
+        json.dumps(
+            {
+                "hook_event_name": "Notification",
+                "session_id": "intervening-session",
+                "cwd": str(tmp_path),
+                "_iterm_session_id": "pane-1",
+                "_timestamp": 1001.0,
+            }
+        )
+        + "\n"
+        + json.dumps(current_start)
+        + "\n"
+    )
+
+    assert handoff.consume_pending_session_start(current_start, now=1002.0) is None
+    assert list((tmp_path / "handoff" / "pending").glob("*.json"))
+
+
+def test_delivery_context_uses_heuristic_facts_without_llm_summary(tmp_path):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    entry.first_user_prompt = "Implement targeted delivery"
+    entry.last_prompt = "Run the focused tests"
+    entry.last_assistant_message = "The pending record is ready for review"
+
+    rendered = handoff.render_delivery_context(entry)
+
+    assert "First prompt: Implement targeted delivery" in rendered
+    assert "Last prompt: Run the focused tests" in rendered
+    assert "Last response: The pending record is ready for review" in rendered
+
+
+def test_delivery_context_never_exceeds_bound(tmp_path):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    entry.summary = {
+        "goal": "g" * 2000,
+        "stopping_point": "s" * 2000,
+        "next_steps": ["n" * 2000 for _ in range(5)],
+    }
+    entry.files_touched = ["f" * 2000]
+
+    rendered = handoff.render_delivery_context(entry)
+
+    assert len(rendered) <= 1500
 
 
 def test_store_round_trip(tmp_path):

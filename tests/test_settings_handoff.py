@@ -16,6 +16,7 @@ HANDOFF_FIELDS = [
     "handoff_llm_transport",
     "handoff_model",
     "handoff_llm_timeout_secs",
+    "handoff_rotation_mode",
     "handoff_inject_on_start",
     "handoff_inject_max_age_hours",
     "handoff_markdown_enabled",
@@ -33,6 +34,7 @@ class TestHandoffDefaults:
         assert s.handoff_llm_transport == "minimax"
         assert s.handoff_model == ""
         assert s.handoff_llm_timeout_secs == 30
+        assert s.handoff_rotation_mode == "clear"
         assert s.handoff_inject_on_start is False
         assert s.handoff_inject_max_age_hours == 72
         assert s.handoff_markdown_enabled is True
@@ -92,6 +94,13 @@ class TestHandoffTransportValidation:
     def test_empty_string_falls_back(self):
         assert Settings(handoff_llm_transport="").handoff_llm_transport == "minimax"
 
+    def test_invalid_rotation_mode_falls_back_to_clear(self):
+        assert Settings(handoff_rotation_mode="invalid").handoff_rotation_mode == "clear"
+
+    def test_clear_and_compact_rotation_modes_are_accepted(self):
+        assert Settings(handoff_rotation_mode="clear").handoff_rotation_mode == "clear"
+        assert Settings(handoff_rotation_mode="compact").handoff_rotation_mode == "compact"
+
 
 class TestHandoffPersistence:
     def test_round_trip(self, isolated_state):
@@ -103,6 +112,7 @@ class TestHandoffPersistence:
             handoff_llm_transport="openai",
             handoff_model="gpt-4o-mini",
             handoff_llm_timeout_secs=45,
+            handoff_rotation_mode="compact",
             handoff_inject_on_start=True,
             handoff_inject_max_age_hours=24,
             handoff_markdown_enabled=False,
@@ -118,6 +128,7 @@ class TestHandoffPersistence:
         assert loaded.handoff_llm_transport == "openai"
         assert loaded.handoff_model == "gpt-4o-mini"
         assert loaded.handoff_llm_timeout_secs == 45
+        assert loaded.handoff_rotation_mode == "compact"
         assert loaded.handoff_inject_on_start is True
         assert loaded.handoff_inject_max_age_hours == 24
         assert loaded.handoff_markdown_enabled is False
@@ -189,4 +200,9 @@ class TestHandoffFieldDefs:
     def test_handoff_inject_on_start_notes_new_session_behavior(self):
         fd = next(fd for fd in FIELD_DEFS if fd["name"] == "handoff_inject_on_start")
         desc = (fd.get("description") or "").lower()
-        assert "new session" in desc
+        assert "deprecated" in desc and "no-op" in desc
+
+    def test_rotation_mode_uses_clear_compact_select(self):
+        fd = next(fd for fd in FIELD_DEFS if fd["name"] == "handoff_rotation_mode")
+        assert fd["widget_type"] == "select"
+        assert {value for _, value in fd["options"]} == {"clear", "compact"}

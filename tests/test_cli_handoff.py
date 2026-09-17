@@ -66,6 +66,8 @@ def _make_handoff_stub() -> types.ModuleType:
     mod.render_digest = MagicMock(return_value="# Digest\n\nsome **bold** text")
     mod.write_markdown = MagicMock(return_value=None)
     mod.prune = MagicMock(return_value=None)
+    mod.stage_pending = MagicMock(return_value=SimpleNamespace())
+    mod.discard_pending = MagicMock(return_value=None)
     return mod
 
 
@@ -110,6 +112,8 @@ def _reset_stubs(monkeypatch):
         fake_handoff.render_digest,
         fake_handoff.write_markdown,
         fake_handoff.prune,
+        fake_handoff.stage_pending,
+        fake_handoff.discard_pending,
         fake_llm.available,
     ):
         m.reset_mock(return_value=True, side_effect=True)
@@ -263,6 +267,9 @@ def test_capture_resolves_live_session_from_cwd(capsys, tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    monkeypatch.setattr(
+        cli_handoff, "load_settings", lambda: SimpleNamespace(handoff_llm_enabled=False)
+    )
     fake_handoff.latest_for_cwd.return_value = FakeHandoffEntry(
         session_id="sess-old", project_path=str(tmp_path), project_slug="proj-a"
     )
@@ -414,6 +421,134 @@ def test_capture_none_result_errors(tmp_path, capsys, monkeypatch):
     assert "could not capture session" in err
 
 
+def test_rotate_defaults_to_clear_and_sends_safe_rename_then_clear(tmp_path, capsys, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {
+            "session_id": "sess-live",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_iterm_session_id": "pane-1",
+        },
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    fake_handoff.capture.return_value = FakeHandoffEntry(
+        session_id="sess-live",
+        project_path=str(tmp_path),
+        project_slug="proj",
+        title="Ship it\nnow\t\x1b[31m",
+    )
+    monkeypatch.setattr(
+        cli_handoff, "KeystrokeSender", SimpleNamespace(send_text=lambda sid, text: True)
+    )
+    sent = []
+    monkeypatch.setattr(
+        cli_handoff.KeystrokeSender, "send_text", lambda sid, text: sent.append((sid, text)) or True
+    )
+
+    rc = cli_handoff.main(["--no-color", "rotate", "--cwd", str(tmp_path)])
+
+    assert rc == 0
+    assert sent == [
+        ("pane-1", "/rename claude-monitor hand-off: Ship it now [31m\r/clear\r"),
+    ]
+    fake_handoff.stage_pending.assert_called_once()
+    assert fake_handoff.stage_pending.call_args.kwargs["rotation_mode"] == "clear"
+    assert not any(character in sent[0][1] for character in ("\n", "\t", "\x1b"))
+
+
+def test_rotate_compact_sends_only_compact(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {
+            "session_id": "s",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_iterm_session_id": "p",
+        },
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    fake_handoff.capture.return_value = FakeHandoffEntry(
+        session_id="s", project_path=str(tmp_path), project_slug="p"
+    )
+    sent = []
+    monkeypatch.setattr(
+        cli_handoff.KeystrokeSender, "send_text", lambda sid, text: sent.append((sid, text)) or True
+    )
+    rc = cli_handoff.main(["--no-color", "rotate", "--cwd", str(tmp_path), "--mode", "compact"])
+    assert rc == 0
+    assert sent == [("p", "/compact\r")]
+
+
+def test_rotate_explicit_session_uses_its_pane_not_newer_session(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {
+            "session_id": "wanted",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_iterm_session_id": "wanted-pane",
+        },
+        {
+            "session_id": "newer",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_iterm_session_id": "newer-pane",
+        },
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    fake_handoff.capture.return_value = FakeHandoffEntry(
+        session_id="wanted", project_path=str(tmp_path), project_slug="p"
+    )
+    sent = []
+    monkeypatch.setattr(
+        cli_handoff.KeystrokeSender, "send_text", lambda sid, text: sent.append((sid, text)) or True
+    )
+    rc = cli_handoff.main(
+        ["--no-color", "rotate", "--session", "wanted", "--cwd", str(tmp_path), "--mode", "compact"]
+    )
+    assert rc == 0
+    assert sent == [("wanted-pane", "/compact\r")]
+
+
+def test_rotate_without_pane_keeps_local_capture_and_does_not_stage(tmp_path, capsys, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file, {"session_id": "s", "cwd": str(tmp_path), "hook_event_name": "SessionStart"}
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    fake_handoff.capture.return_value = FakeHandoffEntry(
+        session_id="s", project_path=str(tmp_path), project_slug="p"
+    )
+    rc = cli_handoff.main(["--no-color", "rotate", "--cwd", str(tmp_path)])
+    assert rc == 1
+    assert "Captured hand-off entry" in capsys.readouterr().out
+    fake_handoff.stage_pending.assert_not_called()
+
+
+def test_rotate_transport_failure_retains_pending_and_keeps_capture(tmp_path, monkeypatch):
+    events_file = tmp_path / "events.jsonl"
+    _write_events(
+        events_file,
+        {
+            "session_id": "s",
+            "cwd": str(tmp_path),
+            "hook_event_name": "SessionStart",
+            "_iterm_session_id": "p",
+        },
+    )
+    monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    entry = FakeHandoffEntry(session_id="s", project_path=str(tmp_path), project_slug="p")
+    fake_handoff.capture.return_value = entry
+    monkeypatch.setattr(cli_handoff.KeystrokeSender, "send_text", lambda sid, text: False)
+    rc = cli_handoff.main(["--no-color", "rotate", "--cwd", str(tmp_path), "--mode", "compact"])
+    assert rc == 1
+    fake_handoff.discard_pending.assert_not_called()
+
+
 # --- prune ---------------------------------------------------------------
 
 
@@ -468,6 +603,7 @@ def test_non_tty_stdout_produces_no_ansi_by_default(capsys):
 
 
 def test_color_used_when_tty_and_not_disabled(capsys, monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     fake_handoff.list_entries.return_value = [
         FakeHandoffEntry(session_id="a", project_path="/p", project_slug="proj-a", title="T")

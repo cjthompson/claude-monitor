@@ -12,6 +12,7 @@ Subcommands:
   digest               The morning-standup view: recent sessions grouped by
                         project. This is the primary command.
   capture               Manually capture the current (or given) session.
+  rotate                Capture and rotate an exact iTerm pane with clear or compact.
   prune                 Trim each project's history down to N entries.
 
 Output is plain text (no rich/textual). ANSI is limited to bold titles/headers
@@ -26,8 +27,10 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 
 from claude_monitor import EVENTS_FILE, fmt_duration, handoff, llm
+from claude_monitor.iterm2_layout import KeystrokeSender
 from claude_monitor.settings import load_settings
 
 log = logging.getLogger("claude_monitor.cli_handoff")
@@ -100,10 +103,17 @@ def _normalized_cwd(path: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(path))))
 
 
-def _latest_live_session_for_cwd(cwd: str) -> str | None:
-    """Return the newest non-ended session observed in *cwd*."""
+@dataclass(frozen=True)
+class LiveSessionTarget:
+    session_id: str
+    cwd: str
+    iterm_session_id: str | None
+
+
+def _live_session_target(requested_session_id: str | None, cwd: str) -> LiveSessionTarget | None:
+    """Resolve one live session and its latest observed exact pane."""
     wanted_cwd = _normalized_cwd(cwd)
-    sessions: dict[str, tuple[bool, float, int]] = {}
+    sessions: dict[str, tuple[bool, float, int, str, str | None]] = {}
     try:
         with open(EVENTS_FILE, encoding="utf-8") as events_file:
             for order, raw_line in enumerate(events_file):
@@ -113,34 +123,48 @@ def _latest_live_session_for_cwd(cwd: str) -> str | None:
                     continue
                 if not isinstance(event, dict):
                     continue
-                session_id = event.get("session_id")
+                event_session_id = event.get("session_id")
                 event_cwd = event.get("cwd")
                 if (
-                    not isinstance(session_id, str)
-                    or not session_id
+                    not isinstance(event_session_id, str)
+                    or not event_session_id
                     or not isinstance(event_cwd, str)
                 ):
                     continue
                 if _normalized_cwd(event_cwd) != wanted_cwd:
                     continue
+                if requested_session_id is not None and event_session_id != requested_session_id:
+                    continue
                 timestamp = event.get("_timestamp")
                 if not isinstance(timestamp, (int, float)):
                     timestamp = 0.0
-                sessions[session_id] = (
+                pane_id = event.get("_iterm_session_id")
+                if not isinstance(pane_id, str):
+                    pane_id = sessions.get(event_session_id, (False, 0.0, 0, "", None))[4]
+                sessions[event_session_id] = (
                     event.get("hook_event_name") != "SessionEnd",
                     float(timestamp),
                     order,
+                    _normalized_cwd(event_cwd),
+                    pane_id,
                 )
     except OSError:
         return None
 
     live = (
-        (timestamp, order, session_id)
-        for session_id, (active, timestamp, order) in sessions.items()
+        (timestamp, order, candidate_id, event_cwd, pane_id)
+        for candidate_id, (active, timestamp, order, event_cwd, pane_id) in sessions.items()
         if active
     )
     newest = max(live, default=None)
-    return newest[2] if newest is not None else None
+    if newest is None:
+        return None
+    return LiveSessionTarget(newest[2], newest[3], newest[4])
+
+
+def _latest_live_session_for_cwd(cwd: str) -> str | None:
+    target = _live_session_target(None, cwd)
+    return target.session_id if target else None
 
 
 # --- subcommands ---------------------------------------------------------
@@ -237,6 +261,91 @@ def cmd_capture(args: argparse.Namespace, use_color: bool) -> int:
     return 0
 
 
+def cmd_rotate(args: argparse.Namespace, use_color: bool) -> int:
+    """Capture and rotate one exact iTerm pane via clear or compact."""
+    settings = load_settings()
+    cwd = args.cwd or os.getcwd()
+    target = _live_session_target(args.session, cwd)
+    if target is None:
+        requested = args.session or "the newest live session"
+        _err(f"Error: could not determine {requested} for '{cwd}'")
+        return 1
+
+    with_llm = True if args.llm else bool(getattr(settings, "handoff_llm_enabled", False))
+    if args.llm:
+        transport = getattr(settings, "handoff_llm_transport", "minimax")
+        if not llm.available(transport):
+            provider = llm.PROVIDERS.get(transport)
+            env_name = provider.api_key_env if provider else "the provider API key"
+            _err(
+                f"Error: {env_name} is not set; cannot generate an LLM summary "
+                f"(transport={transport})."
+            )
+            _err(f"Set {env_name}, or omit --llm to capture without a summary.")
+            return 1
+
+    try:
+        entry = handoff.capture(
+            target.session_id,
+            target.cwd,
+            reason="manual",
+            with_llm=with_llm,
+            settings=settings,
+        )
+    except Exception as exc:  # noqa: BLE001 - rotation must never type on capture failure
+        _err(f"Error: could not capture session '{target.session_id}': {exc}")
+        return 1
+    if entry is None:
+        _err(f"Error: could not capture session '{target.session_id}' (no transcript found?)")
+        return 1
+
+    if not target.iterm_session_id:
+        print(
+            f"Captured hand-off entry for session {entry.session_id} ({entry.project_slug}), "
+            "but live rotation is unavailable outside/unreachable iTerm."
+        )
+        return 1
+
+    mode = args.mode or getattr(settings, "handoff_rotation_mode", "clear")
+    try:
+        pending = handoff.stage_pending(
+            entry,
+            iterm_session_id=target.iterm_session_id,
+            originating_session_id=target.session_id,
+            rotation_mode=mode,
+        )
+    except Exception as exc:  # noqa: BLE001 - persistent state must fail closed
+        _err(f"Error: could not stage hand-off delivery: {exc}")
+        return 1
+    if pending is None:
+        _err("Error: could not stage hand-off delivery")
+        return 1
+
+    if mode == "clear":
+        title = re.sub(r"[\x00-\x1f\x7f]+", " ", entry.title or entry.session_id).strip()
+        title = title[:80] or entry.session_id
+        command = f"/rename claude-monitor hand-off: {title}\r/clear\r"
+    elif mode == "compact":
+        command = "/compact\r"
+    else:
+        _err(f"Error: unsupported rotation mode '{mode}'")
+        return 1
+
+    try:
+        sent = KeystrokeSender.send_text(target.iterm_session_id, command)
+    except Exception as exc:  # noqa: BLE001 - transport is an external boundary
+        sent = False
+        log.warning("iTerm rotation send failed: %s", exc)
+    if not sent:
+        _err("Error: live rotation failed; captured entry retained locally")
+        return 1
+
+    print(
+        f"Captured and staged hand-off for session {entry.session_id}; sent {mode} to iTerm pane."
+    )
+    return 0
+
+
 def cmd_prune(args: argparse.Namespace, use_color: bool) -> int:
     settings = load_settings()
     keep = (
@@ -314,6 +423,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--llm", action="store_true", help="force an LLM summary for this capture"
     )
     p_capture.set_defaults(func=cmd_capture)
+
+    p_rotate = sub.add_parser(
+        "rotate",
+        help=(
+            "capture, then clear or compact the exact iTerm pane "
+            "(local capture retained if unavailable)"
+        ),
+    )
+    p_rotate.add_argument(
+        "--session",
+        metavar="ID",
+        help="exact Claude session id (default: newest live session for --cwd)",
+    )
+    p_rotate.add_argument(
+        "--cwd", metavar="PATH", help="working directory (default: current directory)"
+    )
+    p_rotate.add_argument(
+        "--mode",
+        choices=("clear", "compact"),
+        help="rotation command (default: settings handoff_rotation_mode, normally clear)",
+    )
+    p_rotate.add_argument(
+        "--llm", action="store_true", help="force an LLM summary for this capture"
+    )
+    p_rotate.set_defaults(func=cmd_rotate)
 
     p_prune = sub.add_parser("prune", help="trim each project's history")
     p_prune.add_argument(

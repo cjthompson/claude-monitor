@@ -19,7 +19,7 @@ import pytest
 import claude_monitor
 
 
-def _run_hook(input_data: dict, monkeypatch, env_vars=None):
+def _run_hook(input_data: dict, monkeypatch, env_vars=None, stdout=None):
     """Run hook.main() with mocked stdin/stdout/stderr.
 
     Returns (stdout_data, events_file_contents).
@@ -27,7 +27,7 @@ def _run_hook(input_data: dict, monkeypatch, env_vars=None):
     import claude_monitor.hook as hook
 
     stdin = io.StringIO(json.dumps(input_data))
-    stdout = io.StringIO()
+    stdout = stdout or io.StringIO()
 
     monkeypatch.setattr("sys.stdin", stdin)
     monkeypatch.setattr("sys.stdout", stdout)
@@ -61,7 +61,8 @@ def stub_handoff(monkeypatch):
     """Inject a fake claude_monitor.handoff module and return its mocks."""
     module = types.ModuleType("claude_monitor.handoff")
     module.capture = MagicMock(return_value=None)
-    module.injection_context = MagicMock(return_value=None)
+    module.HANDOFF_ACTION_LABEL = "claude-monitor action: session hand-off"
+    module.deliver_pending_session_start = MagicMock(return_value=False)
     monkeypatch.setitem(sys.modules, "claude_monitor.handoff", module)
     # sys.modules alone is not enough once the real module has been imported:
     # `from claude_monitor import handoff` prefers the package attribute.
@@ -153,60 +154,72 @@ class TestSessionEnd:
 
 
 class TestSessionStart:
-    def test_writes_hook_specific_output_when_context_available(
+    def test_writes_labeled_output_when_pending_context_available(
         self, isolated_state, monkeypatch, stub_handoff
     ):
         settings = _settings()
         monkeypatch.setattr("claude_monitor.settings.load_settings", lambda: settings)
-        stub_handoff.injection_context.return_value = "## Prior session\nDid stuff."
+        delivery = SimpleNamespace(
+            delivery_context="claude-monitor action: session hand-off\nFacts"
+        )
+        stub_handoff.deliver_pending_session_start.side_effect = lambda _data, deliver: (
+            deliver(delivery) or True
+        )
 
-        data = {"hook_event_name": "SessionStart", "session_id": "sess-2", "cwd": "/tmp/proj"}
+        data = {
+            "hook_event_name": "SessionStart",
+            "session_id": "sess-2",
+            "cwd": "/tmp/proj",
+            "source": "compact",
+        }
         stdout, _ = _run_hook(data, monkeypatch)
 
         result = json.loads(stdout)
+        assert result["systemMessage"] == "claude-monitor action: session hand-off"
         assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-        assert result["hookSpecificOutput"]["additionalContext"] == "## Prior session\nDid stuff."
+        assert result["hookSpecificOutput"]["additionalContext"].startswith(
+            "claude-monitor action: session hand-off"
+        )
+        stub_handoff.deliver_pending_session_start.assert_called_once()
 
-    def test_no_stdout_when_context_is_none(self, isolated_state, monkeypatch, stub_handoff):
+    @pytest.mark.parametrize("source", ["startup", "resume", None])
+    def test_startup_resume_and_no_match_are_silent(
+        self, source, isolated_state, monkeypatch, stub_handoff
+    ):
         settings = _settings()
-        monkeypatch.setattr("claude_monitor.settings.load_settings", lambda: settings)
-        stub_handoff.injection_context.return_value = None
-
-        data = {"hook_event_name": "SessionStart", "session_id": "sess-2", "cwd": "/tmp/proj"}
-        stdout, _ = _run_hook(data, monkeypatch)
-
-        assert stdout.strip() == ""
-
-    def test_excludes_current_session_id(self, isolated_state, monkeypatch, stub_handoff):
-        settings = _settings()
-        monkeypatch.setattr("claude_monitor.settings.load_settings", lambda: settings)
-        stub_handoff.injection_context.return_value = "context"
-
-        data = {"hook_event_name": "SessionStart", "session_id": "sess-current", "cwd": "/tmp/proj"}
-        _run_hook(data, monkeypatch)
-
-        stub_handoff.injection_context.assert_called_once()
-        args, kwargs = stub_handoff.injection_context.call_args
-        assert args[0] == "/tmp/proj"
-        assert kwargs["exclude_session_id"] == "sess-current"
-        assert kwargs["max_age_hours"] == 72
-
-    def test_disabled_settings_no_call(self, isolated_state, monkeypatch, stub_handoff):
-        settings = _settings(handoff_inject_on_start=False)
         monkeypatch.setattr("claude_monitor.settings.load_settings", lambda: settings)
 
         data = {"hook_event_name": "SessionStart", "session_id": "sess-2", "cwd": "/tmp/proj"}
+        if source is not None:
+            data["source"] = source
         stdout, _ = _run_hook(data, monkeypatch)
 
         assert stdout.strip() == ""
-        stub_handoff.injection_context.assert_not_called()
+        stub_handoff.deliver_pending_session_start.assert_called_once()
 
-    def test_injection_context_raises_exits_cleanly_no_stdout(
+    def test_legacy_setting_does_not_gate_targeted_consumption(
         self, isolated_state, monkeypatch, stub_handoff
     ):
         settings = _settings()
         monkeypatch.setattr("claude_monitor.settings.load_settings", lambda: settings)
-        stub_handoff.injection_context.side_effect = RuntimeError("boom")
+        settings.handoff_inject_on_start = False
+
+        data = {
+            "hook_event_name": "SessionStart",
+            "session_id": "sess-current",
+            "cwd": "/tmp/proj",
+            "source": "compact",
+        }
+        _run_hook(data, monkeypatch)
+
+        stub_handoff.deliver_pending_session_start.assert_called_once()
+
+    def test_delivery_raises_exits_cleanly_no_stdout(
+        self, isolated_state, monkeypatch, stub_handoff
+    ):
+        settings = _settings()
+        monkeypatch.setattr("claude_monitor.settings.load_settings", lambda: settings)
+        stub_handoff.deliver_pending_session_start.side_effect = RuntimeError("boom")
 
         data = {"hook_event_name": "SessionStart", "session_id": "sess-2", "cwd": "/tmp/proj"}
         stdout, events = _run_hook(data, monkeypatch)
@@ -214,6 +227,62 @@ class TestSessionStart:
         assert stdout.strip() == ""
         logged = json.loads(events.strip().split("\n")[-1])
         assert logged["hook_event_name"] == "SessionStart"
+
+    def test_stdout_failure_is_swallowed_by_hook(self, isolated_state, monkeypatch, stub_handoff):
+        delivery = SimpleNamespace(
+            delivery_context="claude-monitor action: session hand-off\nFacts"
+        )
+        stub_handoff.deliver_pending_session_start.side_effect = lambda _data, deliver: (
+            deliver(delivery) or True
+        )
+        monkeypatch.setattr(
+            "claude_monitor.hook.json.dump", MagicMock(side_effect=OSError("stdout closed"))
+        )
+
+        stdout, _ = _run_hook(
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": "sess-2",
+                "cwd": "/tmp/proj",
+                "source": "compact",
+            },
+            monkeypatch,
+        )
+
+        assert stdout == ""
+        stub_handoff.deliver_pending_session_start.assert_called_once()
+
+    def test_flush_failure_is_part_of_delivery_attempt(
+        self, isolated_state, monkeypatch, stub_handoff
+    ):
+        class FlushFailingWriter(io.StringIO):
+            flush_calls = 0
+
+            def flush(self):
+                self.flush_calls += 1
+                raise OSError("pipe closed during flush")
+
+        delivery = SimpleNamespace(
+            delivery_context="claude-monitor action: session hand-off\nFacts"
+        )
+        stub_handoff.deliver_pending_session_start.side_effect = lambda _data, deliver: (
+            deliver(delivery) or True
+        )
+        writer = FlushFailingWriter()
+
+        _run_hook(
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": "sess-2",
+                "cwd": "/tmp/proj",
+                "source": "compact",
+            },
+            monkeypatch,
+            stdout=writer,
+        )
+
+        assert writer.flush_calls == 1
+        stub_handoff.deliver_pending_session_start.assert_called_once()
 
 
 class TestNoHandoffImportOnPermissionRequestPath:
@@ -233,6 +302,7 @@ class TestNoHandoffImportOnPermissionRequestPath:
         assert "claude_monitor.handoff" not in sys.modules
 
     def test_existing_permission_request_flow_still_works(self, isolated_state, monkeypatch):
+        monkeypatch.setattr("claude_monitor.hook._tui_is_running", lambda: True)
         data = {
             "hook_event_name": "PermissionRequest",
             "tool_name": "Bash",

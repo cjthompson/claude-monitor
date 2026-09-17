@@ -1,13 +1,13 @@
 """Session hand-off: capture, store, summarize, and render session context.
 
 Captures a compact snapshot of a Claude Code session (git state, transcript
-facts, optional LLM-generated summary) so it can be re-injected as context
-into a later session working in the same directory, and/or browsed as
-markdown digests.
+facts, optional LLM-generated summary) for targeted delivery to a later
+session, and/or browsing as markdown digests.
 
 Storage layout (under ``CONFIG_DIR``, see ``claude_monitor.settings``)::
 
     handoff/sessions/<project-slug>/<session_id>.json
+    handoff/pending/<pane-hash>.json   # one-shot targeted delivery
     handoff/handoff.md                  # global digest
     handoff/projects/<project-slug>.md  # per-project digest
 
@@ -19,13 +19,19 @@ imported, and its tests can run, before those modules land. Tests patch
 to stub them out.
 """
 
+import fcntl
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 import tempfile
 import time
+import uuid
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 
 from claude_monitor import EVENTS_FILE
@@ -37,6 +43,8 @@ HANDOFF_DIR = os.path.join(CONFIG_DIR, "handoff")
 SESSIONS_DIR = os.path.join(HANDOFF_DIR, "sessions")
 PROJECTS_DIR = os.path.join(HANDOFF_DIR, "projects")
 DIGEST_FILE = os.path.join(HANDOFF_DIR, "handoff.md")
+PENDING_DIR = os.path.join(HANDOFF_DIR, "pending")
+HANDOFF_ACTION_LABEL = "claude-monitor action: session hand-off"
 
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 _DEFAULT_EVENT_STATS = {"approved": 0, "deferred": 0, "agents_spawned": 0}
@@ -64,6 +72,19 @@ class HandoffEntry:
     summary: dict | None = None  # {"goal", "stopping_point", "next_steps"}
     summary_model: str | None = None
     summary_generated_at: float | None = None
+
+
+@dataclass(frozen=True)
+class PendingHandoff:
+    entry_session_id: str
+    originating_session_id: str
+    target_iterm_session_id: str
+    project_path: str
+    project_slug: str
+    rotation_mode: str
+    created_at: float
+    generation_token: str
+    delivery_context: str
 
 
 # --- filesystem helpers -----------------------------------------------------
@@ -121,6 +142,265 @@ def _entry_from_dict(data: dict) -> HandoffEntry | None:
     except TypeError as e:
         log.warning(f"Corrupt handoff entry data: {e}")
         return None
+
+
+def _pending_path(iterm_session_id: str) -> str:
+    """Return a safe deterministic path for a pane's pending hand-off."""
+    digest = hashlib.sha256(iterm_session_id.encode("utf-8")).hexdigest()
+    return os.path.join(PENDING_DIR, f"{digest}.json")
+
+
+@contextmanager
+def _pending_lock():
+    """Serialize staging, consumption, and conditional pending cleanup."""
+    os.makedirs(PENDING_DIR, exist_ok=True)
+    lock_path = os.path.join(PENDING_DIR, ".lock")
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _pending_from_dict(data: dict) -> PendingHandoff | None:
+    if not isinstance(data, dict):
+        return None
+    try:
+        known = {k: v for k, v in data.items() if k in PendingHandoff.__dataclass_fields__}
+        pending = PendingHandoff(**known)
+    except (TypeError, ValueError):
+        return None
+    string_fields = (
+        pending.entry_session_id,
+        pending.originating_session_id,
+        pending.target_iterm_session_id,
+        pending.project_path,
+        pending.project_slug,
+        pending.generation_token,
+        pending.delivery_context,
+    )
+    if any(not isinstance(value, str) or not value for value in string_fields):
+        return None
+    if pending.rotation_mode not in ("clear", "compact"):
+        return None
+    if isinstance(pending.created_at, bool) or not isinstance(pending.created_at, (int, float)):
+        return None
+    if not math.isfinite(float(pending.created_at)):
+        return None
+    if len(pending.delivery_context) > 1500:
+        return None
+    if pending.delivery_context != HANDOFF_ACTION_LABEL and not pending.delivery_context.startswith(
+        HANDOFF_ACTION_LABEL + "\n"
+    ):
+        return None
+    return pending
+
+
+def _pending_to_json(pending: PendingHandoff) -> str:
+    return json.dumps(asdict(pending), indent=2, sort_keys=True)
+
+
+def _normalized_project_path(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(path))))
+
+
+def _event_matches_pending_target(event: dict, pending: PendingHandoff) -> bool:
+    cwd = event.get("cwd")
+    return (
+        isinstance(cwd, str)
+        and _normalized_project_path(cwd) == pending.project_path
+        and event.get("_iterm_session_id") == pending.target_iterm_session_id
+    )
+
+
+def _is_current_session_start(event: dict, data: dict) -> bool:
+    return (
+        event.get("hook_event_name") == "SessionStart"
+        and event.get("source") == data.get("source")
+        and event.get("session_id") == data.get("session_id")
+        and event.get("_iterm_session_id") == data.get("_iterm_session_id")
+        and event.get("_timestamp") == data.get("_timestamp")
+    )
+
+
+def _clear_has_no_intervening_session(pending: PendingHandoff, data: dict) -> bool:
+    """Reject a stale clear after another session has occupied the target."""
+    try:
+        with open(EVENTS_FILE, encoding="utf-8") as events_file:
+            for raw_line in events_file:
+                try:
+                    event = json.loads(raw_line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(event, dict) or not _event_matches_pending_target(event, pending):
+                    continue
+                timestamp = event.get("_timestamp")
+                if not isinstance(timestamp, (int, float)) or timestamp < pending.created_at:
+                    continue
+                if _is_current_session_start(event, data):
+                    continue
+                session_id = event.get("session_id")
+                if (
+                    isinstance(session_id, str)
+                    and session_id
+                    and session_id != pending.originating_session_id
+                ):
+                    return False
+    except OSError:
+        # The event log lives in /tmp and may disappear across a restart. The
+        # durable pane/project/source record remains the authority in that case.
+        return True
+    return True
+
+
+def stage_pending(
+    entry: HandoffEntry,
+    *,
+    iterm_session_id: str,
+    originating_session_id: str,
+    rotation_mode: str,
+    now: float | None = None,
+) -> PendingHandoff | None:
+    """Persist a one-shot hand-off delivery targeted at one exact pane."""
+    if (
+        not isinstance(iterm_session_id, str)
+        or not isinstance(originating_session_id, str)
+        or rotation_mode not in ("clear", "compact")
+    ):
+        return None
+    if not iterm_session_id or not originating_session_id:
+        return None
+    created_at = time.time() if now is None else float(now)
+    project_path = _normalized_project_path(entry.project_path)
+    pending = PendingHandoff(
+        entry_session_id=entry.session_id,
+        originating_session_id=originating_session_id,
+        target_iterm_session_id=iterm_session_id,
+        project_path=project_path,
+        project_slug=project_slug(project_path),
+        rotation_mode=rotation_mode,
+        created_at=created_at,
+        generation_token=uuid.uuid4().hex,
+        delivery_context=render_delivery_context(entry),
+    )
+    try:
+        with _pending_lock():
+            if not _atomic_write(_pending_path(iterm_session_id), _pending_to_json(pending)):
+                return None
+    except OSError as exc:
+        log.warning("Failed to lock pending hand-off directory: %s", exc)
+        return None
+    return pending
+
+
+def _pending_matches(pending: PendingHandoff, data: dict) -> bool:
+    if data.get("hook_event_name") != "SessionStart":
+        return False
+    source = data.get("source")
+    if source not in ("clear", "compact") or source != pending.rotation_mode:
+        return False
+    if data.get("_iterm_session_id") != pending.target_iterm_session_id:
+        return False
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or _normalized_project_path(cwd) != pending.project_path:
+        return False
+    if source == "compact":
+        return data.get("session_id") == pending.originating_session_id
+    # Claude Code does not include the originating session id in a clear
+    # SessionStart payload. Exact pane, project, and source are the strongest
+    # available safety checks; unlike compact, clear must work without a
+    # preceding SessionEnd event (sleep/shutdown can omit it).
+    payload_origin = data.get("originating_session_id")
+    if payload_origin is not None and payload_origin != pending.originating_session_id:
+        return False
+    return (
+        isinstance(data.get("session_id"), str)
+        and bool(data["session_id"])
+        and _clear_has_no_intervening_session(pending, data)
+    )
+
+
+def deliver_pending_session_start(
+    data: dict,
+    deliver: Callable[[PendingHandoff], None],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Deliver and remove one matching record, retaining it if delivery fails."""
+    if not isinstance(data, dict):
+        return False
+    del now  # retained as a source-compatible test seam; pending records do not expire
+    delivery_error: BaseException | None = None
+    try:
+        with _pending_lock():
+            names = os.listdir(PENDING_DIR)
+            for name in names:
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(PENDING_DIR, name)
+                try:
+                    with open(path, encoding="utf-8") as pending_file:
+                        pending = _pending_from_dict(json.load(pending_file))
+                except (OSError, json.JSONDecodeError, TypeError):
+                    pending = None
+                if pending is None:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    continue
+                if not _pending_matches(pending, data):
+                    continue
+
+                try:
+                    deliver(pending)
+                except BaseException as exc:  # preserve durable state on any failed delivery
+                    delivery_error = exc
+                    break
+                try:
+                    os.remove(path)
+                except OSError:
+                    return False
+                return True
+    except OSError:
+        return False
+    if delivery_error is not None:
+        raise delivery_error
+    return False
+
+
+def consume_pending_session_start(data: dict, *, now: float | None = None) -> PendingHandoff | None:
+    """Consume and return one matching record without an external delivery step."""
+    consumed: PendingHandoff | None = None
+
+    def collect(pending: PendingHandoff) -> None:
+        nonlocal consumed
+        consumed = pending
+
+    delivered = deliver_pending_session_start(data, collect, now=now)
+    return consumed if delivered else None
+
+
+def discard_pending(
+    *, iterm_session_id: str, originating_session_id: str, generation_token: str
+) -> None:
+    """Remove one exact staged record after a caller explicitly abandons it."""
+    path = _pending_path(iterm_session_id)
+    try:
+        with _pending_lock():
+            with open(path, encoding="utf-8") as pending_file:
+                pending = _pending_from_dict(json.load(pending_file))
+            if (
+                pending is None
+                or pending.target_iterm_session_id != iterm_session_id
+                or pending.originating_session_id != originating_session_id
+                or pending.generation_token != generation_token
+            ):
+                return
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def _event_stats_for_session(session_id: str) -> dict | None:
@@ -676,6 +956,48 @@ def _render_injection(entry: HandoffEntry, now: float) -> str:
     if len(text) > 1500:
         text = text[:1500].rstrip() + "..."
     return text
+
+
+def render_delivery_context(entry: HandoffEntry) -> str:
+    """Render bounded factual context for a targeted hand-off delivery."""
+    lines = [HANDOFF_ACTION_LABEL, f"Session: {entry.title or entry.session_id}"]
+    if entry.first_user_prompt:
+        lines.append(f"First prompt: {_truncate(entry.first_user_prompt, 250)}")
+    if entry.summary:
+        goal = entry.summary.get("goal")
+        stopping = entry.summary.get("stopping_point")
+        next_steps = entry.summary.get("next_steps") or []
+        if goal:
+            lines.append(f"Goal: {_truncate(str(goal), 300)}")
+        if stopping:
+            lines.append(f"Stopped at: {_truncate(str(stopping), 300)}")
+        if next_steps:
+            lines.append("Next steps: " + "; ".join(_truncate(str(s), 150) for s in next_steps[:5]))
+    else:
+        if entry.last_prompt:
+            lines.append(f"Last prompt: {_truncate(entry.last_prompt, 250)}")
+        if entry.last_assistant_message:
+            lines.append(f"Last response: {_truncate(entry.last_assistant_message, 250)}")
+    if entry.files_touched:
+        lines.append("Files touched: " + ", ".join(entry.files_touched[:10]))
+    if entry.open_items:
+        lines.append(
+            "Open items: "
+            + "; ".join(
+                f"[{item.get('kind', '?')}] {_truncate(str(item.get('text', '')), 150)}"
+                for item in entry.open_items[:5]
+            )
+        )
+    if entry.git_branch:
+        state = []
+        if entry.git_dirty:
+            state.append("dirty")
+        if entry.git_ahead:
+            state.append(f"ahead {entry.git_ahead}")
+        suffix = f" ({', '.join(state)})" if state else ""
+        lines.append(f"Git branch: {entry.git_branch}{suffix}")
+    text = "\n".join(lines)
+    return text if len(text) <= 1500 else text[:1497].rstrip() + "..."
 
 
 # --- markdown rendering ---------------------------------------------------------

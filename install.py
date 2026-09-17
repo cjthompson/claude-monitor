@@ -152,6 +152,7 @@ def symlink_to_path():
         "claude-monitor-hook",
         "claude-monitor-statusline",
         "claude-monitor-credentials",
+        "claude-monitor-handoff",
     ):
         src = VENV_DIR / "bin" / name
         dst = LOCAL_BIN / name

@@ -111,49 +111,34 @@ def _handle_session_end(data: dict) -> None:
 
 
 def _handle_session_start(data: dict) -> None:
-    """Inject prior-session hand-off context on SessionStart, best-effort only.
+    """Consume an exact-pane hand-off on SessionStart, best-effort only.
 
     Imports are lazy so PermissionRequest (the hot path) never pays for
     this. Any failure is swallowed — a hand-off bug must never block a
     session lifecycle event.
     """
     try:
-        from claude_monitor.settings import load_settings
-
-        settings = load_settings()
-    except Exception:
-        return
-
-    if not getattr(settings, "handoff_enabled", False):
-        return
-    if not getattr(settings, "handoff_inject_on_start", False):
-        return
-
-    try:
         from claude_monitor import handoff
 
-        session_id = data.get("session_id", "")
-        context = handoff.injection_context(
-            data.get("cwd", ""),
-            exclude_session_id=session_id,
-            max_age_hours=getattr(settings, "handoff_inject_max_age_hours", 72),
-        )
-    except Exception:
-        return
+        def deliver(delivery) -> None:
+            context = getattr(delivery, "delivery_context", None)
+            if not isinstance(context, str) or not context:
+                raise ValueError("pending hand-off has no delivery context")
+            if not context.startswith(handoff.HANDOFF_ACTION_LABEL):
+                context = f"{handoff.HANDOFF_ACTION_LABEL}\n{context}"
+            json.dump(
+                {
+                    "systemMessage": handoff.HANDOFF_ACTION_LABEL,
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": context,
+                    },
+                },
+                sys.stdout,
+            )
+            sys.stdout.flush()
 
-    if not context:
-        return
-
-    try:
-        json.dump(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": context,
-                }
-            },
-            sys.stdout,
-        )
+        handoff.deliver_pending_session_start(data, deliver)
     except Exception:
         pass
 

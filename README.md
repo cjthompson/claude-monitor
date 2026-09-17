@@ -20,7 +20,7 @@ claude-monitor runs alongside your Claude Code sessions. It auto-accepts permiss
 - **Agent tracking** — Tracks subagent lifecycle (start/stop) per session with active counts, type breakdowns, and completion totals.
 - **API usage bar** — Optional status bar widget showing 5-hour and 7-day Anthropic API quota utilization with progress bars, color coding, and reset countdowns. Uses your OAuth token from the macOS Keychain.
 - **Settings modal** — Configure mode, theme, iTerm scope, timestamp style, and more. Persists across sessions.
-- **Session hand-offs** — Records where each session left off (goal, stopping point, files touched, git branch, agent activity, open questions) so you can pick up the next morning without asking "where did we leave off?". Browse in the Hand-off tab, read from the `claude-monitor-handoff` CLI or generated markdown, or have the summary injected into the next session in that directory. Off by default.
+- **Session hand-offs** — Records where each session left off (goal, stopping point, files touched, git branch, agent activity, open questions) so you can pick up the next morning without asking "where did we leave off?". Browse in the Hand-off tab or read from the `claude-monitor-handoff` CLI. Targeted rotation delivers a bounded summary only to the exact iTerm pane after `clear` or `compact`; capture remains local when iTerm is unavailable.
 - **Command palette** — Quick access to all commands via `Ctrl+P`.
 - **Worktree detection** — Sessions running in git worktrees are detected and displayed with distinct `WT:` titles and styling.
 - **Smart layout polling** — Detects pane adds/removes every 3 seconds and rebuilds the layout while preserving event history, panel state, active tab, and focused panel. Resizes update CSS proportions without rebuilding. Unmatched sessions automatically get fallback panels.
@@ -83,7 +83,7 @@ python3 install.py
 The install script:
 
 1. Creates a `.venv` and installs the package in editable mode
-2. Symlinks `claude-monitor`, `claude-monitor-hook`, `claude-monitor-statusline`, and `claude-monitor-credentials` to `~/.local/bin/`
+2. Symlinks `claude-monitor`, `claude-monitor-hook`, `claude-monitor-statusline`, `claude-monitor-credentials`, and `claude-monitor-handoff` to `~/.local/bin/`
 3. Configures Claude Code hooks in `~/.claude/settings.json` (interactive — asks before writing)
 
 Make sure `~/.local/bin` is on your `$PATH`.
@@ -162,8 +162,9 @@ Press `s` to open the settings modal. Settings persist to `~/.config/claude-moni
 | LLM transport | `minimax`, `openai`, `claude_cli` | `minimax` | Which provider generates the prose summary |
 | Hand-off model | free text | *(provider default)* | Model override, e.g. `MiniMax-M3` |
 | LLM timeout (secs) | 5-300 | 30 | Give up on the summary after this long |
-| Inject on session start | on/off | off | Prepend the previous hand-off to new sessions in a known directory |
-| Inject max age (hours) | 1-8760 | 72 | Don't inject anything older than this |
+| Rotation mode | `clear`, `compact` | `clear` | Rotation used by `claude-monitor-handoff rotate` when `--mode` is omitted |
+| Inject on session start (deprecated) | on/off | off | One-release compatibility no-op; targeted rotation controls delivery |
+| Inject max age (hours, legacy) | 1-8760 | 72 | Retained for compatibility; targeted records remain until delivered or superseded |
 | Write markdown digests | on/off | on | Regenerate `handoff.md` and per-project digests on capture |
 | Retain per project | 1-100 | 5 | How many entries to keep for each project |
 
@@ -173,8 +174,9 @@ textual-dark, textual-light, textual-ansi, atom-one-dark, atom-one-light, catppu
 
 ## Session hand-offs
 
-Answers "where did we leave off?" without asking an agent. Every setting is off by
-default; turn on **Hand-off summaries** in Settings (`s`) to start recording.
+Answers "where did we leave off?" after you walk away or your computer sleeps,
+without requiring you to remember or ask an agent. Every setting is off by default;
+turn on **Hand-off summaries** in Settings (`s`) to start recording.
 
 ### What gets captured
 
@@ -190,14 +192,24 @@ the session's own transcript in `~/.claude/projects/`:
 Capture runs on `SessionEnd`, after a configurable idle period, or on demand (`H`,
 or *Capture Hand-off Now* in the command palette).
 
+To rotate a live session from the CLI, use `claude-monitor-handoff rotate` with
+`--session`, `--cwd`, and optionally `--mode clear|compact`. Clear names the
+conversation before clearing it so the cleared conversation remains identifiable
+and resumable. Pending delivery is tied to the exact pane, project, and source
+session, stores its own bounded context, and remains until delivered once or
+superseded by a newer hand-off for that target. It survives monitor and computer
+restarts and does not depend on a `SessionEnd` event. Context contains summary facts
+rather than a transcript. Outside iTerm2, capture is retained locally and the
+command reports that live rotation is unavailable.
+
 ### Where to read it
 
 | Surface | How |
 |---|---|
 | TUI | The **Hand-off** tab, or press `h` |
-| CLI | `claude-monitor-handoff list` / `show <id>` / `digest` / `capture` / `prune` |
+| CLI | `claude-monitor-handoff list` / `show <id>` / `digest` / `capture` / `rotate` / `prune` |
 | Markdown | `~/.config/claude-monitor/handoff/handoff.md` and `projects/<slug>.md` |
-| Next session | Injected as `additionalContext` on `SessionStart` when **Inject on session start** is on |
+| Targeted next session | `claude-monitor-handoff rotate` captures locally, types only bounded `/rename` + `/clear` or `/compact` into its exact pane, and consumes the labeled context once on the matching `SessionStart` |
 
 Entries live in `~/.config/claude-monitor/handoff/sessions/<project-slug>/<session_id>.json`.
 
@@ -310,7 +322,7 @@ Two files in `/tmp/claude-auto-accept/`:
 
 ### Hook
 
-Claude Code calls `claude-monitor-hook` on four event types via the hooks config in `~/.claude/settings.json`:
+Claude Code calls `claude-monitor-hook` on lifecycle and permission event types via the hooks config in `~/.claude/settings.json`:
 
 | Event | Description |
 |---|---|
@@ -318,8 +330,16 @@ Claude Code calls `claude-monitor-hook` on four event types via the hooks config
 | `Notification` | Permission prompt or idle prompt notification |
 | `SubagentStart` | A subagent has started |
 | `SubagentStop` | A subagent has completed |
+| `SessionStart` | Consumes a matching one-time targeted hand-off after `clear` or `compact` |
+| `SessionEnd` | Captures a bounded local hand-off entry when enabled |
 
 The hook writes every event as a JSON line to `events.jsonl`, tagged with the iTerm2 session ID and timestamp. For permission requests, it reads `state.json` to check both global and per-session pause state. If paused, it exits silently and Claude Code shows the normal prompt. Otherwise, it responds with an allow decision.
+
+Targeted hand-offs never inject into ordinary startup or resume events. A matching
+`SessionStart` receives a bounded `additionalContext` and visible
+`claude-monitor action: session hand-off` system message only when its source,
+project, exact pane, and originating session match the pending record. Pending
+context is self-contained and durable across restarts until delivered or superseded.
 
 ### TUI
 
@@ -388,7 +408,7 @@ claude_monitor/
   tui_simple.py    # Simple TUI — tabbed layout, works on any platform
   tui_common.py    # Shared widgets: SessionPanel, DashboardPanel, modals, commands
   settings.py      # Settings dataclass, persistence, and modal screen
-  handoff.py       # Hand-off store: capture, retention, markdown, injection
+  handoff.py       # Hand-off store: capture, retention, markdown, targeted delivery
   transcript.py    # Read-only parser for ~/.claude/projects transcripts
   llm.py           # Pluggable LLM transports (minimax / openai / claude_cli)
   cli_handoff.py   # claude-monitor-handoff CLI

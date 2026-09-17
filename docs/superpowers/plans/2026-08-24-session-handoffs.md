@@ -1,5 +1,13 @@
 # Session Hand-off Summaries
 
+> **Historical plan:** The goal in **Context** remains authoritative. The generic
+> any-`SessionStart`, age-capped injection design below has been superseded by
+> project-tasks plan P001, **Live per-session hand-offs and idle rotation**. Current
+> work treats a hand-off as a durable resume aid for the existing live session after
+> someone walks away, the computer sleeps, or the session becomes idle; delivery must
+> happen automatically when safe without requiring the user to remember or interact.
+> The remainder is preserved as the implementation record for the original feature.
+
 ## Context
 
 When Chris ends a day and returns the next morning, he can't remember what each
