@@ -29,6 +29,7 @@ import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,8 +45,10 @@ from claude_monitor import (
     SIGNAL_DIR,
     STATE_FILE,
     __version__,
+    extract_iterm_session_id,
     read_state,
 )
+from claude_monitor.iterm2_layout import KeystrokeSender
 from claude_monitor.messages import HookEvent
 from claude_monitor.screens import ChoicesScreen, ConfirmKillScreen, HelpScreen, QuestionsScreen
 from claude_monitor.settings import Settings, SettingsScreen, load_settings, save_settings
@@ -60,6 +63,15 @@ from claude_monitor.web import start_web_server
 from claude_monitor.widgets import DashboardPanel, SessionPanel
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class HandoffTarget:
+    """Exact live session and pane selected for a manual hand-off."""
+
+    session_id: str
+    iterm_session_id: str | None
+    state: str
 
 
 def _find_port_holder(port: int) -> int | None:
@@ -163,8 +175,7 @@ class MonitorApp(App):
         # HTTP API server handle
         self._api_server = None
 
-        # Hand-off: session_id → {cwd, transcript_path, last_event_ts,
-        # last_capture_ts}.  Populated from hook events; consumed by the
+        # Hand-off: session_id → lifecycle metadata.  Populated from hook events; consumed by the
         # ``poll_handoff`` worker and by ``action_capture_handoff``.
         self._session_meta: dict[str, dict] = {}
         self._handoff_polling: bool = False
@@ -180,6 +191,10 @@ class MonitorApp(App):
     @abc.abstractmethod
     def is_ask_paused(self, sid: str) -> bool:
         """Return True if AskUserQuestion auto-accept is paused for *sid*."""
+
+    @abc.abstractmethod
+    def _resolve_handoff_target(self, session_id: str | None = None) -> HandoffTarget | None:
+        """Resolve the active or explicitly selected live hand-off target."""
 
     # ------------------------------------------------------------------
     # Pause state — shared property
@@ -583,24 +598,204 @@ class MonitorApp(App):
             if not sid:
                 return
             meta = self._session_meta.setdefault(sid, {})
+            meta.setdefault("live", True)
+            meta.setdefault("input_wait_unsafe", False)
+            meta.setdefault("auto_rotation_armed", True)
+            meta.setdefault("auto_rotation_fired", False)
+            meta.setdefault("auto_rotation_deferred", False)
+            meta.setdefault("auto_rotation_delivered", False)
+            meta.setdefault("waiting_for_input", False)
+            meta.setdefault("ended", False)
             cwd = data.get("cwd")
             if cwd:
                 meta["cwd"] = cwd
             transcript_path = data.get("transcript_path")
             if transcript_path:
                 meta["transcript_path"] = transcript_path
-            meta["last_event_ts"] = data.get("_timestamp") or time.time()
+            event_ts = data.get("_timestamp") or time.time()
+            event_name = data.get("hook_event_name") or ""
+            meta["last_event_ts"] = event_ts
+            meta["last_event_name"] = event_name
+            pane_id = extract_iterm_session_id(data.get("_iterm_session_id") or "")
+            if pane_id:
+                meta["iterm_session_id"] = pane_id
+            waiting = (
+                (
+                    event_name == "Notification"
+                    and data.get("notification_type") == "permission_prompt"
+                )
+                or (
+                    event_name == "PermissionRequest"
+                    and (
+                        data.get("tool_name") in ("AskUserQuestion", "ExitPlanMode")
+                        or data.get("_decision") == "deferred"
+                    )
+                )
+                or data.get("_decision") == "deferred"
+                or data.get("_ask_timeout")
+            )
+            if waiting:
+                meta["waiting_for_input"] = True
+                meta["input_wait_unsafe"] = True
+            elif event_name in ("PostToolUse", "Stop") or (
+                event_name == "Notification" and data.get("notification_type") == "idle_prompt"
+            ):
+                meta["input_wait_unsafe"] = False
+            if self._is_substantive_handoff_activity(data):
+                meta["last_substantive_activity_ts"] = event_ts
+                if meta.get("auto_rotation_fired"):
+                    meta["auto_rotation_armed"] = True
+                    meta["auto_rotation_fired"] = False
+                    meta["auto_rotation_deferred"] = False
+                    meta["auto_rotation_delivered"] = False
+            if event_name in ("Stop",) or (
+                event_name == "Notification" and data.get("notification_type") == "idle_prompt"
+            ):
+                meta["waiting_for_input"] = False
+                meta["prompt_ready"] = True
+                if not getattr(self, "_rehydrating_handoff", False):
+                    self._deliver_deferred_idle_rotation(sid)
+            if event_name == "SessionEnd":
+                meta["live"] = False
+                meta["input_wait_unsafe"] = False
+                meta["waiting_for_input"] = False
+                meta["ended"] = True
+                self._cancel_idle_rotation(sid)
         except Exception as e:  # noqa: BLE001 - never break event handling
             log.debug(f"_record_session_meta: {e}")
 
+    def _is_substantive_handoff_activity(self, data: dict) -> bool:
+        event_name = data.get("hook_event_name")
+        if event_name in ("SessionStart", "Stop", "SessionEnd"):
+            return False
+        if event_name == "Notification" and data.get("notification_type") in (
+            "idle_prompt",
+            "permission_prompt",
+        ):
+            return False
+        if event_name == "PermissionRequest" and (
+            data.get("tool_name") in ("AskUserQuestion", "ExitPlanMode")
+            or data.get("_decision") == "deferred"
+        ):
+            return False
+        if data.get("_ask_timeout"):
+            return False
+        return True
+
+    def _rehydrate_handoff_meta(self) -> None:
+        """Rebuild lifecycle state from the complete event log before polling."""
+        from claude_monitor import handoff
+
+        self._rehydrating_handoff = True
+        try:
+            with open(EVENTS_FILE, encoding="utf-8") as events_file:
+                for raw_line in events_file:
+                    try:
+                        data = json.loads(raw_line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(data, dict):
+                        self._record_session_meta(data)
+        except OSError:
+            return
+        finally:
+            self._rehydrating_handoff = False
+        for sid, meta in self._session_meta.items():
+            if meta.get("ended") or not meta.get("iterm_session_id"):
+                continue
+            pending = handoff.find_pending_idle(
+                iterm_session_id=meta["iterm_session_id"], originating_session_id=sid
+            )
+            if pending is not None:
+                meta.update(
+                    pending=pending,
+                    auto_rotation_fired=True,
+                    auto_rotation_deferred=bool(meta.get("waiting_for_input")),
+                    auto_rotation_armed=False,
+                )
+
+    def _stage_idle_rotation(self, session_id: str) -> None:
+        from claude_monitor import handoff
+
+        meta = self._session_meta.get(session_id) or {}
+        pane_id = meta.get("iterm_session_id")
+        if meta.get("ended") or meta.get("auto_rotation_fired"):
+            return
+        from_existing_capture = meta.get("last_capture_ts", 0) >= meta.get("last_event_ts", 0)
+        entry = None
+        if from_existing_capture:
+            entry = handoff.load_entry(session_id, handoff.project_slug(meta.get("cwd", "")))
+        if entry is None:
+            entry = self._capture_handoff_entry(session_id, reason="idle")
+        if entry is None:
+            return
+        if not pane_id:
+            meta.update(auto_rotation_fired=True, auto_rotation_armed=False)
+            return
+        pending = handoff.stage_pending(
+            entry,
+            iterm_session_id=pane_id,
+            originating_session_id=session_id,
+            rotation_mode=getattr(self.settings, "handoff_rotation_mode", "clear"),
+            trigger="idle",
+        )
+        if pending is None:
+            return
+        meta.update(
+            pending=pending,
+            auto_rotation_fired=True,
+            auto_rotation_armed=False,
+            auto_rotation_delivered=False,
+            auto_rotation_deferred=bool(meta.get("waiting_for_input")),
+        )
+        if not meta.get("waiting_for_input"):
+            self._deliver_deferred_idle_rotation(session_id)
+
+    def _deliver_deferred_idle_rotation(self, session_id: str) -> None:
+        meta = self._session_meta.get(session_id) or {}
+        pending = meta.get("pending")
+        if pending is None or meta.get("waiting_for_input") or meta.get("auto_rotation_delivered"):
+            return
+        from claude_monitor import handoff
+
+        entry = handoff.load_entry(pending.entry_session_id, pending.project_slug)
+        command = handoff.rotation_command(entry, pending.rotation_mode) if entry else None
+        if command is None:
+            return
+        try:
+            if KeystrokeSender.send_text(pending.target_iterm_session_id, command):
+                meta["auto_rotation_delivered"] = True
+                meta["auto_rotation_deferred"] = False
+        except Exception as exc:  # noqa: BLE001 - transport boundary
+            log.warning("automatic hand-off rotation send failed: %s", exc)
+
+    def _cancel_idle_rotation(self, session_id: str) -> None:
+        meta = self._session_meta.get(session_id) or {}
+        pending = meta.get("pending")
+        if pending is None:
+            return
+        from claude_monitor import handoff
+
+        handoff.discard_pending(
+            iterm_session_id=pending.target_iterm_session_id,
+            originating_session_id=session_id,
+            generation_token=pending.generation_token,
+        )
+        meta.pop("pending", None)
+        meta["auto_rotation_deferred"] = False
+
     def _capture_handoff(self, session_id: str, *, reason: str) -> bool:
         """Capture one hand-off entry. Returns True if an entry was written."""
+        return self._capture_handoff_entry(session_id, reason=reason) is not None
+
+    def _capture_handoff_entry(self, session_id: str, *, reason: str):
+        """Capture one hand-off entry and return it for targeted delivery."""
         from claude_monitor import handoff
 
         meta = self._session_meta.get(session_id) or {}
         cwd = meta.get("cwd")
         if not cwd:
-            return False
+            return None
         with_llm = reason != "session_end" and bool(
             getattr(self.settings, "handoff_llm_enabled", False)
         )
@@ -614,33 +809,54 @@ class MonitorApp(App):
         )
         if entry is not None:
             meta["last_capture_ts"] = time.time()
-        return entry is not None
+        return entry
+
+    def _poll_handoff_once(self, now: float) -> float | None:
+        capture_mins = int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0)
+        rotate_enabled = bool(getattr(self.settings, "handoff_auto_rotate_enabled", False))
+        rotate_mins = int(getattr(self.settings, "handoff_auto_rotate_idle_mins", 240) or 240)
+        if not getattr(self.settings, "handoff_enabled", False):
+            return None
+        next_due = None
+        for sid, meta in list(self._session_meta.items()):
+            if meta.get("ended") or not meta.get("live", True):
+                continue
+            last_event = meta.get("last_event_ts") or 0
+            if not last_event:
+                continue
+            try:
+                if capture_mins > 0 and now >= last_event + capture_mins * 60:
+                    if meta.get("last_capture_ts", 0) < last_event:
+                        self._capture_handoff(sid, reason="idle")
+                if rotate_enabled:
+                    due = last_event + rotate_mins * 60
+                    if now >= due and not meta.get("auto_rotation_fired"):
+                        self._stage_idle_rotation(sid)
+                    elif not meta.get("auto_rotation_fired"):
+                        next_due = due if next_due is None else min(next_due, due)
+            except Exception as exc:  # noqa: BLE001 - one bad session must not stop polling
+                log.warning("poll_handoff: session %s failed: %s", sid, exc)
+        return next_due
 
     @work(thread=True, exit_on_error=False)
     def poll_handoff(self) -> None:
         """Capture hand-off entries for sessions that have gone idle."""
         log.debug("poll_handoff: started")
         while not self._stop_event.is_set():
-            idle_mins = int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0)
-            if not getattr(self.settings, "handoff_enabled", False) or idle_mins <= 0:
+            if not getattr(self.settings, "handoff_enabled", False) or not (
+                int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0) > 0
+                or bool(getattr(self.settings, "handoff_auto_rotate_enabled", False))
+            ):
                 self._handoff_polling = False
                 break
 
-            now = time.time()
-            cutoff = idle_mins * 60
-            for sid, meta in list(self._session_meta.items()):
-                last_event = meta.get("last_event_ts") or 0
-                if not last_event or (now - last_event) < cutoff:
-                    continue
-                # Nothing new since the last capture — don't rewrite the entry.
-                if meta.get("last_capture_ts", 0) >= last_event:
-                    continue
-                try:
-                    self._capture_handoff(sid, reason="idle")
-                except Exception as e:  # noqa: BLE001 - one bad session must not stop the loop
-                    log.warning(f"poll_handoff: capture failed for {sid}: {e}")
-
-            self._stop_event.wait(60)
+            try:
+                next_due = self._poll_handoff_once(time.time())
+            except Exception as e:  # noqa: BLE001 - one bad session must not stop the loop
+                log.warning(f"poll_handoff: poll failed: {e}")
+                next_due = None
+            wait_for = 60 if next_due is None else max(0.1, min(60, next_due - time.time()))
+            self._stop_event.wait(wait_for)
         log.debug("poll_handoff: stopped")
 
     def _start_handoff_polling(self) -> None:
@@ -649,8 +865,11 @@ class MonitorApp(App):
             return
         if not getattr(self.settings, "handoff_enabled", False):
             return
-        if int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0) <= 0:
+        if int(getattr(self.settings, "handoff_capture_idle_mins", 0) or 0) <= 0 and not getattr(
+            self.settings, "handoff_auto_rotate_enabled", False
+        ):
             return
+        self._rehydrate_handoff_meta()
         self._handoff_polling = True
         self.poll_handoff()
 
@@ -663,8 +882,8 @@ class MonitorApp(App):
         except Exception:
             return None
 
-    def action_show_handoff(self) -> None:
-        """Open/focus the Hand-off tab."""
+    def action_show_handoff(self, session_id: str | None = None) -> None:
+        """Open/focus the Hand-off tab, optionally showing one session."""
         panel = self._handoff_panel()
         if panel is None:
             self.notify("Hand-off tab is not available.", severity="warning")
@@ -683,7 +902,10 @@ class MonitorApp(App):
                     tc.active = pane.id
         except Exception as e:  # noqa: BLE001
             log.debug(f"action_show_handoff: {e}")
-        panel.refresh_entries()
+        if session_id is None:
+            panel.refresh_entries()
+        else:
+            panel.show_session_summary(session_id)
 
     def action_refresh_handoff(self) -> None:
         """Reload the hand-off list from disk."""
@@ -692,32 +914,136 @@ class MonitorApp(App):
             panel.refresh_entries()
 
     def action_capture_handoff(self) -> None:
-        """Capture hand-off entries for all tracked sessions right now."""
+        """Capture a hand-off for the active session right now."""
         if not getattr(self.settings, "handoff_enabled", False):
             self.notify("Hand-off summaries are disabled in Settings.", severity="warning")
             return
-        self._capture_handoff_worker()
+        target = self._resolve_handoff_target()
+        if target is None:
+            self.notify("No active live session is selected.", severity="warning")
+            return
+        self._capture_handoff_worker(target)
+
+    def action_rotate_selected_handoff(self) -> None:
+        """Capture and rotate the session selected in the Hand-off tab."""
+        if not getattr(self.settings, "handoff_enabled", False):
+            self.notify("Hand-off summaries are disabled in Settings.", severity="warning")
+            return
+        panel = self._handoff_panel()
+        entry = panel.selected_entry if panel is not None else None
+        if entry is None:
+            self.notify("Select a hand-off entry first.", severity="warning")
+            return
+        target = self._resolve_handoff_target(entry.session_id)
+        if target is None:
+            self.notify("The selected hand-off session is no longer live.", severity="warning")
+            return
+        self._capture_handoff_worker(target)
+
+    def on_selected_handoff(self, _message) -> None:
+        """Rotate the entry selected by the Hand-off list."""
+        self.action_rotate_selected_handoff()
 
     @work(thread=True, exit_on_error=False)
-    def _capture_handoff_worker(self) -> None:
+    def _capture_handoff_worker(self, target: HandoffTarget) -> None:
         """Run manual captures off the UI thread (may call an LLM)."""
-        written = 0
-        for sid in list(self._session_meta):
-            try:
-                if self._capture_handoff(sid, reason="manual"):
-                    written += 1
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"action_capture_handoff: capture failed for {sid}: {e}")
+        entry = None
+        capture_error = None
+        delivery_status = "nothing"
+        try:
+            entry = self._capture_handoff_entry(target.session_id, reason="manual")
+        except Exception as e:  # noqa: BLE001
+            capture_error = e
+            log.warning(f"action_capture_handoff: capture failed for {target.session_id}: {e}")
+        if entry is not None:
+            if target.state == "waiting":
+                delivery_status = "deferred"
+            elif not target.iterm_session_id:
+                delivery_status = "unavailable"
+            else:
+                from claude_monitor import handoff
+                from claude_monitor.iterm2_layout import KeystrokeSender
+
+                mode = getattr(self.settings, "handoff_rotation_mode", "clear")
+                if target.state == "prompt_ready":
+                    if mode == "clear":
+                        import re
+
+                        title = re.sub(
+                            r"[\x00-\x1f\x7f]+", " ", entry.title or entry.session_id
+                        ).strip()
+                        title = title[:80] or entry.session_id
+                        command = f"/rename claude-monitor hand-off: {title}\r/clear\r"
+                    else:
+                        command = "/compact\r"
+                    try:
+                        pending = handoff.stage_pending(
+                            entry,
+                            iterm_session_id=target.iterm_session_id,
+                            originating_session_id=target.session_id,
+                            rotation_mode=mode,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("action_capture_handoff: staging failed: %s", e)
+                        pending = None
+                    if pending is None:
+                        delivery_status = "failed"
+                    else:
+                        delivery_status = (
+                            "delivered"
+                            if self._send_handoff_text(
+                                KeystrokeSender, target.iterm_session_id, command
+                            )
+                            else "failed"
+                        )
+                else:
+                    command = (
+                        "claude-monitor action: session hand-off\n"
+                        "Provide only goal, progress, files changed, blockers, and next steps.\r"
+                    )
+                    delivery_status = (
+                        "delivered"
+                        if self._send_handoff_text(
+                            KeystrokeSender, target.iterm_session_id, command
+                        )
+                        else "failed"
+                    )
 
         def _done() -> None:
-            self.notify(
-                f"Captured {written} hand-off {'entry' if written == 1 else 'entries'}."
-                if written
-                else "Nothing to capture yet."
-            )
-            self.action_refresh_handoff()
+            panel = self._handoff_panel()
+            if panel is not None:
+                panel.refresh_entries(select_session_id=entry.session_id if entry else None)
+            if capture_error is not None:
+                self.notify(
+                    "Hand-off capture failed; no local entry was written.", severity="error"
+                )
+                return
+            if entry is None:
+                self.notify("Nothing to capture yet.", severity="warning")
+                return
+            if delivery_status == "deferred":
+                self.notify("Captured locally; pane input is unsafe while it is waiting.")
+                return
+            if delivery_status == "unavailable":
+                self.notify(
+                    "Captured locally; live pane delivery is unavailable.", severity="warning"
+                )
+                return
+            if delivery_status == "delivered":
+                self.notify("Captured and delivered to the exact pane.")
+            else:
+                self.notify("Captured locally; pane delivery failed.", severity="warning")
 
         self.call_from_thread(_done)
+
+    @staticmethod
+    def _send_handoff_text(sender, iterm_session_id: str, command: str) -> bool:
+        """Send hand-off input from the capture worker thread."""
+        try:
+            return bool(sender.send_text(iterm_session_id, command))
+        except Exception as e:  # noqa: BLE001 - transport is an external boundary
+            log.warning("action_capture_handoff: pane send failed: %s", e)
+            return False
 
     @work(thread=True, exit_on_error=False)
     def _refresh_usage(self) -> None:

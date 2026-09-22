@@ -49,6 +49,7 @@ class TranscriptFacts:
     open_items: list[dict] = field(default_factory=list)
     started_at: float | None = None
     ended_at: float | None = None
+    source_jsonl_path: str | None = None
 
 
 def find_transcript(session_id: str, cwd: str, hint: str | None = None) -> Path | None:
@@ -154,7 +155,9 @@ def parse_session(session_id: str, cwd: str, hint: str | None = None) -> Transcr
     path = find_transcript(session_id, cwd, hint=hint)
     if path is None:
         return None
-    return parse(path)
+    facts = parse(path)
+    facts.source_jsonl_path = str(path)
+    return facts
 
 
 def _read_head_lines(path: Path, chunk_size: int) -> list[str]:

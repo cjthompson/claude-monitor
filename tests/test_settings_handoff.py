@@ -12,6 +12,8 @@ HANDOFF_FIELDS = [
     "handoff_enabled",
     "handoff_capture_on_session_end",
     "handoff_capture_idle_mins",
+    "handoff_auto_rotate_enabled",
+    "handoff_auto_rotate_idle_mins",
     "handoff_llm_enabled",
     "handoff_llm_transport",
     "handoff_model",
@@ -30,6 +32,8 @@ class TestHandoffDefaults:
         assert s.handoff_enabled is False
         assert s.handoff_capture_on_session_end is True
         assert s.handoff_capture_idle_mins == 0
+        assert s.handoff_auto_rotate_enabled is False
+        assert s.handoff_auto_rotate_idle_mins == 240
         assert s.handoff_llm_enabled is False
         assert s.handoff_llm_transport == "minimax"
         assert s.handoff_model == ""
@@ -42,6 +46,10 @@ class TestHandoffDefaults:
 
 
 class TestHandoffClamps:
+    def test_auto_rotate_idle_mins_clamped(self):
+        assert Settings(handoff_auto_rotate_idle_mins=0).handoff_auto_rotate_idle_mins == 1
+        assert Settings(handoff_auto_rotate_idle_mins=999).handoff_auto_rotate_idle_mins == 240
+
     def test_capture_idle_mins_low(self):
         assert Settings(handoff_capture_idle_mins=-5).handoff_capture_idle_mins == 0
 

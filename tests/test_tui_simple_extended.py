@@ -65,6 +65,39 @@ class TestSessionResolution:
             await pilot.pause()
             assert len(app_fixture.panels) == 0
 
+    async def test_handoff_target_is_active_tab_only(self, app_fixture, inject_message):
+        """The active tab, not the newest event, determines the target."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await inject_message(_make_permission_event(session_id="target-one"))
+            await pilot.pause()
+            await inject_message(_make_permission_event(session_id="target-two"))
+            await pilot.pause()
+
+            from textual.widgets import TabbedContent
+
+            tc = app_fixture.query_one("#tab-content", TabbedContent)
+            tc.active = app_fixture._claude_to_tab["target-two"]
+            app_fixture._iterm_available = False
+            target = app_fixture._resolve_handoff_target()
+
+            assert target.session_id == "target-two"
+            assert target.iterm_session_id is None
+
+    async def test_handoff_waiting_target_has_no_transport(self, app_fixture, inject_message):
+        """A deferred permission is capture-only even if iTerm is available."""
+        async with app_fixture.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await inject_message(
+                _make_permission_event(session_id="waiting-target", decision="deferred")
+            )
+            await pilot.pause()
+            app_fixture._iterm_available = True
+
+            target = app_fixture._resolve_handoff_target()
+
+            assert target.state == "waiting"
+
 
 class TestApplyEvent:
     async def test_permission_counts(self, app_fixture, inject_message):
@@ -332,9 +365,7 @@ class TestApplyEvent:
 
             assert app_fixture._send_approve.call_count == 0
 
-    async def test_ask_timeout_complete_no_keystroke_when_paused(
-        self, app_fixture, inject_message
-    ):
+    async def test_ask_timeout_complete_no_keystroke_when_paused(self, app_fixture, inject_message):
         """A paused pane must not receive the auto-accept keystroke even once
         the countdown completes."""
         async with app_fixture.run_test(size=(120, 40)) as pilot:

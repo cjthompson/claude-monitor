@@ -37,7 +37,7 @@ from claude_monitor import (
     extract_iterm_session_id,
     read_state,
 )
-from claude_monitor.app_base import MonitorApp
+from claude_monitor.app_base import HandoffTarget, MonitorApp
 from claude_monitor.commands import MonitorCommands
 from claude_monitor.formatting import (
     _oneline as _oneline_fn,
@@ -256,6 +256,37 @@ class SimpleTUI(MonitorApp):
 
     def is_ask_paused(self, claude_sid: str) -> bool:
         return self._global_ask_paused or claude_sid in self._ask_paused_sessions
+
+    def _resolve_handoff_target(self, session_id: str | None = None) -> HandoffTarget | None:
+        """Resolve the active tab, or an explicitly selected live session."""
+        sid = session_id
+        if sid is None:
+            try:
+                active = self.query_one("#tab-content", TabbedContent).active
+            except Exception:
+                active = None
+            if not active or active == self.HANDOFF_TAB_ID:
+                self.notify("Select a live session tab before capturing.", severity="warning")
+                return None
+            sid = next(
+                (candidate for candidate, tab in self._claude_to_tab.items() if tab == active),
+                None,
+            )
+        if not sid:
+            self.notify("No live session is selected.", severity="warning")
+            return None
+        meta = self._session_meta.get(sid)
+        panel = self.panels.get(sid)
+        if not meta or not meta.get("live") or panel is None:
+            self.notify("The selected hand-off session is no longer live.", severity="warning")
+            return None
+        iterm_sid = meta.get("iterm_session_id") if self._iterm_available else None
+        state = (
+            "waiting"
+            if meta.get("input_wait_unsafe")
+            else ("prompt_ready" if panel.state == "idle" else "working")
+        )
+        return HandoffTarget(sid, iterm_sid, state)
 
     def _session_id_from_event(self, data: dict) -> str:
         return data.get("session_id", "")

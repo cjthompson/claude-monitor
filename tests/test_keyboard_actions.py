@@ -32,6 +32,7 @@ class TestKeyboardActions:
         ]
         for key in expected_keys:
             assert key in binding_keys, f"Missing binding for key: {key}"
+        assert "H" in binding_keys
 
     async def test_tab_cycling_next(self, app_fixture, inject_message):
         async with app_fixture.run_test(size=(120, 40)) as pilot:

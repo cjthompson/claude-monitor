@@ -14,6 +14,7 @@ class MonitorCommands(Provider):
         ("Quit", "quit"),
         ("Refresh Hand-off List", "refresh_handoff"),
         ("Refresh Layout", "refresh_layout"),
+        ("Rotate Selected Hand-off", "rotate_selected_handoff"),
         ("Show Choices Log", "show_choices"),
         ("Show Hand-off Tab", "show_handoff"),
         ("Show Help", "show_help"),

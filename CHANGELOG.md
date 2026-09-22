@@ -1,9 +1,17 @@
 # Changelog
 
+## 2026-09-22
+
+### Live per-session hand-offs and idle rotation (P001)
+- Add Show Session Summary to the pane context menu (#handoff, #tui)
+
 ## 2026-09-17
 
 ### Live per-session hand-offs and idle rotation (P001)
 - Targeted hand-off delivery and CLI rotation (#handoff, #cli)
+- Per-session manual hand-off in the TUI (#handoff, #tui)
+- Automatic hand-off after four hours without hook events (#handoff, #hooks)
+- Generate a local project hand-off rule index (#handoff, #context)
 
 ## 2026-08-25
 

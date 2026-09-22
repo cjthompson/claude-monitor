@@ -321,13 +321,8 @@ def cmd_rotate(args: argparse.Namespace, use_color: bool) -> int:
         _err("Error: could not stage hand-off delivery")
         return 1
 
-    if mode == "clear":
-        title = re.sub(r"[\x00-\x1f\x7f]+", " ", entry.title or entry.session_id).strip()
-        title = title[:80] or entry.session_id
-        command = f"/rename claude-monitor hand-off: {title}\r/clear\r"
-    elif mode == "compact":
-        command = "/compact\r"
-    else:
+    command = handoff.rotation_command(entry, mode)
+    if command is None:
         _err(f"Error: unsupported rotation mode '{mode}'")
         return 1
 

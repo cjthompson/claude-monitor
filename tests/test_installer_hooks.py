@@ -38,6 +38,12 @@ NEW_HOOKS_CONFIG = {
 }
 
 
+def test_production_stop_hook_uses_standard_timeout():
+    hook = install.HOOKS_CONFIG["Stop"][0]["hooks"][0]
+    assert hook["type"] == "command"
+    assert hook["timeout"] == 5
+
+
 def _stale_config():
     """Return a hooks block identical to NEW_HOOKS_CONFIG but with OLD_CMD."""
     result = {}

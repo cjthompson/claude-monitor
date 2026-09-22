@@ -46,6 +46,7 @@ class PaneContextMenu(ModalScreen):
         with Vertical(id="ctx-menu"):
             yield OptionList(
                 Option("Toggle Auto/Manual", id="toggle_mode"),
+                Option("Show Session Summary", id="show_session_summary"),
                 Option("View Choices Log", id="choices"),
                 Option("View Questions Log", id="questions"),
                 Option("Copy Session ID", id="copy_sid"),
@@ -64,6 +65,8 @@ class PaneContextMenu(ModalScreen):
         self.app.pop_screen()
         if option_id == "toggle_mode":
             self.app.on_session_panel_pane_toggle(SessionPanel.PaneToggle(self._ctx_session_id))
+        elif option_id == "show_session_summary":
+            self.app.action_show_handoff(self._ctx_session_id)
         elif option_id == "choices":
             self.app.action_show_choices()
         elif option_id == "questions":

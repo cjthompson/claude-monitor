@@ -9,8 +9,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from claude_monitor.app_base import HandoffTarget
 from claude_monitor.commands import MonitorCommands
 from claude_monitor.screens import handoff as handoff_screen
+from tests.conftest import _make_permission_event
 
 
 def _entry(**over):
@@ -66,13 +68,26 @@ class _FakeApp:
             handoff_enabled=True,
             handoff_llm_enabled=False,
             handoff_capture_idle_mins=0,
+            handoff_auto_rotate_enabled=False,
+            handoff_auto_rotate_idle_mins=240,
         )
         defaults.update(settings)
         self.settings = SimpleNamespace(**defaults)
         self._session_meta = {}
         self._handoff_polling = False
         self._record_session_meta = types.MethodType(MonitorApp._record_session_meta, self)
+        self._capture_handoff_entry = types.MethodType(MonitorApp._capture_handoff_entry, self)
         self._capture_handoff = types.MethodType(MonitorApp._capture_handoff, self)
+        self._is_substantive_handoff_activity = types.MethodType(
+            MonitorApp._is_substantive_handoff_activity, self
+        )
+        self._stage_idle_rotation = types.MethodType(MonitorApp._stage_idle_rotation, self)
+        self._deliver_deferred_idle_rotation = types.MethodType(
+            MonitorApp._deliver_deferred_idle_rotation, self
+        )
+        self._cancel_idle_rotation = types.MethodType(MonitorApp._cancel_idle_rotation, self)
+        self._poll_handoff_once = types.MethodType(MonitorApp._poll_handoff_once, self)
+        self._rehydrate_handoff_meta = types.MethodType(MonitorApp._rehydrate_handoff_meta, self)
         self._start_handoff_polling = types.MethodType(MonitorApp._start_handoff_polling, self)
         self.poll_handoff = MagicMock()
 
@@ -88,11 +103,12 @@ class TestRecordSessionMeta:
                 "_timestamp": 1000.0,
             }
         )
-        assert app._session_meta["s1"] == {
-            "cwd": "/tmp/proj",
-            "transcript_path": "/tmp/t.jsonl",
-            "last_event_ts": 1000.0,
-        }
+        assert app._session_meta["s1"]["cwd"] == "/tmp/proj"
+        assert app._session_meta["s1"]["transcript_path"] == "/tmp/t.jsonl"
+        assert app._session_meta["s1"]["last_event_ts"] == 1000.0
+        assert app._session_meta["s1"]["live"] is True
+        assert app._session_meta["s1"]["input_wait_unsafe"] is False
+        assert app._session_meta["s1"]["auto_rotation_armed"] is True
 
     def test_ignores_events_without_session_id(self):
         app = _FakeApp()
@@ -111,6 +127,49 @@ class TestRecordSessionMeta:
         app._record_session_meta({"session_id": "s1", "_timestamp": object()})
         assert "s1" in app._session_meta
 
+    def test_records_exact_pane_liveness_and_waiting_marker(self):
+        app = _FakeApp()
+        app._record_session_meta(
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/proj",
+                "_iterm_session_id": "w0t0p2:pane-1",
+                "_decision": "deferred",
+                "_timestamp": 3.0,
+            }
+        )
+        assert app._session_meta["s1"]["iterm_session_id"] == "pane-1"
+        assert app._session_meta["s1"]["live"] is True
+        assert app._session_meta["s1"]["input_wait_unsafe"] is True
+
+    def test_clears_waiting_marker_on_idle_and_session_end(self):
+        app = _FakeApp()
+        app._record_session_meta(
+            {
+                "session_id": "s1",
+                "_decision": "deferred",
+                "_timestamp": 1.0,
+            }
+        )
+        app._record_session_meta(
+            {
+                "session_id": "s1",
+                "hook_event_name": "Notification",
+                "notification_type": "idle_prompt",
+            }
+        )
+        assert app._session_meta["s1"]["input_wait_unsafe"] is False
+        app._record_session_meta({"session_id": "s1", "_decision": "deferred", "_timestamp": 2.0})
+        app._record_session_meta({"session_id": "s1", "hook_event_name": "SessionEnd"})
+        assert app._session_meta["s1"]["live"] is False
+        assert app._session_meta["s1"]["input_wait_unsafe"] is False
+
+
+def test_handoff_target_is_immutable():
+    target = HandoffTarget("session", "pane", "working")
+    with pytest.raises(AttributeError):
+        target.state = "waiting"
+
 
 class TestCaptureHandoff:
     def test_passes_meta_through_to_capture(self, monkeypatch):
@@ -120,7 +179,7 @@ class TestCaptureHandoff:
         fake = MagicMock(return_value=_entry())
         monkeypatch.setattr("claude_monitor.handoff.capture", fake)
 
-        assert app._capture_handoff("s1", reason="manual") is True
+        assert app._capture_handoff("s1", reason="manual") is not None
         _, kwargs = fake.call_args
         assert fake.call_args[0] == ("s1", "/tmp/proj")
         assert kwargs["transcript_path"] == "/tmp/t.jsonl"
@@ -152,6 +211,48 @@ class TestCaptureHandoff:
         assert fake.call_args[1]["with_llm"] is False
 
 
+class TestAutomaticRotation:
+    def test_waiting_defers_then_stop_sends_once(self, monkeypatch):
+        app = _FakeApp(handoff_auto_rotate_enabled=True, handoff_auto_rotate_idle_mins=1)
+        app._record_session_meta(
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/proj",
+                "_iterm_session_id": "pane",
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "AskUserQuestion",
+                "_timestamp": 1.0,
+            }
+        )
+        entry = _entry(session_id="s1", project_path="/tmp/proj", project_slug="-tmp-proj")
+        monkeypatch.setattr("claude_monitor.handoff.capture", lambda *a, **k: entry)
+        monkeypatch.setattr(
+            "claude_monitor.handoff.stage_pending",
+            lambda *a, **k: SimpleNamespace(
+                entry_session_id="s1",
+                project_slug="-tmp-proj",
+                rotation_mode="clear",
+                target_iterm_session_id="pane",
+                generation_token="g",
+            ),
+        )
+        monkeypatch.setattr("claude_monitor.handoff.load_entry", lambda *a: entry)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr("claude_monitor.app_base.KeystrokeSender.send_text", sender)
+        app._poll_handoff_once(62.0)
+        assert app._session_meta["s1"]["auto_rotation_deferred"] is True
+        assert sender.call_count == 0
+        app._record_session_meta(
+            {
+                "session_id": "s1",
+                "_iterm_session_id": "pane",
+                "hook_event_name": "Stop",
+                "_timestamp": 63.0,
+            }
+        )
+        assert sender.call_count == 1
+
+
 class TestStartHandoffPolling:
     def test_not_started_when_disabled(self):
         app = _FakeApp(handoff_enabled=False, handoff_capture_idle_mins=30)
@@ -172,7 +273,9 @@ class TestStartHandoffPolling:
 
 
 class TestCommandPalette:
-    @pytest.mark.parametrize("action", ["show_handoff", "capture_handoff", "refresh_handoff"])
+    @pytest.mark.parametrize(
+        "action", ["show_handoff", "capture_handoff", "refresh_handoff", "rotate_selected_handoff"]
+    )
     def test_handoff_actions_registered(self, action):
         assert any(a == action for _, a in MonitorCommands.COMMANDS_LIST)
 
@@ -191,3 +294,179 @@ class TestBindings:
         actions = {b.action for b in app_cls.BINDINGS}
         assert "show_handoff" in actions
         assert "capture_handoff" in actions
+
+
+def test_handoff_panel_exposes_selected_entry():
+    panel = handoff_screen.HandoffPanel()
+    panel._entries = [_entry(session_id="first"), _entry(session_id="second")]
+    panel._selected_session_id = "second"
+    assert panel.selected_entry.session_id == "second"
+
+
+async def test_show_session_summary_from_context_menu_targets_exact_session(
+    app_fixture, inject_message, monkeypatch
+):
+    """The pane menu opens the Hand-off tab on its pane's saved session."""
+    from textual.widgets import Markdown, OptionList, TabbedContent
+
+    from claude_monitor.screens.context_menu import PaneContextMenu
+
+    entries = [
+        _entry(session_id="newest", title="Newest entry"),
+        _entry(session_id="target", title="Target entry"),
+    ]
+    monkeypatch.setattr(handoff_screen.HandoffPanel, "_load_entries", lambda self: entries)
+    monkeypatch.setattr(
+        "claude_monitor.handoff.render_entry", lambda entry: f"# {entry.session_id}"
+    )
+    app_fixture.settings.handoff_enabled = True
+    capture_worker = MagicMock()
+    monkeypatch.setattr(app_fixture, "_capture_handoff_worker", capture_worker)
+
+    async with app_fixture.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await inject_message(_make_permission_event(session_id="target", cwd="/tmp/target"))
+        for _ in range(5):
+            await pilot.pause()
+
+        pane = app_fixture.panels["target"]
+        await pilot.click(pane, offset=(1, 0))
+        await pilot.pause()
+
+        menu = next(
+            screen for screen in app_fixture.screen_stack if isinstance(screen, PaneContextMenu)
+        )
+        options = menu.query_one("#ctx-options", OptionList)
+        assert options.get_option_at_index(1).id == "show_session_summary"
+        options.focus()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        tabbed = app_fixture.query_one("#tab-content", TabbedContent)
+        panel = app_fixture.query_one(handoff_screen.HandoffPanel)
+        assert tabbed.active == app_fixture.HANDOFF_TAB_ID
+        assert panel._selected_session_id == "target"
+        assert panel.selected_entry.session_id == "target"
+        assert "# target" in panel.query_one("#handoff-markdown", Markdown).source
+
+        app_fixture.action_refresh_handoff()
+        assert panel._selected_session_id == "target"
+        assert panel.selected_entry.session_id == "target"
+        capture_worker.assert_not_called()
+
+
+async def test_show_session_summary_missing_session_has_exact_empty_state(
+    app_fixture, inject_message, monkeypatch
+):
+    """A pane with no saved entry does not fall back to another session."""
+    from textual.widgets import Markdown, OptionList, TabbedContent
+
+    from claude_monitor.screens.context_menu import PaneContextMenu
+
+    monkeypatch.setattr(
+        handoff_screen.HandoffPanel,
+        "_load_entries",
+        lambda self: [_entry(session_id="newest", title="Unrelated newest entry")],
+    )
+    app_fixture.settings.handoff_enabled = True
+
+    async with app_fixture.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await inject_message(_make_permission_event(session_id="missing", cwd="/tmp/missing"))
+        for _ in range(5):
+            await pilot.pause()
+
+        pane = app_fixture.panels["missing"]
+        await pilot.click(pane, offset=(1, 0))
+        await pilot.pause()
+
+        menu = next(
+            screen for screen in app_fixture.screen_stack if isinstance(screen, PaneContextMenu)
+        )
+        options = menu.query_one("#ctx-options", OptionList)
+        assert options.get_option_at_index(1).id == "show_session_summary"
+        options.focus()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        tabbed = app_fixture.query_one("#tab-content", TabbedContent)
+        panel = app_fixture.query_one(handoff_screen.HandoffPanel)
+        assert tabbed.active == app_fixture.HANDOFF_TAB_ID
+        assert panel._selected_session_id is None
+        assert panel.query_one("#handoff-list", handoff_screen.ListView).index is None
+        assert (
+            "# No summary for this session" in panel.query_one("#handoff-markdown", Markdown).source
+        )
+
+        app_fixture.action_refresh_handoff()
+        await pilot.pause()
+        assert tabbed.active == app_fixture.HANDOFF_TAB_ID
+        assert panel._selected_session_id is None
+        assert panel.query_one("#handoff-list", handoff_screen.ListView).index is None
+        assert (
+            "# No summary for this session" in panel.query_one("#handoff-markdown", Markdown).source
+        )
+
+
+async def test_show_session_summary_loads_target_outside_browser_limit(
+    app_fixture, inject_message, monkeypatch
+):
+    """A target outside the newest 50 entries is loaded by exact session ID."""
+    from textual.widgets import Markdown, OptionList, TabbedContent
+
+    from claude_monitor.screens.context_menu import PaneContextMenu
+
+    entries = [_entry(session_id=f"entry-{index}") for index in range(50)]
+    target = _entry(session_id="target", title="Target outside browser window")
+    monkeypatch.setattr(handoff_screen.HandoffPanel, "_load_entries", lambda self: entries)
+    load_entry = MagicMock(return_value=target)
+    monkeypatch.setattr("claude_monitor.handoff.load_entry", load_entry)
+    monkeypatch.setattr(
+        "claude_monitor.handoff.render_entry", lambda entry: f"# {entry.session_id}"
+    )
+    app_fixture.settings.handoff_enabled = True
+
+    async with app_fixture.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await inject_message(_make_permission_event(session_id="target", cwd="/tmp/target"))
+        for _ in range(5):
+            await pilot.pause()
+
+        pane = app_fixture.panels["target"]
+        await pilot.click(pane, offset=(1, 0))
+        await pilot.pause()
+
+        menu = next(
+            screen for screen in app_fixture.screen_stack if isinstance(screen, PaneContextMenu)
+        )
+        options = menu.query_one("#ctx-options", OptionList)
+        options.focus()
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        tabbed = app_fixture.query_one("#tab-content", TabbedContent)
+        panel = app_fixture.query_one(handoff_screen.HandoffPanel)
+        assert tabbed.active == app_fixture.HANDOFF_TAB_ID
+        assert panel._selected_session_id == "target"
+        assert panel.selected_entry.session_id == "target"
+        assert len(panel._entries) == 51
+        assert "# target" in panel.query_one("#handoff-markdown", Markdown).source
+        load_entry.assert_called_once_with("target")
+
+
+def test_capture_action_dispatches_only_the_resolved_active_target(monkeypatch):
+    from claude_monitor.tui_simple import SimpleTUI
+
+    app = SimpleTUI()
+    app.settings.handoff_enabled = True
+    target = HandoffTarget("active", None, "working")
+    monkeypatch.setattr(app, "_resolve_handoff_target", MagicMock(return_value=target))
+    worker = MagicMock()
+    monkeypatch.setattr(app, "_capture_handoff_worker", worker)
+
+    app.action_capture_handoff()
+
+    worker.assert_called_once_with(target)

@@ -43,6 +43,7 @@ class FakeFacts:
     open_items: list = field(default_factory=list)
     started_at: float | None = None
     ended_at: float | None = None
+    source_jsonl_path: str | None = None
 
 
 def _install(name: str, mod: types.ModuleType) -> types.ModuleType:
@@ -190,6 +191,7 @@ def test_capture_with_transcript_facts(tmp_path):
         open_items=[{"kind": "plan", "text": "todo"}],
         started_at=1000.0,
         ended_at=2000.0,
+        source_jsonl_path="/tmp/source-session.jsonl",
     )
     _install_fake_transcript_module(facts)
 
@@ -213,6 +215,7 @@ def test_capture_with_transcript_facts(tmp_path):
     assert loaded is not None
     assert loaded.title == "Fix the widget"
     assert loaded.first_user_prompt == "please fix widget"
+    assert loaded.source_jsonl_path == "/tmp/source-session.jsonl"
 
 
 def test_capture_derives_event_stats_from_event_log(tmp_path, monkeypatch):
@@ -294,6 +297,7 @@ def test_capture_saves_entry_when_budget_is_exhausted(tmp_path):
         mock.patch.object(handoff, "_git_info") as git_info,
         mock.patch.object(handoff, "prune") as prune,
         mock.patch.object(handoff, "write_markdown") as write_markdown,
+        mock.patch.object(handoff, "write_project_rule_index") as write_rule_index,
     ):
         entry = handoff.capture(
             "sess-budget",
@@ -306,6 +310,7 @@ def test_capture_saves_entry_when_budget_is_exhausted(tmp_path):
     git_info.assert_not_called()
     prune.assert_not_called()
     write_markdown.assert_not_called()
+    write_rule_index.assert_not_called()
 
 
 def test_capture_survives_parse_session_none_with_event_stats(tmp_path):
@@ -401,6 +406,39 @@ def test_pending_round_trip_and_exact_compact_consumption(tmp_path, monkeypatch)
         )
         is None
     )
+
+
+def test_pending_trigger_defaults_manual_and_idle_lookup_is_exact(tmp_path):
+    entry = _make_entry(
+        "source", handoff.project_slug(str(tmp_path)), 100.0, project_path=str(tmp_path)
+    )
+    handoff._save_entry(entry)
+    manual = handoff.stage_pending(
+        entry, iterm_session_id="pane", originating_session_id="source", rotation_mode="clear"
+    )
+    assert manual is not None and manual.trigger == "manual"
+    assert (
+        handoff.find_pending_idle(iterm_session_id="pane", originating_session_id="source") is None
+    )
+    idle = handoff.stage_pending(
+        entry,
+        iterm_session_id="pane",
+        originating_session_id="source",
+        rotation_mode="clear",
+        trigger="idle",
+    )
+    assert idle is not None and idle.trigger == "idle"
+    assert (
+        handoff.find_pending_idle(iterm_session_id="pane", originating_session_id="source") == idle
+    )
+
+
+def test_rotation_command_sanitizes_clear_and_supports_compact():
+    entry = _make_entry("source", "slug", 100.0)
+    entry = handoff.HandoffEntry(**{**entry.__dict__, "title": "bad\nname\x00"})
+    assert "bad name" in handoff.rotation_command(entry, "clear")
+    assert handoff.rotation_command(entry, "compact") == "/compact\r"
+    assert handoff.rotation_command(entry, "other") is None
 
 
 @pytest.mark.parametrize(
@@ -777,6 +815,18 @@ def test_load_entry_searches_all_projects_when_no_slug(tmp_path):
     assert loaded.session_id == "s2"
 
 
+def test_load_entry_without_slug_returns_newest_duplicate_session(tmp_path):
+    older = _make_entry("duplicate", "-older", 100.0, project_path="/older")
+    newer = _make_entry("duplicate", "-newer", 200.0, project_path="/newer")
+    handoff._save_entry(older)
+    handoff._save_entry(newer)
+
+    with mock.patch.object(handoff.os, "listdir", return_value=["-older", "-newer"]):
+        loaded = handoff.load_entry("duplicate")
+
+    assert loaded == newer
+
+
 def test_list_entries_ordering(tmp_path):
     handoff._save_entry(_make_entry("s1", "-p", 100.0))
     handoff._save_entry(_make_entry("s2", "-p", 300.0))
@@ -1059,3 +1109,56 @@ def test_write_markdown_no_entries_no_crash(tmp_path):
     handoff.write_markdown(None)
     assert os.path.exists(handoff.DIGEST_FILE)
     assert not os.path.exists(stale_project_file)
+
+
+def test_write_project_rule_index_writes_ignored_bounded_project_index(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("existing-ignore\n")
+    info_exclude = tmp_path / ".git" / "info" / "exclude"
+    original_exclude = info_exclude.read_text()
+    slug = handoff.project_slug(str(tmp_path))
+    for index in range(6):
+        handoff._save_entry(
+            handoff.HandoffEntry(
+                session_id=f"session-{index}",
+                project_path=str(tmp_path),
+                project_slug=slug,
+                title=f"Entry {index}",
+                ended_at=float(index),
+                source_jsonl_path=f"/tmp/session-{index}.jsonl",
+                last_prompt="x" * 800,
+            )
+        )
+
+    assert handoff.write_project_rule_index(str(tmp_path)) is True
+    index_path = tmp_path / handoff.RULE_INDEX_RELATIVE_PATH
+    content = index_path.read_text()
+    assert content.startswith("<!-- Machine-generated by claude-monitor. Do not edit. -->")
+    assert content.count("## Entry ") == 5
+    assert "## Entry 5" in content
+    assert "## Entry 0" not in content
+    for entry_index in range(1, 6):
+        assert f"Source JSONL: `/tmp/session-{entry_index}.jsonl`" in content
+    assert "Last prompt:" in content
+    assert len(content.split("## Entry 5", 1)[1].split("## Entry 4", 1)[0]) < 1600
+    assert info_exclude.read_text() == original_exclude + handoff.RULE_INDEX_IGNORE_PATTERN + "\n"
+    assert gitignore.read_text() == "existing-ignore\n"
+
+
+def test_capture_rule_index_failure_does_not_lose_entry(tmp_path, caplog):
+    _install_fake_transcript_module(FakeFacts(ai_title="T"))
+    with (
+        mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)),
+        mock.patch.object(handoff, "write_project_rule_index", return_value=False),
+        caplog.at_level("WARNING"),
+    ):
+        entry = handoff.capture(
+            "sess-index-failure",
+            str(tmp_path),
+            event_stats={"approved": 0, "deferred": 0, "agents_spawned": 0},
+        )
+
+    assert entry is not None
+    assert handoff.load_entry("sess-index-failure", slug=entry.project_slug) is not None
+    assert "failed to update the local project rule index" in caplog.text

@@ -127,7 +127,7 @@ On macOS with iTerm2, run this in an iTerm2 pane alongside your Claude Code sess
 | `c` | View choices log |
 | `u` | View questions log |
 | `h` | Show Hand-off tab |
-| `H` | Capture hand-off for the current sessions now |
+| `H` | Capture hand-off for the active session now |
 | `]` | Next tab |
 | `[` | Previous tab |
 | `x` | Close current session tab (auto-recreates if session is still active) |
@@ -158,6 +158,8 @@ Press `s` to open the settings modal. Settings persist to `~/.config/claude-moni
 | Hand-off summaries | on/off | off | Master switch for session hand-off capture |
 | Capture on session end | on/off | on | Write a hand-off entry when a session ends (heuristics only, never an LLM call) |
 | Idle capture (mins) | 0-1440 | 0 | Auto-capture a session after this many idle minutes; 0 disables |
+| Automatic rotation | on/off | off | Capture after silence even without `idle_prompt`; defer input during questions/permission UI and rotate only an exact reachable iTerm pane |
+| Rotation silence (mins) | 1-240 | 240 | Automatic rotation silence threshold; four hours is the default and maximum |
 | LLM summaries | on/off | off | **Sends session excerpts to a third-party API.** See below |
 | LLM transport | `minimax`, `openai`, `claude_cli` | `minimax` | Which provider generates the prose summary |
 | Hand-off model | free text | *(provider default)* | Model override, e.g. `MiniMax-M3` |
@@ -190,7 +192,19 @@ the session's own transcript in `~/.claude/projects/`:
 - Approved/deferred permission counts
 
 Capture runs on `SessionEnd`, after a configurable idle period, or on demand (`H`,
-or *Capture Hand-off Now* in the command palette).
+or *Capture Hand-off Now* in the command palette) for the active session only.
+In the Hand-off tab, select an entry and use *Rotate Selected Hand-off* to target
+that exact live session.
+
+Manual TUI rotation has three safe outcomes: a prompt-ready session is rotated
+with the configured clear/compact mode; a working session receives a bounded
+summary prompt; and a session waiting for input is capture-only, with no pane
+input sent.
+
+Every observed hook event resets the automatic wall-clock timer. At the rotation threshold,
+the summary is captured even without `idle_prompt`; permission/question waits defer pane
+input. `Stop` or `idle_prompt` authorizes deferred delivery. A deferred `SessionEnd` cancels
+rotation but keeps the summary, and only substantive new activity rearms automatic rotation.
 
 To rotate a live session from the CLI, use `claude-monitor-handoff rotate` with
 `--session`, `--cwd`, and optionally `--mode clear|compact`. Clear names the
@@ -206,7 +220,7 @@ command reports that live rotation is unavailable.
 
 | Surface | How |
 |---|---|
-| TUI | The **Hand-off** tab, or press `h` |
+| TUI | The **Hand-off** tab, or press `h`; click a pane title and choose **Show Session Summary** to open that exact session's saved summary without recapture or pane input |
 | CLI | `claude-monitor-handoff list` / `show <id>` / `digest` / `capture` / `rotate` / `prune` |
 | Markdown | `~/.config/claude-monitor/handoff/handoff.md` and `projects/<slug>.md` |
 | Targeted next session | `claude-monitor-handoff rotate` captures locally, types only bounded `/rename` + `/clear` or `/compact` into its exact pane, and consumes the labeled context once on the matching `SessionStart` |
@@ -332,6 +346,7 @@ Claude Code calls `claude-monitor-hook` on lifecycle and permission event types 
 | `SubagentStop` | A subagent has completed |
 | `SessionStart` | Consumes a matching one-time targeted hand-off after `clear` or `compact` |
 | `SessionEnd` | Captures a bounded local hand-off entry when enabled |
+| `Stop` | Prompt-ready signal for deferred automatic rotation |
 
 The hook writes every event as a JSON line to `events.jsonl`, tagged with the iTerm2 session ID and timestamp. For permission requests, it reads `state.json` to check both global and per-session pause state. If paused, it exits silently and Claude Code shows the normal prompt. Otherwise, it responds with an allow decision.
 

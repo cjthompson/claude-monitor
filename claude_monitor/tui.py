@@ -28,7 +28,7 @@ from claude_monitor import (
     extract_iterm_session_id,
     read_state,
 )
-from claude_monitor.app_base import MonitorApp
+from claude_monitor.app_base import HandoffTarget, MonitorApp
 from claude_monitor.commands import MonitorCommands
 from claude_monitor.formatting import (
     _oneline as _oneline_fn,
@@ -323,6 +323,56 @@ class AutoAcceptTUI(MonitorApp):
         self._save_state()
         self._update_all_panel_modes()
         self._update_status_bar()
+
+    def _resolve_handoff_target(self, session_id: str | None = None) -> HandoffTarget | None:
+        """Resolve the focused panel, or an explicitly selected live session."""
+        panel = None
+        if session_id is None:
+            focused = self.focused
+            while focused is not None:
+                if isinstance(focused, SessionPanel):
+                    panel = focused
+                    break
+                focused = focused.parent
+            if panel is None:
+                self.notify("Focus a live session panel before capturing.", severity="warning")
+                return None
+        meta_items = self._session_meta.items()
+        candidates = []
+        for claude_sid, meta in meta_items:
+            if session_id is not None and claude_sid != session_id:
+                continue
+            if not meta.get("live"):
+                continue
+            iterm_sid = meta.get("iterm_session_id")
+            if not iterm_sid or iterm_sid == _self_session_id:
+                continue
+            if panel is not None and iterm_sid != panel.session_id:
+                continue
+            if iterm_sid not in self.panels:
+                continue
+            candidates.append((meta.get("last_event_ts") or 0, claude_sid, iterm_sid, meta))
+        if not candidates:
+            if session_id is not None:
+                self.notify("The selected hand-off session is no longer live.", severity="warning")
+            else:
+                self.notify("The focused pane has no live Claude session.", severity="warning")
+            return None
+        if session_id is None and len({item[2] for item in candidates}) > 1:
+            self.notify(
+                "The focused tab has ambiguous live panes; focus one session.",
+                severity="warning",
+            )
+            return None
+        _, claude_sid, iterm_sid, meta = max(candidates, key=lambda item: item[0])
+        assert panel is not None or iterm_sid in self.panels
+        selected_panel = panel or self.panels[iterm_sid]
+        state = (
+            "waiting"
+            if meta.get("input_wait_unsafe")
+            else ("prompt_ready" if selected_panel.state == "idle" else "working")
+        )
+        return HandoffTarget(claude_sid, iterm_sid, state)
 
     # ------------------------------------------------------------------
     # State persistence (override to include iTerm2 UUID collections)

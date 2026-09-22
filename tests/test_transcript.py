@@ -169,6 +169,7 @@ def test_parse_session_found(tmp_path, monkeypatch):
     result = transcript.parse_session("sess-99", "/Users/chris/dev/project")
     assert result is not None
     assert result.ai_title == "Hello"
+    assert result.source_jsonl_path == str(session_file)
 
 
 def test_large_file_tail_path(tmp_path):

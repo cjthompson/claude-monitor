@@ -9,6 +9,7 @@ fakes into every other test module in the suite.
 
 import json
 import os
+import re
 import sys
 import time
 import types
@@ -67,6 +68,16 @@ def _make_handoff_stub() -> types.ModuleType:
     mod.write_markdown = MagicMock(return_value=None)
     mod.prune = MagicMock(return_value=None)
     mod.stage_pending = MagicMock(return_value=SimpleNamespace())
+
+    def rotation_command(entry, mode):
+        if mode == "compact":
+            return "/compact\r"
+        if mode == "clear":
+            title = re.sub(r"[\x00-\x1f\x7f]+", " ", entry.title or entry.session_id).strip()
+            return f"/rename claude-monitor hand-off: {(title[:80] or entry.session_id)}\r/clear\r"
+        return None
+
+    mod.rotation_command = MagicMock(side_effect=rotation_command)
     mod.discard_pending = MagicMock(return_value=None)
     return mod
 
@@ -359,6 +370,11 @@ def test_capture_llm_missing_api_key_errors_clearly(tmp_path, capsys, monkeypatc
     events_file = tmp_path / "events.jsonl"
     _write_events(events_file, {"session_id": "sess-1", "cwd": str(tmp_path)})
     monkeypatch.setattr(cli_handoff, "EVENTS_FILE", str(events_file), raising=False)
+    monkeypatch.setattr(
+        cli_handoff,
+        "load_settings",
+        lambda: SimpleNamespace(handoff_llm_enabled=False, handoff_llm_transport="minimax"),
+    )
     fake_llm.available.return_value = False
     rc = cli_handoff.main(["--no-color", "capture", "--cwd", str(tmp_path), "--llm"])
     assert rc == 1

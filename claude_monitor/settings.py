@@ -71,6 +71,8 @@ class Settings:
     handoff_enabled: bool = False  # master switch for session hand-off capture/injection
     handoff_capture_on_session_end: bool = True  # capture a hand-off entry when a session ends
     handoff_capture_idle_mins: int = 0  # mins idle before auto-capture; 0 = off, clamp 0..1440
+    handoff_auto_rotate_enabled: bool = False
+    handoff_auto_rotate_idle_mins: int = 240
     handoff_llm_enabled: bool = False  # use an LLM to summarize captured sessions
     handoff_llm_transport: str = "minimax"  # minimax / openai / claude_cli
     handoff_model: str = ""  # model name override; "" = provider default
@@ -100,6 +102,9 @@ class Settings:
         self.tab_idle_timeout_secs = max(10, min(3600, int(self.tab_idle_timeout_secs)))
         # Hand-off fields
         self.handoff_capture_idle_mins = max(0, min(1440, int(self.handoff_capture_idle_mins)))
+        self.handoff_auto_rotate_idle_mins = max(
+            1, min(240, int(self.handoff_auto_rotate_idle_mins))
+        )
         self.handoff_llm_timeout_secs = max(5, min(300, int(self.handoff_llm_timeout_secs)))
         if self.handoff_rotation_mode not in ("clear", "compact"):
             self.handoff_rotation_mode = "clear"
@@ -292,6 +297,23 @@ FIELD_DEFS: list[FieldDef] = [
         "input_type": "integer",
         "description": "Minutes of session inactivity before auto-capturing a hand-off entry"
         " (0 disables idle capture, max 1440)",
+    },
+    {
+        "name": "handoff_auto_rotate_enabled",
+        "label": "Automatic rotation",
+        "widget_type": "switch",
+        "description": (
+            "Capture after silence even without idle_prompt; defer input during "
+            "questions/permission UI and rotate only an exact reachable iTerm pane"
+        ),
+    },
+    {
+        "name": "handoff_auto_rotate_idle_mins",
+        "label": "Rotation silence (mins)",
+        "widget_type": "input",
+        "placeholder": "240",
+        "input_type": "integer",
+        "description": "Minutes of silence before automatic rotation (1..240; four-hour maximum)",
     },
     {
         "name": "handoff_llm_enabled",
@@ -672,6 +694,9 @@ class SettingsScreen(ModalScreen[Settings | None]):
         handoff_capture_idle_mins = _int_field(
             "handoff_capture_idle_mins", s.handoff_capture_idle_mins, 0, 1440
         )
+        handoff_auto_rotate_idle_mins = _int_field(
+            "handoff_auto_rotate_idle_mins", s.handoff_auto_rotate_idle_mins, 1, 240
+        )
         handoff_llm_timeout_secs = _int_field(
             "handoff_llm_timeout_secs", s.handoff_llm_timeout_secs, 5, 300
         )
@@ -708,6 +733,10 @@ class SettingsScreen(ModalScreen[Settings | None]):
                 f"#{_widget_id('handoff_capture_on_session_end')}", Switch
             ).value,
             handoff_capture_idle_mins=handoff_capture_idle_mins,
+            handoff_auto_rotate_enabled=self.query_one(
+                f"#{_widget_id('handoff_auto_rotate_enabled')}", Switch
+            ).value,
+            handoff_auto_rotate_idle_mins=handoff_auto_rotate_idle_mins,
             handoff_llm_enabled=self.query_one(
                 f"#{_widget_id('handoff_llm_enabled')}", Switch
             ).value,

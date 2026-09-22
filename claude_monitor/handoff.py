@@ -45,6 +45,8 @@ PROJECTS_DIR = os.path.join(HANDOFF_DIR, "projects")
 DIGEST_FILE = os.path.join(HANDOFF_DIR, "handoff.md")
 PENDING_DIR = os.path.join(HANDOFF_DIR, "pending")
 HANDOFF_ACTION_LABEL = "claude-monitor action: session hand-off"
+RULE_INDEX_RELATIVE_PATH = ".claude/rules/claude-monitor-handoffs.md"
+RULE_INDEX_IGNORE_PATTERN = "/.claude/rules/claude-monitor-handoffs.md"
 
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 _DEFAULT_EVENT_STATS = {"approved": 0, "deferred": 0, "agents_spawned": 0}
@@ -59,6 +61,7 @@ class HandoffEntry:
     first_user_prompt: str | None = None
     started_at: float | None = None
     ended_at: float | None = None
+    source_jsonl_path: str | None = None
     capture_reason: str = "manual"  # session_end | idle | manual
     last_prompt: str | None = None
     last_assistant_message: str | None = None
@@ -85,6 +88,7 @@ class PendingHandoff:
     created_at: float
     generation_token: str
     delivery_context: str
+    trigger: str = "manual"  # manual | idle
 
 
 # --- filesystem helpers -----------------------------------------------------
@@ -184,6 +188,8 @@ def _pending_from_dict(data: dict) -> PendingHandoff | None:
         return None
     if pending.rotation_mode not in ("clear", "compact"):
         return None
+    if pending.trigger not in ("manual", "idle"):
+        return None
     if isinstance(pending.created_at, bool) or not isinstance(pending.created_at, (int, float)):
         return None
     if not math.isfinite(float(pending.created_at)):
@@ -261,12 +267,14 @@ def stage_pending(
     originating_session_id: str,
     rotation_mode: str,
     now: float | None = None,
+    trigger: str = "manual",
 ) -> PendingHandoff | None:
     """Persist a one-shot hand-off delivery targeted at one exact pane."""
     if (
         not isinstance(iterm_session_id, str)
         or not isinstance(originating_session_id, str)
         or rotation_mode not in ("clear", "compact")
+        or trigger not in ("manual", "idle")
     ):
         return None
     if not iterm_session_id or not originating_session_id:
@@ -283,6 +291,7 @@ def stage_pending(
         created_at=created_at,
         generation_token=uuid.uuid4().hex,
         delivery_context=render_delivery_context(entry),
+        trigger=trigger,
     )
     try:
         with _pending_lock():
@@ -290,6 +299,27 @@ def stage_pending(
                 return None
     except OSError as exc:
         log.warning("Failed to lock pending hand-off directory: %s", exc)
+        return None
+    return pending
+
+
+def find_pending_idle(
+    *, iterm_session_id: str, originating_session_id: str
+) -> PendingHandoff | None:
+    """Return an automatic pending record for one exact pane/session pair."""
+    path = _pending_path(iterm_session_id)
+    try:
+        with _pending_lock():
+            with open(path, encoding="utf-8") as pending_file:
+                pending = _pending_from_dict(json.load(pending_file))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if (
+        pending is None
+        or pending.trigger != "idle"
+        or pending.target_iterm_session_id != iterm_session_id
+        or pending.originating_session_id != originating_session_id
+    ):
         return None
     return pending
 
@@ -447,6 +477,8 @@ def load_entry(session_id: str, slug: str | None = None) -> HandoffEntry | None:
         except OSError:
             return None
 
+    newest_entry: HandoffEntry | None = None
+    newest_key: float | None = None
     for path in candidates:
         if not os.path.isfile(path):
             continue
@@ -457,9 +489,19 @@ def load_entry(session_id: str, slug: str | None = None) -> HandoffEntry | None:
             log.warning(f"Failed to read handoff entry {path}: {e}")
             continue
         entry = _entry_from_dict(data)
-        if entry is not None:
+        if entry is None:
+            continue
+        if slug is not None:
             return entry
-    return None
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        sort_key = _entry_sort_key(entry, mtime)
+        if newest_key is None or sort_key > newest_key:
+            newest_entry = entry
+            newest_key = sort_key
+    return newest_entry
 
 
 def _entry_sort_key(entry: HandoffEntry, mtime: float) -> float:
@@ -680,6 +722,9 @@ def capture(
         open_items = list(getattr(facts, "open_items", None) or [])
         started_at = getattr(facts, "started_at", None)
         ended_at = getattr(facts, "ended_at", None)
+        source_jsonl_path = getattr(facts, "source_jsonl_path", None)
+    else:
+        source_jsonl_path = None
 
     if not title:
         if first_user_prompt:
@@ -701,6 +746,7 @@ def capture(
         project_slug=slug,
         title=title,
         first_user_prompt=first_user_prompt,
+        source_jsonl_path=source_jsonl_path,
         started_at=started_at,
         ended_at=ended_at if ended_at is not None else time.time(),
         capture_reason=reason,
@@ -743,6 +789,24 @@ def capture(
             write_markdown(settings)
         except Exception as e:  # noqa: BLE001 - markdown regen must not break capture
             log.warning(f"write_markdown failed: {e}")
+
+    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+    if remaining is None or remaining > 0:
+        try:
+            index_result = write_project_rule_index(cwd, max_seconds=remaining)
+        except Exception as e:  # noqa: BLE001 - generated output must not break capture
+            log.warning(f"write_project_rule_index failed: {e}")
+            index_result = False
+        if index_result is False:
+            log.warning(
+                "Captured hand-off for %s, but failed to update the local project rule index",
+                session_id,
+            )
+    else:
+        log.warning(
+            "Captured hand-off for %s, but failed to update the local project rule index",
+            session_id,
+        )
 
     return entry
 
@@ -1000,6 +1064,16 @@ def render_delivery_context(entry: HandoffEntry) -> str:
     return text if len(text) <= 1500 else text[:1497].rstrip() + "..."
 
 
+def rotation_command(entry: HandoffEntry, mode: str) -> str | None:
+    """Build the exact-pane command for an automatic or manual rotation."""
+    if mode == "clear":
+        title = re.sub(r"[\x00-\x1f\x7f]+", " ", entry.title or entry.session_id).strip()
+        return f"/rename claude-monitor hand-off: {(title[:80] or entry.session_id)}\r/clear\r"
+    if mode == "compact":
+        return "/compact\r"
+    return None
+
+
 # --- markdown rendering ---------------------------------------------------------
 
 
@@ -1125,3 +1199,91 @@ def write_markdown(settings=None) -> None:
             os.remove(os.path.join(PROJECTS_DIR, name))
         except OSError as e:
             log.warning(f"Failed to remove stale markdown digest {name}: {e}")
+
+
+def _git_rule_index_paths(cwd: str, *, max_seconds: float | None = None) -> tuple[str, str] | None:
+    """Resolve the Git top-level and local exclude paths for *cwd*."""
+    timeout = 2.0 if max_seconds is None else min(2.0, max_seconds)
+    if timeout <= 0:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "--git-path", "info/exclude"],
+            cwd=cwd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if len(lines) < 2 or not lines[0] or not lines[1]:
+        return None
+    top_level = os.path.abspath(lines[0])
+    exclude_path = lines[1]
+    if not os.path.isabs(exclude_path):
+        exclude_path = os.path.join(top_level, exclude_path)
+    return top_level, os.path.abspath(exclude_path)
+
+
+def _ensure_rule_index_excluded(exclude_path: str) -> bool:
+    """Add the exact rule-index pattern to Git's local exclude file."""
+    try:
+        os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+        with open(exclude_path, "a+", encoding="utf-8") as exclude_file:
+            fcntl.flock(exclude_file.fileno(), fcntl.LOCK_EX)
+            try:
+                exclude_file.seek(0)
+                existing = exclude_file.read()
+                if RULE_INDEX_IGNORE_PATTERN not in existing.splitlines():
+                    if existing and not existing.endswith("\n"):
+                        exclude_file.write("\n")
+                    exclude_file.write(RULE_INDEX_IGNORE_PATTERN + "\n")
+                    exclude_file.flush()
+                    os.fsync(exclude_file.fileno())
+            finally:
+                fcntl.flock(exclude_file.fileno(), fcntl.LOCK_UN)
+    except OSError as e:
+        log.warning(f"Failed to update Git local excludes {exclude_path}: {e}")
+        return False
+    return True
+
+
+def render_project_rule_index(entries: list[HandoffEntry]) -> str:
+    """Render the bounded local rule index for a project's hand-offs."""
+    lines = [
+        "<!-- Machine-generated by claude-monitor. Do not edit. -->",
+        "# claude-monitor hand-off index",
+        "",
+        "This is a bounded index of recent hand-offs for this project. Consult a",
+        "listed Claude Code transcript JSONL only when more context is needed.",
+        "",
+    ]
+    for entry in entries[:5]:
+        summary = render_delivery_context(entry).splitlines()[1:]
+        lines.extend(
+            [
+                f"## {entry.title or 'Untitled session'}",
+                f"- Session: `{entry.session_id}`",
+                f"- Source JSONL: `{entry.source_jsonl_path or 'unavailable'}`",
+                "- Bounded summary:",
+                *[f"  {line}" for line in summary],
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_project_rule_index(cwd: str, *, max_seconds: float | None = None) -> bool | None:
+    """Write the local project rule index, or skip for non-Git directories."""
+    paths = _git_rule_index_paths(cwd, max_seconds=max_seconds)
+    if paths is None:
+        return None
+    top_level, exclude_path = paths
+    if not _ensure_rule_index_excluded(exclude_path):
+        return False
+    entries = list_entries(project=project_slug(cwd), limit=5)
+    index_path = os.path.join(top_level, RULE_INDEX_RELATIVE_PATH)
+    return _atomic_write(index_path, render_project_rule_index(entries))

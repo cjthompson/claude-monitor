@@ -40,6 +40,7 @@ HOOKS_CONFIG = {
     # New hooks (CC 2.1.62+)
     "SessionStart": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     "SessionEnd": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     # New hooks (CC 2.1.70+)
     "StopFailure": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
     "PostCompact": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}],
@@ -183,6 +184,7 @@ def configure_hooks():
     print("  - SubagentStart      (track agent spawns)")
     print("  - SubagentStop       (track agent completions)")
     print("  - PostToolUse        (capture AskUserQuestion answers)")
+    print("  - Stop               (prompt-ready automatic rotation signal)")
     print("  - PostToolUseFailure (log tool failures)")
     print()
     print(f"Hook command: {HOOK_COMMAND}")
@@ -357,8 +359,7 @@ def configure_statusline():
         choice = input("  Choice [c/r/s] (default c): ").strip().lower()
         if choice in ("", "c", "chain"):
             new_cmd = (
-                f"CLAUDE_MONITOR_STATUSLINE_NEXT={_shell_quote(existing_cmd)} "
-                f"{STATUSLINE_COMMAND}"
+                f"CLAUDE_MONITOR_STATUSLINE_NEXT={_shell_quote(existing_cmd)} {STATUSLINE_COMMAND}"
             )
         elif choice in ("r", "replace"):
             new_cmd = STATUSLINE_COMMAND
