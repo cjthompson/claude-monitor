@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import concurrent.futures
 import errno
 import json
 import logging
@@ -31,9 +32,11 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 from textual import work
+from textual._callback import invoke
 from textual.app import App
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
@@ -63,6 +66,10 @@ from claude_monitor.web import start_web_server
 from claude_monitor.widgets import DashboardPanel, SessionPanel
 
 log = logging.getLogger(__name__)
+
+# Bound for MonitorApp._call_from_thread_bounded / call_from_thread_async.
+# App.call_from_thread has no timeout; a wedged message loop blocks forever.
+_CALL_FROM_THREAD_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -179,6 +186,76 @@ class MonitorApp(App):
         # ``poll_handoff`` worker and by ``action_capture_handoff``.
         self._session_meta: dict[str, dict] = {}
         self._handoff_polling: bool = False
+
+    # ------------------------------------------------------------------
+    # Bounded thread → Textual-loop callbacks
+    # ------------------------------------------------------------------
+
+    def _call_from_thread_bounded(
+        self,
+        fn,
+        *args,
+        default=None,
+        timeout: float = _CALL_FROM_THREAD_TIMEOUT,
+    ):
+        """Cancelling on timeout only stops scheduling; a running callback can't be interrupted."""
+        if self._stop_event.is_set():
+            return default
+        if self._loop is None:
+            return default
+        if self._thread_id == threading.get_ident():
+            # Same guard as textual's call_from_thread: a same-thread call would
+            # block this thread's own loop waiting on itself, deadlocking until
+            # `timeout` instead of failing fast.
+            raise RuntimeError(
+                "_call_from_thread_bounded must run in a different thread from the app"
+            )
+        callback_with_args = partial(fn, *args)
+
+        async def run_callback():
+            with self._context():
+                return await invoke(callback_with_args)
+
+        future = asyncio.run_coroutine_threadsafe(run_callback(), loop=self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return default
+
+    async def call_from_thread_async(
+        self,
+        fn,
+        *args,
+        default=None,
+        timeout: float = _CALL_FROM_THREAD_TIMEOUT,
+    ):
+        """Async counterpart of ``_call_from_thread_bounded`` for callers already on an event loop.
+
+        Awaiting here (instead of a blocking ``future.result()``) keeps the
+        caller's own loop — e.g. the web server's — free to service other
+        concurrent work while this call is outstanding.
+        """
+        if self._stop_event.is_set():
+            return default
+        if self._loop is None:
+            return default
+        if self._thread_id == threading.get_ident():
+            raise RuntimeError(
+                "call_from_thread_async must run in a different thread from the app"
+            )
+        callback_with_args = partial(fn, *args)
+
+        async def run_callback():
+            with self._context():
+                return await invoke(callback_with_args)
+
+        future = asyncio.run_coroutine_threadsafe(run_callback(), loop=self._loop)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout)
+        except asyncio.TimeoutError:
+            future.cancel()
+            return default
 
     # ------------------------------------------------------------------
     # Abstract interface — subclasses MUST implement these
@@ -417,7 +494,7 @@ class MonitorApp(App):
                 save_settings(self.settings)
                 set_oauth_json(new_json)
 
-            self.call_from_thread(_update_settings)
+            self._call_from_thread_bounded(_update_settings)
         ts = self._format_ts(datetime.now().astimezone())
         expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).astimezone()
         msg = f"[{ts}] [dim]OAuth token refreshed, expires {expires_dt.strftime('%H:%M:%S')}[/]"
@@ -426,7 +503,7 @@ class MonitorApp(App):
             if self.dashboard:
                 self.dashboard.record_event(msg)
 
-        self.call_from_thread(_log)
+        self._call_from_thread_bounded(_log)
 
     # ------------------------------------------------------------------
     # State persistence (minimal shared implementation)
@@ -580,7 +657,7 @@ class MonitorApp(App):
                 break
             self._last_usage_data = fetch_usage()
             self._usage_next_fetch = time.time() + 300
-            self.call_from_thread(self._update_status_bar)
+            self._call_from_thread_bounded(self._update_status_bar)
             self._stop_event.wait(300)
         log.debug("poll_usage: stopped")
 
@@ -1034,7 +1111,7 @@ class MonitorApp(App):
             else:
                 self.notify("Captured locally; pane delivery failed.", severity="warning")
 
-        self.call_from_thread(_done)
+        self._call_from_thread_bounded(_done)
 
     @staticmethod
     def _send_handoff_text(sender, iterm_session_id: str, command: str) -> bool:
@@ -1050,7 +1127,7 @@ class MonitorApp(App):
         """One-shot usage fetch triggered by settings changes."""
         self._last_usage_data = fetch_usage()
         self._usage_next_fetch = time.time() + 300
-        self.call_from_thread(self._update_status_bar)
+        self._call_from_thread_bounded(self._update_status_bar)
 
     @work(thread=True, exit_on_error=False)
     def serve_api(self) -> None:

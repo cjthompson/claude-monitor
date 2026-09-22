@@ -5,6 +5,9 @@
 ### Live per-session hand-offs and idle rotation (P001)
 - Add Show Session Summary to the pane context menu (#handoff, #tui)
 
+### Fixes
+- TUI hangs on 'q': wedged Textual thread workers stall asyncio default-executor shutdown (#tui, #shutdown, #threads, #handoff)
+
 ## 2026-09-17
 
 ### Live per-session hand-offs and idle rotation (P001)

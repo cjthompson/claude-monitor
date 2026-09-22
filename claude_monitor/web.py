@@ -31,6 +31,20 @@ _STATIC_DIR = Path(__file__).parent / "static"
 _start_time: float = 0.0
 _app: AppStateProtocol | None = None
 _clients: set = set()
+_handler_tasks: set = set()
+
+# /screenshot is genuinely slow (export_screenshot + cairosvg on a full-size
+# terminal); give it its own, more generous bound distinct from other
+# UI-callback timeouts so a slow-but-fine screenshot doesn't 503.
+_SCREENSHOT_TIMEOUT = 15.0
+
+# websockets wraps the WHOLE opening handshake — including process_request,
+# i.e. _handle_http — in `async with asyncio_timeout(open_timeout)` and calls
+# transport.abort() on expiry. Its default (10s) is BELOW _SCREENSHOT_TIMEOUT,
+# which made the 503 below unreachable: a slow /screenshot got a hard
+# disconnect (httpx RemoteProtocolError) instead of a clean status. Keep this
+# strictly greater than every per-request bound used by _handle_http.
+_WS_OPEN_TIMEOUT = _SCREENSHOT_TIMEOUT + 5.0
 
 # Minimal inline HTML served when static/index.html doesn't exist yet
 _FALLBACK_HTML = b"""<!DOCTYPE html>
@@ -69,7 +83,9 @@ async def _handle_http(connection: Any, request: Request) -> Response | None:
         if not _app:
             return _error_response(503, "App not available")
         try:
-            snapshot = _app.call_from_thread(_app.get_state_snapshot)
+            snapshot = await _app.call_from_thread_async(_app.get_state_snapshot)
+            if snapshot is None:
+                return _error_response(503, "App did not respond in time")
             snapshot["uptime"] = int(time.time() - _start_time)
             body = json.dumps(snapshot).encode()
             return _make_response(200, "OK", "application/json", body)
@@ -81,7 +97,11 @@ async def _handle_http(connection: Any, request: Request) -> Response | None:
         if not _app:
             return _error_response(503, "App not available")
         try:
-            svg = _app.call_from_thread(_app.export_screenshot)
+            svg = await _app.call_from_thread_async(
+                _app.export_screenshot, timeout=_SCREENSHOT_TIMEOUT
+            )
+            if svg is None:
+                return _error_response(503, "App did not respond in time")
             # Parse format query param
             fmt = "png"
             if "?" in raw_path:
@@ -136,10 +156,11 @@ async def start_web_server(
     stop_event: asyncio.Event | None = None,
 ) -> None:
     """Start the unified HTTP+WebSocket server. Blocks until stop_event is set."""
-    global _start_time, _app, _clients
+    global _start_time, _app, _clients, _handler_tasks
     _start_time = time.time()
     _app = app
     _clients = set()  # reset for test isolation
+    _handler_tasks = set()
 
     settings = load_settings()
     host = "0.0.0.0" if settings.web_lan_access else "127.0.0.1"
@@ -152,9 +173,23 @@ async def start_web_server(
         host,
         port,
         process_request=_handle_http,
+        open_timeout=_WS_OPEN_TIMEOUT,
     ):
         log.info(f"Web server started on http://{host}:{port}")
         await stop_event.wait()
+        # Close connections gracefully first: cancelling a handler task skips
+        # conn_handler's `await connection.close()`, leaving the transport
+        # open and wedging Server.wait_closed() on Python 3.12+.
+        if _clients:
+            await asyncio.wait(
+                [asyncio.create_task(ws.close()) for ws in list(_clients)],
+                timeout=2.0,
+            )
+        # Handlers now return promptly via call_from_thread_async's own bound
+        # and the close() above; cancel defensively for anything still stuck
+        # before Server.__aexit__ awaits them all.
+        for task in list(_handler_tasks):
+            task.cancel()
 
 
 async def _handle_ws(websocket: websockets.ServerConnection) -> None:
@@ -162,6 +197,10 @@ async def _handle_ws(websocket: websockets.ServerConnection) -> None:
     if len(_clients) >= MAX_WS_CONNECTIONS:
         await websocket.close(1013, "Too many connections")
         return
+
+    task = asyncio.current_task()
+    if task is not None:
+        _handler_tasks.add(task)
 
     _clients.add(websocket)
     log.debug(f"WS connected ({len(_clients)} clients)")
@@ -172,10 +211,13 @@ async def _handle_ws(websocket: websockets.ServerConnection) -> None:
 
         if _app:
             try:
-                snapshot = _app.call_from_thread(_app.get_state_snapshot)
-                snapshot["uptime"] = int(time.time() - _start_time) if _start_time else 0
-                snapshot["version"] = __version__
-                await websocket.send(json.dumps({"type": "snapshot", "data": snapshot}))
+                snapshot = await _app.call_from_thread_async(_app.get_state_snapshot)
+                if snapshot is None:
+                    log.debug("snapshot send skipped: app did not respond in time")
+                else:
+                    snapshot["uptime"] = int(time.time() - _start_time) if _start_time else 0
+                    snapshot["version"] = __version__
+                    await websocket.send(json.dumps({"type": "snapshot", "data": snapshot}))
             except Exception as e:
                 log.debug(f"snapshot send failed: {e}")
 
@@ -192,6 +234,8 @@ async def _handle_ws(websocket: websockets.ServerConnection) -> None:
                 pass
     finally:
         _clients.discard(websocket)
+        if task is not None:
+            _handler_tasks.discard(task)
         log.debug(f"WS disconnected ({len(_clients)} clients)")
 
 

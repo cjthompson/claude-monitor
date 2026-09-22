@@ -13,10 +13,13 @@ Layout (vertical):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -1005,5 +1008,19 @@ class SimpleTUI(MonitorApp):
 
 def main():
     app = SimpleTUI()
-    app.run()
-    os._exit(0)
+
+    async def _run_and_exit() -> None:
+        try:
+            await app.run_async()
+        except BaseException:
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+
+    # os._exit inside _run_and_exit pre-empts asyncio.run()'s Runner.close(),
+    # which otherwise blocks up to 300s draining thread workers on shutdown.
+    asyncio.run(_run_and_exit())

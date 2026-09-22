@@ -1,5 +1,7 @@
 """Extended tests for app_base.py — state management, settings, timestamps."""
 
+import asyncio
+import concurrent.futures
 import json
 import time
 from datetime import datetime, timezone
@@ -170,3 +172,77 @@ class TestActionQuit:
             await pilot.pause()
             assert not app_fixture._stop_event.is_set()
             app_fixture.action_quit()
+
+
+class TestCallFromThreadBounded:
+    """Regression tests for MonitorApp._call_from_thread_bounded (Slice B)."""
+
+    async def test_stop_event_set_returns_default_without_scheduling(
+        self, app_fixture, monkeypatch
+    ):
+        app_fixture._stop_event.set()
+        app_fixture._loop = asyncio.new_event_loop()
+        called = []
+        monkeypatch.setattr(
+            "claude_monitor.app_base.asyncio.run_coroutine_threadsafe",
+            lambda *a, **k: called.append(1),
+        )
+        result = app_fixture._call_from_thread_bounded(lambda: "x", default="fallback")
+        assert result == "fallback"
+        assert called == []
+        app_fixture._loop.close()
+
+    async def test_wedged_loop_returns_default_within_timeout(self, app_fixture):
+        # A loop that is created but never run — asyncio.run_coroutine_threadsafe
+        # schedules onto it fine, but nothing ever drains it, so the wait must
+        # be bounded by `timeout`, not hang forever.
+        app_fixture._loop = asyncio.new_event_loop()
+        app_fixture._thread_id = -1  # simulate calling from a worker thread
+        start = time.monotonic()
+        result = app_fixture._call_from_thread_bounded(
+            lambda: "x", default="fallback", timeout=0.3
+        )
+        elapsed = time.monotonic() - start
+        assert result == "fallback"
+        assert elapsed < 2.0
+        app_fixture._loop.close()
+
+    async def test_timeout_cancels_future(self, app_fixture, monkeypatch):
+        app_fixture._loop = asyncio.new_event_loop()
+        app_fixture._thread_id = -1  # simulate calling from a worker thread
+        cancelled = []
+        original_cancel = concurrent.futures.Future.cancel
+
+        def spy_cancel(self):
+            cancelled.append(True)
+            return original_cancel(self)
+
+        monkeypatch.setattr(concurrent.futures.Future, "cancel", spy_cancel)
+        result = app_fixture._call_from_thread_bounded(
+            lambda: "x", default="fallback", timeout=0.2
+        )
+        assert result == "fallback"
+        assert cancelled == [True]
+        app_fixture._loop.close()
+
+
+class TestUpdateTabTitlesStopEvent:
+    """update_tab_titles must not spin after _stop_event is set (Slice B)."""
+
+    async def test_stop_event_set_exits_without_calling_through(self, monkeypatch):
+        import claude_monitor.tui as tui_mod
+        from claude_monitor.tui import AutoAcceptTUI
+
+        monkeypatch.setattr(tui_mod, "_layout_tabs", [])
+        monkeypatch.setattr(tui_mod, "_self_session_id", None)
+        monkeypatch.setattr("claude_monitor.app_base.fetch_usage", lambda: None)
+
+        app = AutoAcceptTUI()
+        app._tab_original_names = {"tab-1": "Original"}
+        app._stop_event.set()
+        called = []
+        monkeypatch.setattr(app, "_call_from_thread_bounded", lambda *a, **k: called.append(1))
+
+        app.update_tab_titles()
+
+        assert called == []

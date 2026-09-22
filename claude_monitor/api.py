@@ -16,9 +16,12 @@ log = logging.getLogger(__name__)
 class AppStateProtocol(Protocol):
     """Interface the HTTP handler expects from the TUI app.
 
-    Implementations (AutoAcceptTUI, SimpleTUI) must provide these two methods.
-    Both are called via ``call_from_thread()`` so they run on the Textual event
-    loop, not the HTTP-server thread.
+    Implementations (AutoAcceptTUI, SimpleTUI) must provide these methods.
+    ``get_state_snapshot`` and ``export_screenshot`` are called via
+    ``call_from_thread()`` so they run on the Textual event loop, not the
+    HTTP-server thread. ``call_from_thread_async`` is the bounded, awaitable
+    counterpart used by handlers that themselves run on an asyncio loop
+    (the web server) and must not block it.
     """
 
     def get_state_snapshot(self) -> dict[str, object]:
@@ -27,6 +30,10 @@ class AppStateProtocol(Protocol):
 
     def export_screenshot(self) -> str:
         """Export the current screen as an SVG string."""
+        ...
+
+    async def call_from_thread_async(self, fn, *args, default=None, timeout=...):
+        """Bounded, awaitable dispatch of ``fn`` onto the Textual event loop."""
         ...
 
 

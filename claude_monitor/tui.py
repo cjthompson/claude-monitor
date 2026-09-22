@@ -6,12 +6,15 @@ Uses iTerm2 API to discover pane layout and session names before startup.
 Polls iTerm2 every few seconds to detect pane splits/closes.
 """
 
+import asyncio
 import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 
 from textual import work
@@ -1132,8 +1135,10 @@ class AutoAcceptTUI(MonitorApp):
             return
         try:
             while True:
+                if self._stop_event.is_set():
+                    break
                 self._tab_title_pending = False
-                self.call_from_thread(self._update_textual_tab_labels)
+                self._call_from_thread_bounded(self._update_textual_tab_labels)
                 if not self._tab_title_pending:
                     break
         finally:
@@ -1259,11 +1264,10 @@ class AutoAcceptTUI(MonitorApp):
             else:
                 self._update_status_bar()
 
-        self.call_from_thread(_restore)
+        self._call_from_thread_bounded(_restore)
 
 
 def main() -> None:
-    import sys
 
     simple_mode = "--simple" in sys.argv or not os.environ.get("ITERM_SESSION_ID")
 
@@ -1274,8 +1278,21 @@ def main() -> None:
             print(f"Error: could not import SimpleTUI: {e}")
             raise SystemExit(1)
         app = SimpleTUI()
-        app.run()
-        os._exit(0)
+
+        async def _run_and_exit() -> None:
+            try:
+                await app.run_async()
+            except BaseException:
+                traceback.print_exc()
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(1)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
+
+        asyncio.run(_run_and_exit())
+        return
 
     try:
         fetch_iterm_layout()
@@ -1290,11 +1307,22 @@ def main() -> None:
         print("Then restart claude-monitor.")
         raise SystemExit(1)
     app = AutoAcceptTUI()
-    app.run()
-    # Force exit — background threads (layout polling, event watcher) may be
-    # blocked on I/O (iterm2 websocket, file read) and can't be interrupted
-    # cleanly. The stop_event is set but threads may not see it immediately.
-    os._exit(0)
+
+    async def _run_and_exit() -> None:
+        try:
+            await app.run_async()
+        except BaseException:
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+
+    # os._exit inside _run_and_exit pre-empts asyncio.run()'s Runner.close(),
+    # which otherwise blocks up to 300s draining thread workers on shutdown.
+    asyncio.run(_run_and_exit())
 
 
 if __name__ == "__main__":

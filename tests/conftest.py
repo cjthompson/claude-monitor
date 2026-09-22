@@ -221,3 +221,18 @@ async def app_fixture_with_api(isolated_state, monkeypatch):
 
     app._stop_event.set()
     await asyncio.sleep(0.5)
+
+
+@pytest.fixture
+async def app_fixture_with_api_port(app_fixture_with_api, monkeypatch):
+    """app_fixture_with_api with serve_api bound to a free port, not API_PORT (17233).
+
+    17233 may be held by a live claude-monitor instance outside this worktree;
+    binding it here would collide or trigger the out-of-scope
+    _handle_port_in_use kill-prompt path.
+    """
+    from tests.test_web import _get_free_port
+
+    port = _get_free_port()
+    monkeypatch.setattr("claude_monitor.app_base.API_PORT", port)
+    yield app_fixture_with_api, port

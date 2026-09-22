@@ -39,6 +39,9 @@ async def web_server(isolated_state, monkeypatch):
         def call_from_thread(self, fn, *args):
             return fn(*args) if args else fn()
 
+        async def call_from_thread_async(self, fn, *args, default=None, timeout=None):
+            return fn(*args) if args else fn()
+
         def get_state_snapshot(self):
             return {"global_mode": "auto", "sessions": [], "dashboard": None, "usage": None}
 
@@ -53,7 +56,7 @@ async def web_server(isolated_state, monkeypatch):
     server_task = asyncio.create_task(start_web_server(app, port=port, stop_event=stop_event))
     await asyncio.sleep(0.3)  # let server bind and start accepting
 
-    yield {"port": port, "app": app, "stop_event": stop_event}
+    yield {"port": port, "app": app, "stop_event": stop_event, "server_task": server_task}
 
     stop_event.set()
     server_task.cancel()
@@ -321,3 +324,192 @@ class TestWebSocket:
         assert msg2 is not None, "ws2 did not receive state broadcast"
         assert msg1["data"]["global_paused"] is True
         assert msg2["data"]["global_paused"] is True
+
+
+@pytest.fixture
+async def web_server_wedged(isolated_state, monkeypatch):
+    """Like web_server, but the mock app's call_from_thread_async always times out.
+
+    Simulates a stuck Textual message loop: every call blocks for its given
+    timeout (or the default bound) and then returns ``default``, instead of
+    resolving immediately like the plain MockApp above.
+    """
+    import claude_monitor.web as web_mod
+
+    monkeypatch.setattr(web_mod, "EVENTS_FILE", isolated_state["events_file"])
+    monkeypatch.setattr(web_mod, "STATE_FILE", isolated_state["state_file"])
+    # Keep the test fast: verify the *shape* of the bound, not the production value.
+    monkeypatch.setattr(web_mod, "_SCREENSHOT_TIMEOUT", 0.5)
+
+    port = _get_free_port()
+
+    class WedgedMockApp:
+        def call_from_thread(self, fn, *args):
+            return fn(*args) if args else fn()
+
+        async def call_from_thread_async(self, fn, *args, default=None, timeout=0.5):
+            try:
+                await asyncio.wait_for(asyncio.Event().wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return default
+
+        def get_state_snapshot(self):
+            return {"global_mode": "auto", "sessions": [], "dashboard": None, "usage": None}
+
+        def export_screenshot(self):
+            return "<svg></svg>"
+
+    app = WedgedMockApp()
+    stop_event = asyncio.Event()
+
+    from claude_monitor.web import start_web_server
+
+    server_task = asyncio.create_task(start_web_server(app, port=port, stop_event=stop_event))
+    await asyncio.sleep(0.3)
+
+    yield {"port": port, "app": app, "stop_event": stop_event, "server_task": server_task}
+
+    stop_event.set()
+    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
+
+
+class TestBoundedCallFromThread:
+    """Slice C regression: web handlers must not block on a wedged app."""
+
+    async def test_screenshot_503_within_bound_not_300s(self, web_server_wedged):
+        port = web_server_wedged["port"]
+        start = asyncio.get_event_loop().time()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"http://127.0.0.1:{port}/screenshot")
+        elapsed = asyncio.get_event_loop().time() - start
+        assert resp.status_code == 503
+        assert elapsed < 3.0
+
+    async def test_stop_event_completes_server_with_open_ws_client(self, web_server_wedged):
+        port = web_server_wedged["port"]
+        stop_event = web_server_wedged["stop_event"]
+        server_task = web_server_wedged["server_task"]
+
+        async with websockets.connect(f"ws://127.0.0.1:{port}/ws"):
+            await asyncio.sleep(0.2)
+            stop_event.set()
+            await asyncio.wait_for(server_task, timeout=5)
+
+
+class TestScreenshotTimeoutReachable:
+    """Finding B regression: the /screenshot 503 path must actually be reachable.
+
+    websockets.serve()'s default open_timeout (10s) wraps process_request
+    (_handle_http) too, so it aborted the transport before the app-level
+    _SCREENSHOT_TIMEOUT (15s) ever fired. _WS_OPEN_TIMEOUT must stay above
+    _SCREENSHOT_TIMEOUT, and must actually be passed to websockets.serve().
+    """
+
+    def test_screenshot_bound_under_ws_open_timeout(self):
+        import claude_monitor.web as web_mod
+
+        assert web_mod._SCREENSHOT_TIMEOUT < web_mod._WS_OPEN_TIMEOUT
+
+    async def test_open_timeout_fires_before_screenshot_bound(
+        self, isolated_state, monkeypatch
+    ):
+        """Control for Finding B.
+
+        If `open_timeout=` is ever dropped from the websockets.serve() call,
+        this test starts failing on the WRONG outcome (a 503 at ~1.0s instead
+        of a TransportError at ~0.3s) — that mismatch is how a future
+        regression gets caught.
+        """
+        import claude_monitor.web as web_mod
+
+        monkeypatch.setattr(web_mod, "EVENTS_FILE", isolated_state["events_file"])
+        monkeypatch.setattr(web_mod, "STATE_FILE", isolated_state["state_file"])
+        monkeypatch.setattr(web_mod, "_SCREENSHOT_TIMEOUT", 1.0)
+        monkeypatch.setattr(web_mod, "_WS_OPEN_TIMEOUT", 0.3)
+
+        port = _get_free_port()
+
+        class WedgedMockApp:
+            def call_from_thread(self, fn, *args):
+                return fn(*args) if args else fn()
+
+            async def call_from_thread_async(self, fn, *args, default=None, timeout=0.5):
+                try:
+                    await asyncio.wait_for(asyncio.Event().wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    return default
+
+            def get_state_snapshot(self):
+                return {"global_mode": "auto", "sessions": [], "dashboard": None, "usage": None}
+
+            def export_screenshot(self):
+                return "<svg></svg>"
+
+        app = WedgedMockApp()
+        stop_event = asyncio.Event()
+
+        from claude_monitor.web import start_web_server
+
+        server_task = asyncio.create_task(
+            start_web_server(app, port=port, stop_event=stop_event)
+        )
+        await asyncio.sleep(0.3)
+
+        start = asyncio.get_event_loop().time()
+        try:
+            with pytest.raises(httpx.TransportError):
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.get(f"http://127.0.0.1:{port}/screenshot")
+            elapsed = asyncio.get_event_loop().time() - start
+            assert elapsed < 0.6
+        finally:
+            stop_event.set()
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+
+
+class TestFullStackShutdown:
+    """3(c): real serve_api + real /screenshot in flight + real ws connection,
+
+    then app._stop_event.set(); app.exit() should let the serve_api worker
+    thread terminate promptly instead of hanging on the default executor.
+    """
+
+    async def test_serve_api_worker_terminates_after_exit(self, app_fixture_with_api_port):
+        app, port = app_fixture_with_api_port
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await asyncio.sleep(0.5)  # let serve_api bind
+
+            async with websockets.connect(f"ws://127.0.0.1:{port}/ws") as ws:
+                await asyncio.wait_for(ws.recv(), timeout=2)  # drain snapshot/burst
+
+                # format=svg avoids the cairosvg/libcairo dependency, which may
+                # not be installed in every dev/CI environment.
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(f"http://127.0.0.1:{port}/screenshot?format=svg")
+                assert resp.status_code == 200
+
+                app._stop_event.set()
+                app.exit()
+
+                serve_api_worker = None
+                for worker in app.workers:
+                    if worker.name == "serve_api":
+                        serve_api_worker = worker
+                        break
+                assert serve_api_worker is not None, "serve_api worker not found"
+
+                for _ in range(50):  # up to ~5s
+                    if serve_api_worker.is_finished:
+                        break
+                    await asyncio.sleep(0.1)
+                assert serve_api_worker.is_finished, "serve_api worker did not terminate"
