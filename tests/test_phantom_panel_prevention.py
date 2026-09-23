@@ -32,8 +32,9 @@ A fourth class, covered separately below:
 
 Any hook event that still can't be attributed to a tracked pane (e.g. a
 detached/background sub-agent with no iTerm session ID at all) creates a
-fallback panel, but it always mounts into the fixed Background Agents tab
-rather than whichever tab happens to be active — see
+fallback panel. The new mount strategy tries the Unmatched container first,
+then falls back to the Unmatched TabPane. If both fail, the panel is dropped
+and removed from tracking to prevent phantom state inflation — see
 TestFallbackPanelMountTarget.
 """
 
@@ -308,15 +309,15 @@ class TestScopeSidsUpdatedPhantomPrevention:
 
 
 # ---------------------------------------------------------------------------
-# Fallback panels must mount into the fixed Background Agents tab, not
+# Fallback panels must mount into the fixed Unmatched tab, not
 # whichever tab happens to be active — a session that reaches this path
 # can't be attributed to any tracked pane, so guessing "active tab" pins
 # it somewhere unrelated to where it actually belongs.
 # ---------------------------------------------------------------------------
 
 
-def _patched_resolve_with_background_tab(app, data):
-    """Call _resolve_panel with the Background Agents container mocked out.
+def _patched_resolve_with_unmatched_tab(app, data):
+    """Call _resolve_panel with the Unmatched container mocked out.
 
     Returns (result, mock_container, mock_layout_root) so tests can assert
     which one .mount() was actually called on.
@@ -325,7 +326,7 @@ def _patched_resolve_with_background_tab(app, data):
     mock_root = MagicMock()
 
     def _query_one(selector, *args, **kwargs):
-        if selector == f"#{app.BACKGROUND_AGENTS_CONTAINER_ID}":
+        if selector == f"#{app.UNMATCHED_CONTAINER_ID}":
             return mock_container
         return mock_root
 
@@ -336,37 +337,17 @@ def _patched_resolve_with_background_tab(app, data):
 
 
 class TestFallbackPanelMountTarget:
-    def test_fallback_panel_mounts_into_background_agents_container(self, app):
-        """The fallback panel always mounts into the fixed Background Agents
+    def test_fallback_panel_mounts_into_unmatched_container(self, app):
+        """The fallback panel always mounts into the fixed Unmatched
         tab's container, never onto #layout-root directly (which would render
         as a sibling of the tab structure, visible under every tab)."""
         data = _mk_event(claude_sid="c-tabbed", iterm_sid="iterm-unknown-tabbed")
 
-        result, mock_container, mock_root = _patched_resolve_with_background_tab(app, data)
+        result, mock_container, mock_root = _patched_resolve_with_unmatched_tab(app, data)
 
         assert result is not None
         mock_container.mount.assert_called_once_with(result)
         mock_root.mount.assert_not_called()
-
-    def test_fallback_panel_mounts_into_layout_root_when_background_container_missing(self, app):
-        """If the Background Agents container can't be found (e.g. some
-        startup edge case), #layout-root is the fallback mount target."""
-        data = _mk_event(claude_sid="c-single", iterm_sid="iterm-unknown-single")
-
-        mock_root = MagicMock()
-
-        def _query_one(selector, *args, **kwargs):
-            if selector == f"#{app.BACKGROUND_AGENTS_CONTAINER_ID}":
-                raise Exception("Background Agents container not mounted")
-            return mock_root
-
-        app.query_one = MagicMock(side_effect=_query_one)
-        app.mount = MagicMock()
-
-        result = app._resolve_panel(data)
-
-        assert result is not None
-        mock_root.mount.assert_called_once_with(result)
 
 
 class TestSessionEndPanelPruning:

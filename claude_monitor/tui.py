@@ -17,7 +17,7 @@ from datetime import datetime
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Footer, RichLog, Static, TabbedContent, TabPane
 
@@ -222,6 +222,20 @@ class AutoAcceptTUI(MonitorApp):
         scrollbar-background-hover: $background;
         scrollbar-background-active: $background;
     }
+    #unmatched-container {
+        height: 1fr;
+        min-height: 3;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-background: $background;
+        scrollbar-background-hover: $background;
+        scrollbar-background-active: $background;
+    }
+    #unmatched-container SessionPanel {
+        height: 12;
+        min-height: 12;
+        width: 1fr;
+    }
     #status-bar {
         dock: top;
         height: 1;
@@ -253,9 +267,10 @@ class AutoAcceptTUI(MonitorApp):
 
     COMMANDS = {MonitorCommands}
 
-    BACKGROUND_AGENTS_TAB_ID = "tab-background-agents"
-    BACKGROUND_AGENTS_CONTAINER_ID = "background-agents-container"
+    UNMATCHED_TAB_ID = "tab-unmatched"
+    UNMATCHED_CONTAINER_ID = "unmatched-container"
     HANDOFF_TAB_ID = "tab-handoff"
+    FIXED_TAB_COUNT = 2  # Unmatched + Hand-off
 
     BINDINGS = [
         Binding("a", "toggle_pause", "Auto/Manual"),
@@ -423,7 +438,7 @@ class AutoAcceptTUI(MonitorApp):
         old_panels: "dict | None" = None,
         old_dashboard: "DashboardPanel | None" = None,
     ) -> None:
-        """Mount tab layout into a TabbedContent, plus a fixed Background Agents tab."""
+        """Mount tab layout into a TabbedContent, plus a fixed Unmatched tab."""
         # Record original tab names and which sessions belong to each tab
         for tab_id, tab_name, tree in tabs:
             # Always refresh from the live iTerm2 read — claude-monitor never
@@ -452,9 +467,9 @@ class AutoAcceptTUI(MonitorApp):
         # session ID to match). Fixed location, so these never get pinned
         # onto whichever real tab happens to be active.
         bg_pane = TabPane(
-            "Background Agents",
-            Vertical(id=self.BACKGROUND_AGENTS_CONTAINER_ID),
-            id=self.BACKGROUND_AGENTS_TAB_ID,
+            "Unmatched",
+            VerticalScroll(id=self.UNMATCHED_CONTAINER_ID),
+            id=self.UNMATCHED_TAB_ID,
         )
         await tc.add_pane(bg_pane)
 
@@ -778,23 +793,36 @@ class AutoAcceptTUI(MonitorApp):
             panel.add_class("worktree")
         self.panels[claude_sid] = panel
         self._iterm_to_panel[claude_sid] = claude_sid
-        # Mount into the fixed Background Agents tab — not whichever tab
+        # Mount into the fixed Unmatched tab — not whichever tab
         # happens to be active — since a session that reaches this point
         # can't be attributed to any tracked pane and guessing "active tab"
         # produces a panel pinned somewhere unrelated to where it belongs.
+        # Try level 1: mount into the Unmatched container
         try:
-            target = self.query_one(f"#{self.BACKGROUND_AGENTS_CONTAINER_ID}")
+            target = self.query_one(f"#{self.UNMATCHED_CONTAINER_ID}")
+            target.mount(panel)
+            return panel
         except Exception:
-            target = None
+            pass
+
+        # Try level 2: mount into the Unmatched TabPane itself
         try:
-            (target or self.query_one("#layout-root")).mount(panel)
+            tc = self.query_one("#tab-content", TabbedContent)
+            pane = tc.get_pane(self.UNMATCHED_TAB_ID)
+            pane.mount(panel)
+            return panel
         except Exception:
-            log.warning(
-                f"_create_fallback_panel: layout-root mount failed for {claude_sid}, "
-                "falling back to status-bar mount"
-            )
-            self.mount(panel, before=self.query_one("#status-bar"))
-        return panel
+            pass
+
+        # Both mount targets failed: drop the panel (cleanup phantom state)
+        # and log. This prevents unmounted panels from inflating background_count.
+        self.panels.pop(claude_sid, None)
+        self._iterm_to_panel.pop(claude_sid, None)
+        log.warning(
+            f"_resolve_panel: failed to mount fallback panel for {claude_sid} "
+            "(both Unmatched container and TabPane unavailable)"
+        )
+        return None
 
     def _is_dashboard_event(self, data: dict) -> bool:
         """Check if an event belongs to the TUI's own (dashboard) session."""
@@ -1021,12 +1049,12 @@ class AutoAcceptTUI(MonitorApp):
             )
             counts[tab_id] = (active_count, total_count)
 
-        # Each tab gets an equal share of the terminal width. +1 accounts for
-        # the always-present Background Agents tab, which isn't in
+        # Each tab gets an equal share of the terminal width. +2 accounts for
+        # the always-present Unmatched and Hand-off tabs, which aren't in
         # _tab_original_names. Subtract 2 for the per-tab padding (1 char
         # left, 1 char right).
         terminal_width = self.size.width
-        per_tab_width = max(6, (terminal_width // (num_tabs + 1)) - 2)
+        per_tab_width = max(6, (terminal_width // (num_tabs + self.FIXED_TAB_COUNT)) - 2)
 
         for tab_id, original_name in self._tab_original_names.items():
             active_count, total_count = counts[tab_id]
@@ -1046,20 +1074,26 @@ class AutoAcceptTUI(MonitorApp):
             except Exception:
                 pass  # Tab may not exist yet during rebuild
 
-        # Background Agents tab: count panels not attributed to any tracked
+        # Unmatched tab: count panels not attributed to any tracked
         # real tab (i.e. every fallback panel, regardless of which case
         # produced it).
         real_tab_sids: set[str] = set()
         for sids in self._tab_session_ids.values():
             real_tab_sids |= sids
-        background_count = sum(1 for sid in self.panels if sid not in real_tab_sids)
+        known_real = (
+            real_tab_sids
+            | self._out_of_scope_iterm_sids
+            | self._hidden_tab_iterm_sids
+            | self._removed_iterm_sids
+        )
+        background_count = sum(1 for sid in self.panels if sid not in known_real)
         bg_suffix = f" [{background_count}]"
-        bg_name = "Background Agents"
+        bg_name = "Unmatched"
         max_bg_name_chars = max(6, per_tab_width - len(bg_suffix))
         if len(bg_name) > max_bg_name_chars:
             bg_name = bg_name[: max(6, max_bg_name_chars - 1)] + "…"
         try:
-            tc.get_tab(self.BACKGROUND_AGENTS_TAB_ID).label = f"{bg_name}{bg_suffix}"
+            tc.get_tab(self.UNMATCHED_TAB_ID).label = f"{bg_name}{bg_suffix}"
         except Exception:
             pass  # Tab may not exist yet during rebuild
 
