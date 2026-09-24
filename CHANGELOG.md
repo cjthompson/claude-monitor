@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-24
+
+### Rebuild the Background Agents tab (P002)
+- Fix the inflated tab badge
+
 ## 2026-08-25
 
 ### Features
