@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 from textual.geometry import Size
 
-from claude_monitor.tui import AutoAcceptTUI
+from claude_monitor.tui import AutoAcceptTUI, ScopeSidsUpdated
 from claude_monitor.widgets import SessionPanel
 
 
@@ -60,7 +60,8 @@ class TestUnmatchedBadgeCounting:
 
         app._tab_original_names = {"tab-real": "proj"}
         app._tab_session_ids = {"tab-real": {"sid-real"}}
-        app.panels = {"sid-hidden": SessionPanel("sid-hidden", "hidden-panel")}
+        app.panels = {"claude-hidden": SessionPanel("claude-hidden", "hidden-panel")}
+        app._fallback_origin_iterm_sids = {"claude-hidden": "sid-hidden"}
         app._hidden_tab_iterm_sids = {"sid-hidden"}
 
         app._update_textual_tab_labels()
@@ -73,7 +74,8 @@ class TestUnmatchedBadgeCounting:
 
         app._tab_original_names = {"tab-real": "proj"}
         app._tab_session_ids = {"tab-real": {"sid-real"}}
-        app.panels = {"sid-oos": SessionPanel("sid-oos", "oos-panel")}
+        app.panels = {"claude-oos": SessionPanel("claude-oos", "oos-panel")}
+        app._fallback_origin_iterm_sids = {"claude-oos": "sid-oos"}
         app._out_of_scope_iterm_sids = {"sid-oos"}
 
         app._update_textual_tab_labels()
@@ -86,7 +88,8 @@ class TestUnmatchedBadgeCounting:
 
         app._tab_original_names = {"tab-real": "proj"}
         app._tab_session_ids = {"tab-real": {"sid-real"}}
-        app.panels = {"sid-removed": SessionPanel("sid-removed", "removed-panel")}
+        app.panels = {"claude-removed": SessionPanel("claude-removed", "removed-panel")}
+        app._fallback_origin_iterm_sids = {"claude-removed": "sid-removed"}
         app._removed_iterm_sids = {"sid-removed"}
 
         app._update_textual_tab_labels()
@@ -103,6 +106,52 @@ class TestUnmatchedBadgeCounting:
         app._tab_original_names = {"tab-real": "proj"}
         app._tab_session_ids = {"tab-real": {"sid-real"}}
         app.panels = {"claude-unmatched-1": SessionPanel("claude-unmatched-1", "fallback")}
+        app._fallback_origin_iterm_sids = {"claude-unmatched-1": "sid-unrecognized"}
+
+        app._update_textual_tab_labels()
+
+        assert tabs["tab-unmatched"].label == "Unmatched [1]"
+
+    def test_scope_update_refreshes_badge_for_existing_fallback(self, app):
+        mock_tc, tabs = _mock_tabbed_content()
+        _wire_query_one(app, mock_tc)
+        app._tab_original_names = {"tab-real": "proj"}
+        app._tab_session_ids = {"tab-real": set()}
+        app.panels = {"claude-oos": SessionPanel("claude-oos", "fallback")}
+        app._iterm_to_panel = {"claude-oos": "claude-oos"}
+        app._fallback_origin_iterm_sids = {"claude-oos": "sid-oos"}
+
+        app._update_textual_tab_labels()
+        assert tabs["tab-unmatched"].label == "Unmatched [1]"
+
+        app.on_scope_sids_updated(ScopeSidsUpdated(all_iterm_sids={"sid-oos"}, scoped_iterm_sids=set()))
+
+        assert tabs["tab-unmatched"].label == "Unmatched [0]"
+        assert "claude-oos" not in app.panels
+        assert "claude-oos" not in app._iterm_to_panel
+        assert "claude-oos" not in app._fallback_origin_iterm_sids
+
+    def test_hidden_fallback_is_removed_and_layout_refreshed(self, app):
+        app.query_one = MagicMock(return_value=MagicMock())
+        app._do_refresh = MagicMock()
+        app._resolve_panel(
+            {"session_id": "claude-hidden", "cwd": "/tmp/proj", "_iterm_session_id": "sid-hidden"}
+        )
+
+        app.on_scope_sids_updated(
+            ScopeSidsUpdated(all_iterm_sids={"sid-hidden"}, scoped_iterm_sids={"sid-hidden"})
+        )
+
+        assert "claude-hidden" not in app.panels
+        assert "claude-hidden" not in app._iterm_to_panel
+        assert "claude-hidden" not in app._fallback_origin_iterm_sids
+        assert "sid-hidden" not in app._hidden_tab_iterm_sids
+        app._do_refresh.assert_called_once()
+
+    def test_unmatched_badge_updates_without_real_tabs(self, app):
+        mock_tc, tabs = _mock_tabbed_content()
+        _wire_query_one(app, mock_tc)
+        app.panels = {"claude-unmatched": SessionPanel("claude-unmatched", "fallback")}
 
         app._update_textual_tab_labels()
 
@@ -125,4 +174,4 @@ class TestPerTabWidthFixedTabCount:
         app._update_textual_tab_labels()
 
         label = tabs["tab-tabreal"].label
-        assert "…" in label, f"expected truncation with fixed-tab-aware divisor, got: {label!r}"
+        assert label == f"{long_name[:17]}… [0/0]"

@@ -370,6 +370,7 @@ class TestSessionEndPanelPruning:
 
         assert "background-finished" not in app.panels
         assert "background-finished" not in app._iterm_to_panel
+        assert "background-finished" not in app._fallback_origin_iterm_sids
 
     def test_session_end_keeps_live_iterm_pane(self, app):
         """A finished Claude session must not delete the still-open iTerm pane."""

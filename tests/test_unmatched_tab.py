@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from textual.widgets import TabbedContent
 
-from claude_monitor.tui import AutoAcceptTUI
+from claude_monitor.tui import AutoAcceptTUI, LayoutChanged
 from claude_monitor.widgets import SessionPanel
 
 
@@ -45,7 +45,7 @@ class TestFallbackPanelUnmatchedMounting:
 
     def test_fallback_panel_mounts_into_unmatched_container(self, app):
         """Level 1: panel mounts into the Unmatched container successfully."""
-        data = _mk_event(claude_sid="c-1", iterm_sid="iterm-unknown-1")
+        data = _mk_event(claude_sid="c-1", iterm_sid="w0t0p0:iterm-unknown-1")
 
         mock_container = MagicMock()
 
@@ -61,6 +61,16 @@ class TestFallbackPanelUnmatchedMounting:
         assert result.session_id == "c-1"
         mock_container.mount.assert_called_once_with(result)
         assert "c-1" in app.panels
+        assert app._fallback_origin_iterm_sids["c-1"] == "iterm-unknown-1"
+
+    def test_fallback_origin_learned_from_later_event(self, app):
+        app.query_one = MagicMock(return_value=MagicMock())
+        app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid=""))
+        assert "c-late" not in app._fallback_origin_iterm_sids
+
+        app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid="w0t0p0:iterm-late"))
+
+        assert app._fallback_origin_iterm_sids["c-late"] == "iterm-late"
 
     def test_fallback_panel_never_mounts_into_layout_root(self, app):
         """Level 2 fallback: when container fails, tries TabPane instead of #layout-root."""
@@ -85,6 +95,7 @@ class TestFallbackPanelUnmatchedMounting:
         mock_tc.get_pane.assert_called_once_with(app.UNMATCHED_TAB_ID)
         mock_pane.mount.assert_called_once_with(result)
         assert "c-2" in app.panels
+        assert app._fallback_origin_iterm_sids["c-2"] == "iterm-unknown-2"
 
     def test_fallback_panel_dropped_when_container_missing(self, app):
         """Level 3: when both container and TabPane fail, panel is dropped."""
@@ -101,6 +112,7 @@ class TestFallbackPanelUnmatchedMounting:
         # Panel was added to tracking, then removed when mount failed
         assert "c-3" not in app.panels
         assert "c-3" not in app._iterm_to_panel
+        assert "c-3" not in app._fallback_origin_iterm_sids
 
     async def test_thirty_panels_keep_min_height(self, app, monkeypatch):
         """Thirty mounted panels retain their height and overflow the tab."""
@@ -125,3 +137,23 @@ class TestFallbackPanelUnmatchedMounting:
 
             assert all(panel.outer_size.height >= 12 for panel in panels)
             assert container.virtual_size.height > container.content_region.height
+
+    async def test_layout_rebuild_discards_fallback_origin(self, app, monkeypatch):
+        monkeypatch.setattr(app, "watch_events", lambda: None)
+        monkeypatch.setattr(app, "watch_layout", lambda: None)
+        monkeypatch.setattr(app, "poll_usage", lambda: None)
+        monkeypatch.setattr(app, "serve_api", lambda: None)
+        monkeypatch.setattr(app, "_start_handoff_polling", lambda: None)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            root = app.query_one("#layout-root")
+            await app._mount_tabs(root, [], None)
+            app._resolve_panel(_mk_event(claude_sid="c-rebuild", iterm_sid="iterm-rebuild"))
+            await pilot.pause()
+            assert app._fallback_origin_iterm_sids["c-rebuild"] == "iterm-rebuild"
+
+            await app.on_layout_changed(LayoutChanged([], None))
+            await pilot.pause()
+
+            assert "c-rebuild" not in app.panels
+            assert "c-rebuild" not in app._fallback_origin_iterm_sids

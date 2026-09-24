@@ -298,6 +298,8 @@ class AutoAcceptTUI(MonitorApp):
         self.settings = load_settings()
         # panels and dashboard are defined in MonitorApp.__init__
         self._iterm_to_panel: dict[str, str] = {}
+        # Fallback panels are keyed by Claude session ID; scope sets use iTerm IDs.
+        self._fallback_origin_iterm_sids: dict[str, str] = {}
         self._rebuilding = False
         self._current_structure_fp = None
         self._current_size_fp = None
@@ -657,6 +659,9 @@ class AutoAcceptTUI(MonitorApp):
             self._iterm_to_panel = {
                 k: v for k, v in self._iterm_to_panel.items() if v in self.panels
             }
+            self._fallback_origin_iterm_sids = {
+                k: v for k, v in self._fallback_origin_iterm_sids.items() if k in self.panels
+            }
         finally:
             self._rebuilding = False
 
@@ -686,8 +691,27 @@ class AutoAcceptTUI(MonitorApp):
         """
         if self._rebuilding:
             return
-        self._out_of_scope_iterm_sids = msg.all_iterm_sids - msg.scoped_iterm_sids
-        self._hidden_tab_iterm_sids = msg.scoped_iterm_sids - self._layout_session_ids
+        out_of_scope_sids = msg.all_iterm_sids - msg.scoped_iterm_sids
+        hidden_tab_sids = msg.scoped_iterm_sids - self._layout_session_ids
+        changed = (
+            out_of_scope_sids != self._out_of_scope_iterm_sids
+            or hidden_tab_sids != self._hidden_tab_iterm_sids
+        )
+        self._out_of_scope_iterm_sids = out_of_scope_sids
+        self._hidden_tab_iterm_sids = hidden_tab_sids
+        hidden_fallback_sids: set[str] = set()
+        pruned_fallback = False
+        for claude_sid, origin_sid in tuple(self._fallback_origin_iterm_sids.items()):
+            if origin_sid in out_of_scope_sids or origin_sid in hidden_tab_sids:
+                self._prune_ended_session(claude_sid)
+                pruned_fallback = True
+                if origin_sid in hidden_tab_sids:
+                    hidden_fallback_sids.add(origin_sid)
+        if hidden_fallback_sids:
+            self._hidden_tab_iterm_sids.difference_update(hidden_fallback_sids)
+            self._do_refresh()
+        if changed or pruned_fallback:
+            self._update_textual_tab_labels()
 
     def on_tab_names_changed(self, msg: TabNamesChanged) -> None:
         """Pick up tabs the user renamed in iTerm2, without a full rebuild."""
@@ -741,7 +765,23 @@ class AutoAcceptTUI(MonitorApp):
 
         # Already mapped this claude session
         if claude_sid in self._iterm_to_panel:
-            return self.panels.get(self._iterm_to_panel[claude_sid])
+            panel_id = self._iterm_to_panel[claude_sid]
+            if panel_id == claude_sid:
+                if iterm_sid:
+                    self._fallback_origin_iterm_sids[claude_sid] = iterm_sid
+                origin_sid = iterm_sid or self._fallback_origin_iterm_sids.get(claude_sid, "")
+                if (
+                    origin_sid in self._removed_iterm_sids
+                    or origin_sid in self._out_of_scope_iterm_sids
+                ):
+                    self._prune_ended_session(claude_sid)
+                    return None
+                if origin_sid in self._hidden_tab_iterm_sids:
+                    self._prune_ended_session(claude_sid)
+                    self._hidden_tab_iterm_sids.discard(origin_sid)
+                    self._do_refresh()
+                    return None
+            return self.panels.get(panel_id)
 
         # Match via _iterm_session_id from the hook
         if iterm_sid and iterm_sid in self.panels:
@@ -801,6 +841,8 @@ class AutoAcceptTUI(MonitorApp):
         try:
             target = self.query_one(f"#{self.UNMATCHED_CONTAINER_ID}")
             target.mount(panel)
+            if iterm_sid:
+                self._fallback_origin_iterm_sids[claude_sid] = iterm_sid
             return panel
         except Exception:
             pass
@@ -810,6 +852,8 @@ class AutoAcceptTUI(MonitorApp):
             tc = self.query_one("#tab-content", TabbedContent)
             pane = tc.get_pane(self.UNMATCHED_TAB_ID)
             pane.mount(panel)
+            if iterm_sid:
+                self._fallback_origin_iterm_sids[claude_sid] = iterm_sid
             return panel
         except Exception:
             pass
@@ -818,6 +862,7 @@ class AutoAcceptTUI(MonitorApp):
         # and log. This prevents unmounted panels from inflating background_count.
         self.panels.pop(claude_sid, None)
         self._iterm_to_panel.pop(claude_sid, None)
+        self._fallback_origin_iterm_sids.pop(claude_sid, None)
         log.warning(
             f"_resolve_panel: failed to mount fallback panel for {claude_sid} "
             "(both Unmatched container and TabPane unavailable)"
@@ -836,6 +881,7 @@ class AutoAcceptTUI(MonitorApp):
         panel_id = self._iterm_to_panel.pop(claude_sid, None)
         if panel_id != claude_sid:
             return
+        self._fallback_origin_iterm_sids.pop(claude_sid, None)
         panel = self.panels.pop(claude_sid, None)
         if panel and panel.is_mounted:
             panel.remove()
@@ -1025,17 +1071,12 @@ class AutoAcceptTUI(MonitorApp):
         is no native wrapping layout. Implementing a custom wrapping tab bar would
         require replacing TabbedContent entirely with a custom widget.
         """
-        if not self._tab_original_names:
-            return
         try:
             tc = self.query_one("#tab-content", TabbedContent)
         except Exception:
             return  # No TabbedContent present (single-tab mode)
 
         num_tabs = len(self._tab_original_names)
-        if num_tabs == 0:
-            return
-
         # Compute active/total counts for each tab (same as _compute_tab_titles)
         counts: dict[str, tuple] = {}
         for tab_id, original_name in self._tab_original_names.items():
@@ -1086,7 +1127,12 @@ class AutoAcceptTUI(MonitorApp):
             | self._hidden_tab_iterm_sids
             | self._removed_iterm_sids
         )
-        background_count = sum(1 for sid in self.panels if sid not in known_real)
+        background_count = sum(
+            1
+            for sid in self.panels
+            if sid not in known_real
+            and self._fallback_origin_iterm_sids.get(sid) not in known_real
+        )
         bg_suffix = f" [{background_count}]"
         bg_name = "Unmatched"
         max_bg_name_chars = max(6, per_tab_width - len(bg_suffix))
@@ -1108,8 +1154,6 @@ class AutoAcceptTUI(MonitorApp):
         Coalesces rapid calls: if a call is already running, mark pending and return.
         The running call will re-check and apply after it finishes.
         """
-        if not self._tab_original_names:
-            return
         if not self._tab_title_lock.acquire(blocking=False):
             # Another worker is running — mark pending so it re-runs after finishing
             self._tab_title_pending = True

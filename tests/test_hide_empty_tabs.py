@@ -342,6 +342,20 @@ class TestHiddenTabRefresh:
         assert "c-normal" in app.panels
         app._do_refresh.assert_not_called()
 
+    def test_cached_fallback_is_removed_when_later_event_identifies_hidden_pane(self, app):
+        app._do_refresh = MagicMock()
+        app.query_one = MagicMock(return_value=MagicMock())
+        app._resolve_panel(_mk_event(claude_sid="c-hidden", iterm_sid=""))
+        app._hidden_tab_iterm_sids = {"iterm-hidden"}
+
+        result = app._resolve_panel(_mk_event(claude_sid="c-hidden", iterm_sid="iterm-hidden"))
+
+        assert result is None
+        assert "c-hidden" not in app.panels
+        assert "c-hidden" not in app._iterm_to_panel
+        assert "c-hidden" not in app._fallback_origin_iterm_sids
+        app._do_refresh.assert_called_once()
+
     def test_hidden_and_out_of_scope_are_distinct(self, app):
         """out-of-scope sids are dropped silently; hidden-tab sids trigger a
         refresh. The two collections must not be conflated."""
