@@ -134,6 +134,41 @@ class SessionPanel(Static):
         except NoMatches:
             log.debug(f"SessionPanel.write: RichLog query failed for session {self.session_id}")
 
+    def absorb_activity_from(self, other: "SessionPanel") -> None:
+        """Keep activity recorded before a session gained its real iTerm pane."""
+        self.active_agents = {**other.active_agents, **self.active_agents}
+        self.accept_count += other.accept_count
+        self.total_agents_completed += other.total_agents_completed
+        for tool, count in other.tool_counts.items():
+            self.tool_counts[tool] = self.tool_counts.get(tool, 0) + count
+        self._start_time = min(self._start_time, other._start_time)
+        if other._last_event_time and (
+            self._last_event_time is None or other._last_event_time > self._last_event_time
+        ):
+            self._last_event_time = other._last_event_time
+            self._state = other._state
+        if other._timeout_origin and (
+            self._timeout_origin is None or other._timeout_origin > self._timeout_origin
+        ):
+            self._timeout_origin = other._timeout_origin
+            self._pending_timeout = other._pending_timeout
+        if other._pending_deferred_at and (
+            self._pending_deferred_at is None
+            or other._pending_deferred_at > self._pending_deferred_at
+        ):
+            self._pending_deferred_at = other._pending_deferred_at
+
+        self._event_log = (other._event_log + self._event_log)[-MAX_LOG_LINES:]
+        try:
+            log_widget = self.query_one(RichLog)
+        except NoMatches:
+            pass
+        else:
+            log_widget.clear()
+            for line in self._event_log:
+                log_widget.write(line)
+        self._update_status()
+
     def touch(self) -> None:
         """Mark this panel as having received activity."""
         self._last_event_time = time.time()

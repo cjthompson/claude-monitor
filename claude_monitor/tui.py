@@ -767,6 +767,13 @@ class AutoAcceptTUI(MonitorApp):
         if claude_sid in self._iterm_to_panel:
             panel_id = self._iterm_to_panel[claude_sid]
             if panel_id == claude_sid:
+                if iterm_sid and iterm_sid != claude_sid and iterm_sid in self.panels:
+                    fallback = self.panels.get(claude_sid)
+                    if fallback is not None:
+                        self.panels[iterm_sid].absorb_activity_from(fallback)
+                    self._prune_ended_session(claude_sid)
+                    self._iterm_to_panel[claude_sid] = iterm_sid
+                    return self.panels[iterm_sid]
                 if iterm_sid:
                     self._fallback_origin_iterm_sids[claude_sid] = iterm_sid
                 origin_sid = iterm_sid or self._fallback_origin_iterm_sids.get(claude_sid, "")

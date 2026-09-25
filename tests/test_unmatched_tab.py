@@ -9,7 +9,7 @@ Regression tests for the new three-level fallback mount strategy:
 from unittest.mock import MagicMock
 
 import pytest
-from textual.widgets import TabbedContent
+from textual.widgets import TabbedContent, TabPane
 
 from claude_monitor.tui import AutoAcceptTUI, LayoutChanged
 from claude_monitor.widgets import SessionPanel
@@ -71,6 +71,20 @@ class TestFallbackPanelUnmatchedMounting:
         app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid="w0t0p0:iterm-late"))
 
         assert app._fallback_origin_iterm_sids["c-late"] == "iterm-late"
+
+    def test_later_real_pane_replaces_cached_fallback(self, app):
+        app.query_one = MagicMock(return_value=MagicMock())
+        fallback = app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid=""))
+        real_panel = SessionPanel("iterm-live", "real pane")
+        app.panels["iterm-live"] = real_panel
+
+        result = app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid="iterm-live"))
+
+        assert result is real_panel
+        assert result is not fallback
+        assert "c-late" not in app.panels
+        assert app._iterm_to_panel["c-late"] == "iterm-live"
+        assert "c-late" not in app._fallback_origin_iterm_sids
 
     def test_fallback_panel_never_mounts_into_layout_root(self, app):
         """Level 2 fallback: when container fails, tries TabPane instead of #layout-root."""
@@ -157,3 +171,47 @@ class TestFallbackPanelUnmatchedMounting:
 
             assert "c-rebuild" not in app.panels
             assert "c-rebuild" not in app._fallback_origin_iterm_sids
+
+    async def test_later_real_pane_removes_mounted_fallback_and_badge(self, app, monkeypatch):
+        monkeypatch.setattr(app, "watch_events", lambda: None)
+        monkeypatch.setattr(app, "watch_layout", lambda: None)
+        monkeypatch.setattr(app, "poll_usage", lambda: None)
+        monkeypatch.setattr(app, "serve_api", lambda: None)
+        monkeypatch.setattr(app, "_start_handoff_polling", lambda: None)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            root = app.query_one("#layout-root")
+            await app._mount_tabs(root, [], None)
+            tc = app.query_one("#tab-content", TabbedContent)
+            tc.active = app.UNMATCHED_TAB_ID
+            fallback = app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid=""))
+            await pilot.pause()
+            assert fallback is not None and fallback.is_mounted
+            fallback.write("[00:00] fallback activity")
+            fallback.accept_count = 2
+            fallback.active_agents["agent-1"] = "Explore"
+            fallback.touch()
+
+            real_panel = SessionPanel("iterm-live", "real pane")
+            await tc.add_pane(TabPane("Real", real_panel, id="tab-real"))
+            real_panel.write("[00:01] real pane activity")
+            real_panel.accept_count = 1
+            app.panels["iterm-live"] = real_panel
+            app._tab_original_names["real"] = "Real"
+            app._tab_session_ids["real"] = {"iterm-live"}
+
+            result = app._resolve_panel(_mk_event(claude_sid="c-late", iterm_sid="iterm-live"))
+            app._update_textual_tab_labels()
+            await pilot.pause()
+
+            assert result is real_panel
+            assert fallback.parent is None
+            assert fallback not in app.query(SessionPanel)
+            assert "c-late" not in app.panels
+            assert str(tc.get_tab(app.UNMATCHED_TAB_ID).label) == "Unmatched [0]"
+            assert real_panel._event_log == [
+                "[00:00] fallback activity",
+                "[00:01] real pane activity",
+            ]
+            assert real_panel.accept_count == 3
+            assert real_panel.active_agents == {"agent-1": "Explore"}
