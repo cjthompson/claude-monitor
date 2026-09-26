@@ -473,6 +473,83 @@ async def test_show_session_summary_from_context_menu_targets_exact_session(
         capture_worker.assert_not_called()
 
 
+async def test_manual_transcript_picker_loads_only_selected_history(
+    app_fixture, monkeypatch, tmp_path
+):
+    from textual.widgets import Input, ListView, Markdown
+
+    from claude_monitor import transcript
+    from claude_monitor.screens.transcript_picker import TranscriptPickerScreen
+
+    root = tmp_path / "projects"
+    project = root / "-tmp-proj"
+    project.mkdir(parents=True)
+    (project / "historic-session.jsonl").write_text('{"cwd":"/tmp/proj"}\n')
+    (project / "other-session.jsonl").write_text('{"cwd":"/tmp/proj"}\n')
+    monkeypatch.setattr(transcript, "CLAUDE_PROJECTS_DIR", str(root))
+    app_fixture.settings.handoff_enabled = True
+    entries = []
+    monkeypatch.setattr(handoff_screen.HandoffPanel, "_load_entries", lambda self: entries)
+    monkeypatch.setattr(
+        "claude_monitor.handoff.render_entry", lambda entry: f"# {entry.session_id}"
+    )
+    calls = []
+
+    def capture(session_id, cwd, **kwargs):
+        calls.append((session_id, cwd, kwargs))
+        entry = _entry(
+            session_id=session_id,
+            project_path=cwd,
+            project_slug="-tmp-proj",
+        )
+        entries.append(entry)
+        return entry
+
+    monkeypatch.setattr("claude_monitor.handoff.capture", capture)
+    monkeypatch.setattr("claude_monitor.handoff.load_entry", lambda *a, **k: None)
+
+    async with app_fixture.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.click("#load-old-transcript")
+        await pilot.pause()
+        picker = next(
+            screen
+            for screen in app_fixture.screen_stack
+            if isinstance(screen, TranscriptPickerScreen)
+        )
+        picker.query_one("#transcript-query", Input).value = "historic"
+        await pilot.click("#transcript-search")
+        await pilot.pause()
+        results = picker.query_one("#transcript-results", ListView)
+        assert len(results.children) == 1
+        results.focus()
+        results.index = 0
+        await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            if calls:
+                break
+        await pilot.pause()
+
+        panel = app_fixture.query_one(handoff_screen.HandoffPanel)
+        assert panel.selected_entry.session_id == "historic-session"
+        assert "# historic-session" in panel.query_one("#handoff-markdown", Markdown).source
+        assert calls == [
+            (
+                "historic-session",
+                "/tmp/proj",
+                {
+                    "transcript_path": str(project / "historic-session.jsonl"),
+                    "reason": "manual",
+                    "with_llm": False,
+                    "settings": app_fixture.settings,
+                    "event_stats": {},
+                    "persist": False,
+                },
+            )
+        ]
+
+
 async def test_show_session_summary_missing_session_has_exact_empty_state(
     app_fixture, inject_message, monkeypatch
 ):

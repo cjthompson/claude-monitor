@@ -10,10 +10,14 @@ from __future__ import annotations
 import logging
 import time
 
+from textual import work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import ListItem, ListView, Markdown, Static
+from textual.widgets import Button, ListItem, ListView, Markdown, Static
+
+from claude_monitor import transcript
+from claude_monitor.screens.transcript_picker import TranscriptPickerScreen
 
 log = logging.getLogger(__name__)
 
@@ -78,10 +82,13 @@ class HandoffPanel(Horizontal):
     HandoffPanel {
         height: 1fr;
     }
-    HandoffPanel #handoff-list {
+    HandoffPanel #handoff-browser {
         width: 40%;
         min-width: 24;
         border-right: solid $primary;
+    }
+    HandoffPanel #handoff-list {
+        height: 1fr;
     }
     HandoffPanel #handoff-detail {
         width: 1fr;
@@ -97,6 +104,7 @@ class HandoffPanel(Horizontal):
         self._entries: list = []
         self._selected_session_id: str | None = None
         self._targeted_session_id: str | None = None
+        self._preview_entry = None
 
     @property
     def selected_entry(self):
@@ -115,9 +123,57 @@ class HandoffPanel(Horizontal):
         return self._entries[index]
 
     def compose(self) -> ComposeResult:
-        yield ListView(id="handoff-list")
+        with Vertical(id="handoff-browser"):
+            yield Button("Load old transcript", id="load-old-transcript")
+            yield ListView(id="handoff-list")
         with VerticalScroll(id="handoff-detail"):
             yield Markdown(EMPTY_MESSAGE, id="handoff-markdown")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "load-old-transcript":
+            self.app.push_screen(TranscriptPickerScreen(), self._load_selected_transcript)
+
+    def _load_selected_transcript(self, candidate: transcript.TranscriptCandidate | None) -> None:
+        if candidate is None:
+            return
+        self._load_transcript_worker(candidate)
+
+    @work(thread=True, exclusive=True, group="old-transcript", exit_on_error=False)
+    def _load_transcript_worker(self, candidate: transcript.TranscriptCandidate) -> None:
+        """Read only the selected transcript outside Textual's event loop."""
+        from claude_monitor import handoff
+
+        try:
+            cwd = transcript.selected_transcript_cwd(candidate)
+            entry = handoff.load_entry(candidate.session_id, slug=handoff.project_slug(cwd))
+            if entry is None:
+                entry = handoff.capture(
+                    candidate.session_id,
+                    cwd,
+                    transcript_path=str(candidate.path),
+                    reason="manual",
+                    with_llm=False,
+                    settings=getattr(self.app, "settings", None),
+                    event_stats={},
+                    persist=False,
+                )
+        except (OSError, ValueError) as exc:
+            self.app.call_from_thread(
+                self.app.notify, f"Could not load transcript: {exc}", severity="error"
+            )
+            return
+        if entry is None:
+            self.app.call_from_thread(
+                self.app.notify,
+                "Could not load a hand-off from this transcript.",
+                severity="error",
+            )
+            return
+        self.app.call_from_thread(self._show_loaded_transcript, entry)
+
+    def _show_loaded_transcript(self, entry) -> None:
+        self._preview_entry = entry
+        self.refresh_entries(select_session_id=entry.session_id)
 
     def on_mount(self) -> None:
         self.refresh_entries()
@@ -144,6 +200,10 @@ class HandoffPanel(Horizontal):
         except Exception as e:  # noqa: BLE001 - a broken store must not kill the tab
             log.warning(f"HandoffPanel: failed to load entries: {e}")
             self._entries = []
+        if self._preview_entry is not None and not any(
+            entry.session_id == self._preview_entry.session_id for entry in self._entries
+        ):
+            self._entries.append(self._preview_entry)
 
         target_index = None
         if self._targeted_session_id:

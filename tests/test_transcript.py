@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -234,3 +235,70 @@ def test_large_file_tail_path(tmp_path):
     # first_user_prompt / started_at come from the head chunk.
     assert facts.first_user_prompt == "First prompt of a very long session"
     assert facts.started_at is not None
+
+
+def test_list_transcripts_searches_metadata_only_and_limits_results(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    alpha = root / "-tmp-alpha"
+    beta = root / "-tmp-beta"
+    alpha.mkdir(parents=True)
+    beta.mkdir()
+    older = alpha / "old-session.jsonl"
+    newer = alpha / "new-session.jsonl"
+    other = beta / "other-session.jsonl"
+    for path in (older, newer, other):
+        path.write_text("not valid JSON\n")
+    os.utime(older, (10, 10))
+    os.utime(newer, (30, 30))
+    os.utime(other, (20, 20))
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("outside\n")
+    (alpha / "linked-session.jsonl").symlink_to(outside)
+    monkeypatch.setattr(transcript, "CLAUDE_PROJECTS_DIR", str(root))
+    monkeypatch.setattr(
+        transcript,
+        "_read_head_lines",
+        lambda *args: pytest.fail("catalog read transcript contents"),
+    )
+
+    assert [item.session_id for item in transcript.list_transcripts("alpha", limit=1)] == [
+        "new-session"
+    ]
+    assert [item.session_id for item in transcript.list_transcripts("old-session")] == [
+        "old-session"
+    ]
+    assert [item.session_id for item in transcript.list_transcripts()] == [
+        "new-session",
+        "other-session",
+        "old-session",
+    ]
+
+
+def test_selected_transcript_reads_only_valid_bounded_head(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    project = root / "-tmp-alpha"
+    project.mkdir(parents=True)
+    selected = project / "old-session.jsonl"
+    selected.write_text(json.dumps({"cwd": "/tmp/alpha", "type": "user"}) + "\n")
+    other = project / "other-session.jsonl"
+    other.write_text("not JSON\n")
+    monkeypatch.setattr(transcript, "CLAUDE_PROJECTS_DIR", str(root))
+    candidates = transcript.list_transcripts()
+    old = next(item for item in candidates if item.session_id == "old-session")
+
+    assert transcript.selected_transcript_cwd(old) == "/tmp/alpha"
+    assert other.read_text() == "not JSON\n"
+    selected.unlink()
+    with pytest.raises(ValueError, match="unavailable"):
+        transcript.selected_transcript_cwd(old)
+
+
+def test_selected_transcript_rejects_mismatched_project(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    project = root / "-tmp-alpha"
+    project.mkdir(parents=True)
+    (project / "old-session.jsonl").write_text('{"cwd":"/tmp/other"}\n')
+    monkeypatch.setattr(transcript, "CLAUDE_PROJECTS_DIR", str(root))
+
+    with pytest.raises(ValueError, match="project path"):
+        transcript.selected_transcript_cwd(transcript.list_transcripts()[0])

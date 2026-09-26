@@ -11,6 +11,7 @@ useful for session hand-off summaries (see ``TranscriptFacts``).
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import os
@@ -50,6 +51,89 @@ class TranscriptFacts:
     started_at: float | None = None
     ended_at: float | None = None
     source_jsonl_path: str | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptCandidate:
+    """File metadata for one manually selectable Claude transcript."""
+
+    session_id: str
+    project_slug: str
+    path: Path
+    modified_at: float
+
+
+def list_transcripts(query: str = "", *, limit: int = 100) -> list[TranscriptCandidate]:
+    """Find recent matching transcripts without reading their contents."""
+    if limit <= 0:
+        return []
+    needle = query.strip().casefold()
+
+    def candidates():
+        try:
+            with os.scandir(CLAUDE_PROJECTS_DIR) as projects:
+                for project in projects:
+                    if not project.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        with os.scandir(project.path) as files:
+                            for file in files:
+                                if not file.name.endswith(".jsonl") or not file.is_file(
+                                    follow_symlinks=False
+                                ):
+                                    continue
+                                session_id = file.name[:-6]
+                                if not _SAFE_SESSION_ID.fullmatch(session_id):
+                                    continue
+                                if (
+                                    needle
+                                    and needle not in project.name.casefold()
+                                    and needle not in session_id.casefold()
+                                ):
+                                    continue
+                                try:
+                                    modified_at = file.stat(follow_symlinks=False).st_mtime
+                                except OSError:
+                                    continue
+                                yield TranscriptCandidate(
+                                    session_id, project.name, Path(file.path), modified_at
+                                )
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+    return heapq.nlargest(
+        min(limit, 200), candidates(), key=lambda item: (item.modified_at, str(item.path))
+    )
+
+
+def selected_transcript_cwd(candidate: TranscriptCandidate) -> str:
+    """Read the selected transcript's bounded head to identify its project."""
+    path = candidate.path
+    if (
+        path.name != f"{candidate.session_id}.jsonl"
+        or not _SAFE_SESSION_ID.fullmatch(candidate.session_id)
+        or path.parent.name != candidate.project_slug
+        or path.parent.parent.resolve() != Path(CLAUDE_PROJECTS_DIR).resolve()
+        or path.is_symlink()
+        or not _within_projects_dir(path)
+        or not path.is_file()
+    ):
+        raise ValueError("selected transcript is unavailable")
+    for line in _read_head_lines(path, _HEAD_CHUNK_SIZE):
+        try:
+            data = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        cwd = data.get("cwd") if isinstance(data, dict) else None
+        if (
+            isinstance(cwd, str)
+            and os.path.isabs(cwd)
+            and _slugify_cwd(os.path.normpath(cwd)) == candidate.project_slug
+        ):
+            return cwd
+    raise ValueError("selected transcript has no matching project path")
 
 
 def find_transcript(session_id: str, cwd: str, hint: str | None = None) -> Path | None:

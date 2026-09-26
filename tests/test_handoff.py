@@ -218,6 +218,28 @@ def test_capture_with_transcript_facts(tmp_path):
     assert loaded.source_jsonl_path == "/tmp/source-session.jsonl"
 
 
+def test_capture_preview_does_not_replace_saved_entry(tmp_path):
+    _install_fake_transcript_module(FakeFacts(ai_title="Preview", ended_at=1.0))
+    saved = handoff.HandoffEntry(
+        session_id="sess-preview",
+        project_path=str(tmp_path),
+        project_slug=handoff.project_slug(str(tmp_path)),
+        title="Saved summary",
+        summary={"goal": "LLM summary"},
+    )
+    handoff._save_entry(saved)
+
+    with mock.patch.object(handoff, "_git_info", return_value=(None, False, 0)):
+        preview = handoff.capture("sess-preview", str(tmp_path), event_stats={}, persist=False)
+
+    assert preview is not None
+    assert preview.title == "Preview"
+    assert handoff.load_entry("sess-preview", slug=saved.project_slug).summary == {
+        "goal": "LLM summary"
+    }
+    assert not os.path.exists(handoff.DIGEST_FILE)
+
+
 def test_capture_derives_event_stats_from_event_log(tmp_path, monkeypatch):
     _install_fake_transcript_module(FakeFacts(ai_title="T"))
     events_file = tmp_path / "events.jsonl"

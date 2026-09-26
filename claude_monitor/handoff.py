@@ -667,6 +667,7 @@ def capture(
     settings=None,
     event_stats: dict | None = None,
     max_seconds: float | None = None,
+    persist: bool = True,
 ) -> HandoffEntry | None:
     """Capture a hand-off entry for *session_id* running in *cwd*.
 
@@ -676,7 +677,8 @@ def capture(
     the entry, prunes old entries for the project, and regenerates markdown
     digests. When *max_seconds* is provided, the remaining budget limits
     optional Git, pruning, and Markdown work; persistence remains best-effort
-    so a timed-out capture can still save its heuristic entry.
+    so a timed-out capture can still save its heuristic entry. With
+    ``persist=False``, return a temporary preview without store or project writes.
     Returns None only if there is genuinely nothing to record.
     """
     deadline = time.monotonic() + max(0.0, max_seconds) if max_seconds is not None else None
@@ -771,6 +773,9 @@ def capture(
             entry.summary = summary
             entry.summary_model = getattr(settings, "handoff_model", "") or None
             entry.summary_generated_at = time.time()
+
+    if not persist:
+        return entry
 
     _save_entry(entry)
 
