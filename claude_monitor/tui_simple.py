@@ -278,6 +278,8 @@ class SimpleTUI(MonitorApp):
         if not sid:
             self.notify("No live session is selected.", severity="warning")
             return None
+        if sid not in self._session_meta:
+            self._load_manual_handoff_meta(session_id=sid)
         meta = self._session_meta.get(sid)
         panel = self.panels.get(sid)
         if not meta or not meta.get("live") or panel is None:

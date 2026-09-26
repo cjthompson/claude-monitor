@@ -70,6 +70,7 @@ log = logging.getLogger(__name__)
 # Bound for MonitorApp._call_from_thread_bounded / call_from_thread_async.
 # App.call_from_thread has no timeout; a wedged message loop blocks forever.
 _CALL_FROM_THREAD_TIMEOUT = 5.0
+_HANDOFF_PANEL_GRACE_SECS = 60.0
 
 
 @dataclass(frozen=True)
@@ -241,9 +242,7 @@ class MonitorApp(App):
         if self._loop is None:
             return default
         if self._thread_id == threading.get_ident():
-            raise RuntimeError(
-                "call_from_thread_async must run in a different thread from the app"
-            )
+            raise RuntimeError("call_from_thread_async must run in a different thread from the app")
         callback_with_args = partial(fn, *args)
 
         async def run_callback():
@@ -665,6 +664,45 @@ class MonitorApp(App):
     # Hand-off summaries
     # ------------------------------------------------------------------
 
+    def _load_manual_handoff_meta(
+        self, *, session_id: str | None = None, pane_id: str | None = None
+    ) -> None:
+        """Look up historical metadata only after an explicit manual action."""
+        matches: dict[str, dict] = {}
+        try:
+            with open(EVENTS_FILE, encoding="utf-8") as events:
+                for line in events:
+                    try:
+                        data = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    sid = data.get("session_id")
+                    if (
+                        not isinstance(sid, str)
+                        or not sid
+                        or (session_id is not None and sid != session_id)
+                    ):
+                        continue
+                    event_pane = extract_iterm_session_id(data.get("_iterm_session_id") or "")
+                    if pane_id is not None and event_pane != pane_id:
+                        continue
+                    meta = matches.setdefault(sid, {"session_id": sid})
+                    for key in ("cwd", "transcript_path", "_iterm_session_id", "_timestamp"):
+                        if data.get(key):
+                            meta[key] = data[key]
+                    meta["hook_event_name"] = data.get("hook_event_name")
+        except OSError:
+            return
+        for sid, data in matches.items():
+            if data.get("hook_event_name") == "SessionEnd":
+                continue
+            if self._session_meta.get(sid, {}).get("observed_this_run"):
+                continue
+            data["_replay"] = True
+            self._record_session_meta(data)
+
     def _record_session_meta(self, data: dict) -> None:
         """Remember cwd/transcript/last-activity for a hook event's session.
 
@@ -675,6 +713,11 @@ class MonitorApp(App):
             if not sid:
                 return
             meta = self._session_meta.setdefault(sid, {})
+            replay = bool(data.get("_replay"))
+            if replay and meta.get("observed_this_run"):
+                return
+            if not replay:
+                meta["observed_this_run"] = True
             meta.setdefault("live", True)
             meta.setdefault("input_wait_unsafe", False)
             meta.setdefault("auto_rotation_armed", True)
@@ -691,11 +734,38 @@ class MonitorApp(App):
                 meta["transcript_path"] = transcript_path
             event_ts = data.get("_timestamp") or time.time()
             event_name = data.get("hook_event_name") or ""
+            if not replay and event_name != "SessionEnd":
+                meta["live"] = True
+                meta["ended"] = False
             meta["last_event_ts"] = event_ts
             meta["last_event_name"] = event_name
             pane_id = extract_iterm_session_id(data.get("_iterm_session_id") or "")
             if pane_id:
                 meta["iterm_session_id"] = pane_id
+                if (
+                    not replay
+                    and getattr(self.settings, "handoff_auto_rotate_enabled", False)
+                    and not meta.get("pending_checked")
+                ):
+                    from claude_monitor import handoff
+
+                    meta["pending_checked"] = True
+                    pending = handoff.find_pending_idle(
+                        iterm_session_id=pane_id, originating_session_id=sid
+                    )
+                    if pending is not None:
+                        meta.update(
+                            pending=pending,
+                            auto_rotation_fired=True,
+                            auto_rotation_armed=False,
+                            auto_rotation_deferred=True,
+                        )
+            if replay:
+                # Historical events support manual capture, but have no idle side effects.
+                if event_name == "SessionEnd":
+                    meta["live"] = False
+                    meta["ended"] = True
+                return
             waiting = (
                 (
                     event_name == "Notification"
@@ -730,8 +800,7 @@ class MonitorApp(App):
             ):
                 meta["waiting_for_input"] = False
                 meta["prompt_ready"] = True
-                if not getattr(self, "_rehydrating_handoff", False):
-                    self._deliver_deferred_idle_rotation(sid)
+                self._deliver_deferred_idle_rotation(sid)
             if event_name == "SessionEnd":
                 meta["live"] = False
                 meta["input_wait_unsafe"] = False
@@ -758,38 +827,6 @@ class MonitorApp(App):
         if data.get("_ask_timeout"):
             return False
         return True
-
-    def _rehydrate_handoff_meta(self) -> None:
-        """Rebuild lifecycle state from the complete event log before polling."""
-        from claude_monitor import handoff
-
-        self._rehydrating_handoff = True
-        try:
-            with open(EVENTS_FILE, encoding="utf-8") as events_file:
-                for raw_line in events_file:
-                    try:
-                        data = json.loads(raw_line)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                    if isinstance(data, dict):
-                        self._record_session_meta(data)
-        except OSError:
-            return
-        finally:
-            self._rehydrating_handoff = False
-        for sid, meta in self._session_meta.items():
-            if meta.get("ended") or not meta.get("iterm_session_id"):
-                continue
-            pending = handoff.find_pending_idle(
-                iterm_session_id=meta["iterm_session_id"], originating_session_id=sid
-            )
-            if pending is not None:
-                meta.update(
-                    pending=pending,
-                    auto_rotation_fired=True,
-                    auto_rotation_deferred=bool(meta.get("waiting_for_input")),
-                    auto_rotation_armed=False,
-                )
 
     def _stage_idle_rotation(self, session_id: str) -> None:
         from claude_monitor import handoff
@@ -897,8 +934,15 @@ class MonitorApp(App):
         next_due = None
         for sid, meta in list(self._session_meta.items()):
             if meta.get("ended") or not meta.get("live", True):
+                self._session_meta.pop(sid, None)
+                continue
+            if not meta.get("observed_this_run"):
                 continue
             last_event = meta.get("last_event_ts") or 0
+            if sid not in self.panels and meta.get("iterm_session_id") not in self.panels:
+                if last_event and now - last_event >= _HANDOFF_PANEL_GRACE_SECS:
+                    self._session_meta.pop(sid, None)
+                continue
             if not last_event:
                 continue
             try:
@@ -946,7 +990,6 @@ class MonitorApp(App):
             self.settings, "handoff_auto_rotate_enabled", False
         ):
             return
-        self._rehydrate_handoff_meta()
         self._handoff_polling = True
         self.poll_handoff()
 

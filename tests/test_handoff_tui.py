@@ -74,8 +74,12 @@ class _FakeApp:
         defaults.update(settings)
         self.settings = SimpleNamespace(**defaults)
         self._session_meta = {}
+        self.panels = {}
         self._handoff_polling = False
         self._record_session_meta = types.MethodType(MonitorApp._record_session_meta, self)
+        self._load_manual_handoff_meta = types.MethodType(
+            MonitorApp._load_manual_handoff_meta, self
+        )
         self._capture_handoff_entry = types.MethodType(MonitorApp._capture_handoff_entry, self)
         self._capture_handoff = types.MethodType(MonitorApp._capture_handoff, self)
         self._is_substantive_handoff_activity = types.MethodType(
@@ -87,7 +91,6 @@ class _FakeApp:
         )
         self._cancel_idle_rotation = types.MethodType(MonitorApp._cancel_idle_rotation, self)
         self._poll_handoff_once = types.MethodType(MonitorApp._poll_handoff_once, self)
-        self._rehydrate_handoff_meta = types.MethodType(MonitorApp._rehydrate_handoff_meta, self)
         self._start_handoff_polling = types.MethodType(MonitorApp._start_handoff_polling, self)
         self.poll_handoff = MagicMock()
 
@@ -114,6 +117,76 @@ class TestRecordSessionMeta:
         app = _FakeApp()
         app._record_session_meta({"cwd": "/tmp"})
         assert app._session_meta == {}
+
+    def test_replayed_event_does_not_enroll_idle_capture(self):
+        app = _FakeApp(handoff_capture_idle_mins=5)
+        app._record_session_meta(
+            {
+                "session_id": "old-session",
+                "cwd": "/tmp/proj",
+                "_timestamp": 1.0,
+                "_replay": True,
+            }
+        )
+        assert app._session_meta["old-session"]["cwd"] == "/tmp/proj"
+        assert not app._session_meta["old-session"].get("observed_this_run")
+        app.panels["old-session"] = object()
+        app._poll_handoff_once(1_000_000.0)
+        assert not app._session_meta["old-session"].get("last_capture_ts")
+
+    def test_replayed_session_end_is_not_live_for_manual_capture(self):
+        app = _FakeApp()
+        app._record_session_meta(
+            {"session_id": "old", "cwd": "/tmp/proj", "_replay": True, "_timestamp": 1.0}
+        )
+        app._record_session_meta(
+            {"session_id": "old", "hook_event_name": "SessionEnd", "_replay": True}
+        )
+        assert app._session_meta["old"]["ended"] is True
+        assert app._session_meta["old"]["live"] is False
+
+    def test_manual_lookup_restores_only_requested_open_pane(self, tmp_path, monkeypatch):
+        events = tmp_path / "events.jsonl"
+        events.write_text(
+            '{"session_id":"old","cwd":"/tmp/proj","_iterm_session_id":"pane",'
+            '"transcript_path":"/tmp/old.jsonl","_timestamp":1}\n'
+            '{"session_id":"other","cwd":"/tmp/other","_iterm_session_id":"other-pane"}\n'
+        )
+        monkeypatch.setattr("claude_monitor.app_base.EVENTS_FILE", str(events))
+        app = _FakeApp(handoff_capture_idle_mins=1)
+
+        app._load_manual_handoff_meta(pane_id="pane")
+
+        assert set(app._session_meta) == {"old"}
+        assert app._session_meta["old"]["transcript_path"] == "/tmp/old.jsonl"
+        assert not app._session_meta["old"].get("observed_this_run")
+
+    def test_fresh_event_restores_exact_pending_rotation(self, monkeypatch):
+        app = _FakeApp(handoff_auto_rotate_enabled=True)
+        pending = SimpleNamespace(
+            entry_session_id="s1",
+            project_slug="-tmp-proj",
+            rotation_mode="clear",
+            target_iterm_session_id="pane",
+        )
+        finder = MagicMock(return_value=pending)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr("claude_monitor.handoff.find_pending_idle", finder)
+        monkeypatch.setattr("claude_monitor.handoff.load_entry", lambda *a: _entry())
+        monkeypatch.setattr("claude_monitor.handoff.rotation_command", lambda *a: "rotate")
+        monkeypatch.setattr("claude_monitor.app_base.KeystrokeSender.send_text", sender)
+
+        app._record_session_meta(
+            {
+                "session_id": "s1",
+                "cwd": "/tmp/proj",
+                "_iterm_session_id": "pane",
+                "hook_event_name": "Stop",
+            }
+        )
+
+        finder.assert_called_once_with(iterm_session_id="pane", originating_session_id="s1")
+        sender.assert_called_once_with("pane", "rotate")
 
     def test_later_event_does_not_clear_known_cwd(self):
         app = _FakeApp()
@@ -214,6 +287,7 @@ class TestCaptureHandoff:
 class TestAutomaticRotation:
     def test_waiting_defers_then_stop_sends_once(self, monkeypatch):
         app = _FakeApp(handoff_auto_rotate_enabled=True, handoff_auto_rotate_idle_mins=1)
+        app.panels["pane"] = object()
         app._record_session_meta(
             {
                 "session_id": "s1",
@@ -253,7 +327,50 @@ class TestAutomaticRotation:
         assert sender.call_count == 1
 
 
+class TestIdleCapture:
+    def test_captures_only_open_observed_sessions_and_rearms_after_activity(self, monkeypatch):
+        app = _FakeApp(handoff_capture_idle_mins=1)
+        app.panels["open-pane"] = object()
+        for sid, pane in (("open", "open-pane"), ("closed", "closed-pane")):
+            app._record_session_meta(
+                {
+                    "session_id": sid,
+                    "cwd": "/tmp/proj",
+                    "_iterm_session_id": pane,
+                    "_timestamp": 1.0,
+                }
+            )
+        captures = []
+        monkeypatch.setattr(
+            "claude_monitor.handoff.capture",
+            lambda sid, *args, **kwargs: captures.append(sid) or _entry(session_id=sid),
+        )
+        monkeypatch.setattr("claude_monitor.app_base.time.time", lambda: 65.0)
+
+        app._poll_handoff_once(62.0)
+        app._poll_handoff_once(66.0)
+        assert captures == ["open"]
+        assert "closed" not in app._session_meta
+
+        app._record_session_meta({"session_id": "open", "_timestamp": 70.0})
+        app._poll_handoff_once(131.0)
+        assert captures == ["open", "open"]
+
+
 class TestStartHandoffPolling:
+    def test_does_not_rehydrate_historical_sessions(self, monkeypatch, tmp_path):
+        events = tmp_path / "events.jsonl"
+        events.write_text(
+            '{"session_id":"old-session","cwd":"/tmp/proj",'
+            '"hook_event_name":"SessionStart","_timestamp":1.0}\n'
+        )
+        monkeypatch.setattr("claude_monitor.app_base.EVENTS_FILE", str(events))
+        app = _FakeApp(handoff_capture_idle_mins=5)
+
+        app._start_handoff_polling()
+
+        assert app._session_meta == {}
+
     def test_not_started_when_disabled(self):
         app = _FakeApp(handoff_enabled=False, handoff_capture_idle_mins=30)
         app._start_handoff_polling()

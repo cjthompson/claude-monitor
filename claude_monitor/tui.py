@@ -340,6 +340,15 @@ class AutoAcceptTUI(MonitorApp):
             if panel is None:
                 self.notify("Focus a live session panel before capturing.", severity="warning")
                 return None
+        if panel is not None and not any(
+            meta.get("iterm_session_id") == panel.session_id
+            and meta.get("live")
+            and (session_id is None or sid == session_id)
+            for sid, meta in self._session_meta.items()
+        ):
+            self._load_manual_handoff_meta(session_id=session_id, pane_id=panel.session_id)
+        elif panel is None and session_id is not None and session_id not in self._session_meta:
+            self._load_manual_handoff_meta(session_id=session_id)
         meta_items = self._session_meta.items()
         candidates = []
         for claude_sid, meta in meta_items:
