@@ -1,12 +1,28 @@
 # iTerm2 Session Note API Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Execution workflow:** Run this plan through `project-tasks`. Execution
+> workers must not commit. After each task, the parent presents the
+> project-tasks acceptance menu and commits only after explicit user acceptance.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a supported iTerm2 Python API for reading and updating a terminal session's Session Note so claude-monitor can keep an actionable, persistent hand-off visible above a full-screen alternate-screen application without injecting it into Claude.
 
 **Architecture:** Reuse iTerm2's existing generic session-property RPC with one JSON property named `session_note`; document the property in the existing protobuf comments but do not add a message or change the protobuf schema. Put strict parsing and state transitions beside the existing Session Note model, expose only the small view operation needed to apply collapsed state without taking focus, and wrap the property in typed Python SDK methods. The API is a patch API: omitted fields preserve their current value. Showing a note must use the existing restore path so API updates never focus the note or expand it unexpectedly.
 
 **Tech Stack:** Objective-C and Swift in iTerm2, XCTest/ModernTests, iTerm2's Python SDK, pytest, Sphinx/reStructuredText, `make run` with an isolated iTerm2 suite.
+
+## Project-task routing
+
+P001 is owned by `github.com/gnachman/iTerm2`, even though its linked source
+document lives in the claude-monitor checkout. From another repository, refer
+to it as `P001 for github.com/gnachman/iTerm2`; do not resolve `P001` against
+the current checkout implicitly. Resolve the plan's global numeric ID with
+`plan get` whenever a task update requires `--plan-id`; never hard-code it from
+this document.
+
+Each database task stores the complete requirements for its corresponding
+section below. The raw `## Task N: ...` heading is the task anchor. Preserve
+those headings or reconcile the task anchors before applying a plan edit.
 
 ---
 
@@ -91,12 +107,15 @@ Rules:
 This is one independently shippable upstream PR. The app handler without an SDK
 surface, or the SDK surface without app support, would not be a complete feature.
 
-## Task 1: Clone upstream and create the isolated contributor worktree
+## Task 1: Create the isolated contributor worktree and verify the baseline
 
 **Repository:** <https://github.com/gnachman/iTerm2>
 
-The repository's default branch is `master`. This plan was checked against
-upstream commit `cee9cc21d76cd5dbb15e809193f82b4dc7df443f`; refresh `master`
+Use the existing clone at `~/dev/github/iTerm2`. Cloning the repository is
+outside this task's scope.
+
+The repository's default branch is `master`. This revision was rechecked
+against upstream commit `e507018556d4f428548ed176ceb37b014ed62427`; refresh `master`
 before implementation because upstream may have moved.
 
 **Files:**
@@ -105,18 +124,18 @@ before implementation because upstream may have moved.
 - Read: `CLAUDE.md`
 - Local-only edit if necessary: `.git/info/exclude`
 
-- [ ] **Step 1: Clone upstream with submodules**
+- [ ] **Step 1: Verify the existing clone and submodules**
 
 ```bash
-mkdir -p ~/workspace
-git clone --recursive https://github.com/gnachman/iTerm2.git ~/workspace/iTerm2
-cd ~/workspace/iTerm2
+cd ~/dev/github/iTerm2
 git remote -v
 git status --short --branch
+git submodule status --recursive
 ```
 
 Expected: `origin` points to `gnachman/iTerm2`, the current branch is
-`master`, and the checkout is clean.
+`master`, the checkout is clean, and every submodule is initialized at its
+recorded revision.
 
 - [ ] **Step 2: Read the repository-specific instructions in full**
 
@@ -161,15 +180,31 @@ submodules are initialized.
 
 - [ ] **Step 4: Verify the contributor toolchain**
 
+Xcode 27 is already installed at `/Applications/Xcode.app`, but the active
+developer directory may still point to Command Line Tools. Use the repository's
+interactive setup target so its confirmation prompts own Xcode selection,
+license acceptance, Homebrew packages, PyObjC, cbindgen, SF Symbols, Rust
+targets, submodules, and the Metal toolchain:
+
 ```bash
+/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version
+xcode-select -p
+make setup
+brew list protobuf@21 >/dev/null 2>&1 || brew install protobuf@21
+make paranoid-deps
 make doctor
 /opt/homebrew/opt/protobuf@21/bin/protoc --version
 ```
 
-Expected: the repository doctor passes and protoc reports a supported 3.19,
-3.20, or 3.21 version. If the doctor names missing dependencies, run the
-interactive `make setup`, review each requested installation, and rerun the
-doctor. Do not use `make dangerous-setup`.
+Review every `make setup` prompt before approving it; several steps use `sudo`
+or install machine-level dependencies. Do not use `make dangerous-setup`.
+`protobuf@21` is installed separately because `tools/build_proto.sh` requires
+it but `make setup` does not install it.
+
+Expected: Xcode reports 27.x, `xcode-select -p` points inside the selected
+Xcode app after setup, native dependencies build successfully, the repository
+doctor reports every required dependency, and protoc reports a supported 3.19,
+3.20, or 3.21 version.
 
 - [ ] **Step 5: Record the baseline before editing**
 
@@ -324,18 +359,18 @@ tools/run_tests.expect ModernTests/SessionNoteAPITests
 
 Expected: the parser tests pass.
 
-- [ ] **Step 5: Commit the parsing unit**
+- [ ] **Step 5: Stop for project-tasks acceptance**
 
-```bash
-git add sources/SessionNotes/SessionNoteModel.swift ModernTests/SessionNoteAPITests.swift
-git commit -m "Add strict Session Note API patch parsing"
-```
+Do not commit. Report the changed paths and focused test results to the parent.
+The parent will derive task-owned paths, present the acceptance menu, and stage
+and commit only after explicit user acceptance.
 
 ## Task 3: Implement and test Session Note state transitions
 
 **Files:**
 
 - Modify: `sources/PTYSession/PTYSession.swift`
+- Modify: `sources/SessionNotes/SessionNoteView.swift`
 - Modify: `sources/TerminalView/SessionView.h`
 - Modify: `sources/TerminalView/SessionView.m`
 - Modify: `ModernTests/SessionNoteAPITests.swift`
@@ -427,6 +462,21 @@ Implement it in `SessionView.m` beside `restoreSessionNoteWithModel:`:
 This deliberately does not create a view and does not focus anything. The
 caller first creates/restores the view if it needs one.
 
+In `SessionNoteView.swift`, update `modelTextDidChange(_:)` so an external model
+change refreshes both the editor text and the collapsed title:
+
+```swift
+@objc private func modelTextDidChange(_ notification: Notification) {
+    if textView.string != model.text {
+        textView.string = model.text
+    }
+    updateTitleLabel()
+}
+```
+
+Without the `updateTitleLabel()` call, changing an already-collapsed note
+through the API leaves its visible first-line title stale.
+
 - [ ] **Step 4: Add snapshot and apply methods to PTYSession.swift**
 
 Place these beside the existing `textViewEditSessionNote()` implementation.
@@ -483,12 +533,11 @@ tools/run_tests.expect ModernTests/SessionNoteAPITests
 
 Expected: all parser and transition tests pass.
 
-- [ ] **Step 6: Commit the state-transition unit**
+- [ ] **Step 6: Stop for project-tasks acceptance**
 
-```bash
-git add sources/PTYSession/PTYSession.swift sources/TerminalView/SessionView.h sources/TerminalView/SessionView.m ModernTests/SessionNoteAPITests.swift
-git commit -m "Apply Session Note updates without stealing focus"
-```
+Do not commit. Report all changed paths, including
+`sources/SessionNotes/SessionNoteView.swift`, and the focused test results to
+the parent for explicit acceptance.
 
 ## Task 4: Wire the `session_note` generic property into iTerm2
 
@@ -614,16 +663,11 @@ tools/run_tests.expect ModernTests/SessionNoteAPITests
 
 Expected: all focused tests pass.
 
-- [ ] **Step 7: Commit the RPC property**
+- [ ] **Step 7: Stop for project-tasks acceptance**
 
-```bash
-git add proto/api.proto sources/API/iTermAPIHelper.m ModernTests/SessionNoteAPITests.swift
-git add sources/proto/Api.pbobjc.h sources/proto/Api.pbobjc.m api/library/python/iterm2/iterm2/api_pb2.py api/library/python/iterm2/iterm2/api_pb2.pyi
-git commit -m "Expose Session Notes as a session property"
-```
-
-If a generated path is unchanged, omit it from the second `git add`; do not
-stage unrelated generator output.
+Do not commit or stage unrelated generator output. Report exactly which source,
+test, protobuf, and generated paths changed. The parent will stage only proven
+task-owned paths after explicit acceptance.
 
 ## Task 5: Add the typed Python SDK surface test-first
 
@@ -768,22 +812,22 @@ cd ../../../..
 ```
 
 Expected: the focused and complete SDK tests pass, and pylint reports no new
-errors. Run the repository's existing mypy target too:
+errors. Run the repository's existing mypy target and a direct check of the
+modified module; the existing target checks `test.py`, not `session.py`:
 
 ```bash
 cd api/library/python/iterm2
 make mypy
+python3 -m mypy --ignore-missing-imports iterm2/session.py
 cd ../../../..
 ```
 
-Expected: mypy completes without a new error.
+Expected: both mypy commands complete without a new error.
 
-- [ ] **Step 6: Commit the SDK surface**
+- [ ] **Step 6: Stop for project-tasks acceptance**
 
-```bash
-git add api/library/python/iterm2/iterm2/session.py api/library/python/iterm2/iterm2/__init__.py api/library/python/iterm2/tests/test_session.py
-git commit -m "Add Python API for Session Notes"
-```
+Do not commit. Report the SDK source, export, test paths, and all test, lint,
+and type-check results to the parent for explicit acceptance.
 
 ## Task 6: Document the API and user-visible change
 
@@ -831,12 +875,10 @@ Expected: Sphinx completes without a missing member or reference warning. The
 command may open the built documentation in a browser; inspect the Session page
 and confirm both methods and all three `SessionNote` properties render.
 
-- [ ] **Step 4: Commit documentation**
+- [ ] **Step 4: Stop for project-tasks acceptance**
 
-```bash
-git add api/library/python/iterm2/docs/session.rst docs/notes-3.7.txt
-git commit -m "Document the Session Note API"
-```
+Do not commit. Report the documentation paths, line-length result, and Sphinx
+result to the parent for explicit acceptance.
 
 ## Task 7: Build and test a custom iTerm2 end to end
 
@@ -973,6 +1015,7 @@ Run and visually verify each command:
 ```bash
 IT2_SUITE=session-note-api /tmp/iterm2-session-note-sdk/bin/python /tmp/iterm2-session-note-smoke.py --text $'Task: verify Session Notes API\nProgress: updated live'
 IT2_SUITE=session-note-api /tmp/iterm2-session-note-sdk/bin/python /tmp/iterm2-session-note-smoke.py --collapsed true
+IT2_SUITE=session-note-api /tmp/iterm2-session-note-sdk/bin/python /tmp/iterm2-session-note-smoke.py --text $'Task: verify Session Notes API\nProgress: updated while collapsed'
 IT2_SUITE=session-note-api /tmp/iterm2-session-note-sdk/bin/python /tmp/iterm2-session-note-smoke.py --visible false
 IT2_SUITE=session-note-api /tmp/iterm2-session-note-sdk/bin/python /tmp/iterm2-session-note-smoke.py --visible true
 IT2_SUITE=session-note-api /tmp/iterm2-session-note-sdk/bin/python /tmp/iterm2-session-note-smoke.py --text ''
@@ -982,6 +1025,8 @@ Pass criteria:
 
 - Text updates live while the note is visible.
 - Collapse changes without focusing the note.
+- Updating text while the note is already collapsed immediately refreshes the
+  visible first-line title, keeps the note collapsed, and does not move focus.
 - Hide preserves text and collapse state.
 - Show restores the same text and collapse state without focus theft.
 - Empty text hides and deletes the note, and GET returns the canonical empty
@@ -1070,10 +1115,13 @@ code.
 cd api/library/python/iterm2
 python3 -m pytest tests/ -v
 make pylint
+make mypy
+python3 -m mypy --ignore-missing-imports iterm2/session.py
 cd ../../../..
 ```
 
-Expected: all SDK tests pass and pylint reports no new errors.
+Expected: all SDK tests pass and pylint and both mypy checks report no new
+errors.
 
 - [ ] **Step 3: Rebuild from the final tree**
 
@@ -1109,6 +1157,7 @@ proto/api.proto
 sources/API/iTermAPIHelper.m
 sources/PTYSession/PTYSession.swift
 sources/SessionNotes/SessionNoteModel.swift
+sources/SessionNotes/SessionNoteView.swift
 sources/proto/Api.pbobjc.h (only if regenerated comments change it)
 sources/proto/Api.pbobjc.m (only if regenerated comments change it)
 sources/TerminalView/SessionView.h
@@ -1127,6 +1176,7 @@ automated test or a recorded manual result. Pay particular attention to:
 
 - all-or-nothing validation;
 - hidden-note preservation;
+- collapsed-title refresh after an external text update;
 - clear/delete semantics;
 - exact background-pane targeting;
 - no keyboard-focus change;
@@ -1150,9 +1200,22 @@ authenticated user's fork.
 
 - [ ] **Step 2: Run the required pre-push review**
 
-Load and follow the `pre-push-check` skill. It owns the local Fresh Eyes review
-and its macOS-safe background launch. Resolve actionable findings, rerun the
-relevant focused tests, and repeat the final verification if code changes.
+Review the complete merge diff with fresh context before pushing:
+
+```bash
+git diff --check origin/master...HEAD
+git diff --stat origin/master...HEAD
+git diff --name-only origin/master...HEAD
+git diff origin/master...HEAD
+git log --oneline origin/master..HEAD
+```
+
+Check every Product contract rule, the expected-path boundary from Task 8,
+generated protobuf output, error-status mapping, focus preservation, collapsed
+title refresh, SDK compatibility, and test evidence. Resolve every actionable
+finding, rerun its focused tests, and repeat Task 8 if code changes. An
+independent read-only reviewer may supplement this review when available, but
+the task must not depend on a host-specific skill.
 
 - [ ] **Step 3: Push the contributor branch**
 
@@ -1162,8 +1225,8 @@ git push -u fork ct/session-note-api
 
 - [ ] **Step 4: Create the PR with the repository's required concise format**
 
-Load and follow the `concise-pr` skill before writing any PR text. Create one PR
-against `gnachman/iTerm2:master`. Use the authenticated fork owner dynamically:
+Create one concise PR against `gnachman/iTerm2:master`. Use the authenticated
+fork owner dynamically:
 
 ```bash
 gh pr create \
@@ -1186,13 +1249,23 @@ is a concrete motivation, not an iTerm2 dependency.
 
 - [ ] **Step 5: Run the post-PR check**
 
-Load and follow `pre-push-check` again after the PR exists so its automated
-Fresh Eyes watch is attached. Record the PR URL and current CI status in the
-implementation hand-off.
+Inspect the published diff, review comments, and CI without relying on a custom
+skill:
+
+```bash
+gh pr view --repo gnachman/iTerm2 --web
+gh pr checks --repo gnachman/iTerm2 --watch
+gh pr view --repo gnachman/iTerm2 --comments
+```
+
+Confirm the published changed-file list matches Task 8. Resolve actionable
+review or CI findings, rerun affected verification, and update the PR. Record
+the PR URL and final CI status in the implementation hand-off.
 
 ## Final hand-off checklist
 
-- [ ] Upstream repo cloned from `gnachman/iTerm2` with submodules.
+- [ ] Existing `~/dev/github/iTerm2` clone and submodules verified against
+      `gnachman/iTerm2`.
 - [ ] Work performed on `ct/session-note-api` in
       `.Codex/worktrees/ct/session-note-api`.
 - [ ] `session_note` GET returns the canonical three-field snapshot.
@@ -1207,5 +1280,5 @@ implementation hand-off.
 - [ ] No protobuf schema change and no claude-monitor dependency; any generated
       diff is comment-only.
 - [ ] Release note is user-facing and every line is at most 50 columns.
-- [ ] Pre-push and post-PR checks complete.
+- [ ] Self-contained pre-push review and post-PR CI/comment checks complete.
 - [ ] One reviewable upstream PR opened against `master`.
