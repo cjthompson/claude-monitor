@@ -3,6 +3,9 @@
 import time
 from unittest.mock import MagicMock
 
+import pytest
+from rich.text import Text
+
 from claude_monitor.formatting import (
     _format_ask_user_question_detail,
     _format_ask_user_question_inline,
@@ -66,6 +69,52 @@ class TestOneline:
 
 
 class TestFormatAskUserQuestionInline:
+    def test_path_options_render_literally(self):
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which route?",
+                    "options": [
+                        {"label": "/company_onboarding/bank_account_task"},
+                        {"label": "/company_onboarding/flows/bank_info"},
+                    ],
+                }
+            ]
+        }
+        rendered = Text.from_markup(_format_ask_user_question_inline(tool_input))
+        assert rendered.plain == (
+            ' "Which route?" '
+            "[/company_onboarding/bank_account_task / /company_onboarding/flows/bank_info]"
+        )
+
+    @pytest.mark.parametrize(
+        ("tool_input", "expected"),
+        [
+            (
+                {"question": "Keep [bold]literal[/] [/unexpected]?"},
+                ' "Keep [bold]literal[/] [/unexpected]?"',
+            ),
+            (
+                {"questions": [{"question": "Keep [bold]literal[/] [/unexpected]?"}]},
+                ' "Keep [bold]literal[/] [/unexpected]?"',
+            ),
+            (
+                {"questions": [{"question": "Pick?", "options": [{"label": "[bold]A[/]"}]}]},
+                ' "Pick?" [[bold]A[/]]',
+            ),
+            (
+                {"questions": [{"question": "Pick?"}], "answers": {"Pick?": "[bold]A[/] [/x]"}},
+                ' "Pick?" -> [bold]A[/] [/x]',
+            ),
+            ({"[bold]key[/]": "[/value]"}, " [bold]key[/]=[/value]"),
+        ],
+    )
+    def test_tool_input_markup_renders_literally(self, tool_input, expected):
+        rendered = Text.from_markup(_format_ask_user_question_inline(tool_input))
+        assert rendered.plain == expected
+        if tool_input.get("answers"):
+            assert any(str(span.style) == "bold" for span in rendered.spans)
+
     def test_simple_question(self):
         result = _format_ask_user_question_inline({"question": "Continue?"})
         assert "Continue?" in result
@@ -107,6 +156,48 @@ class TestFormatAskUserQuestionInline:
 
 
 class TestFormatAskUserQuestionDetail:
+    @pytest.mark.parametrize("decision", ["allowed", "timeout"])
+    def test_structured_markup_renders_literally(self, decision):
+        question = "Keep [bold]literal[/] [/question]?"
+        selected = "[bold]A[/] [/answer]"
+        data = {
+            "tool_input": {
+                "questions": [
+                    {
+                        "question": question,
+                        "options": [
+                            {"label": selected, "description": "[dim]First[/] [/description]"},
+                            {"label": "[bold]B[/]", "description": "[dim]Second[/] [/description]"},
+                        ],
+                    }
+                ],
+            },
+            "_answers": {question: selected},
+            "_decision": decision,
+        }
+        rendered = Text.from_markup(_format_ask_user_question_detail(data))
+        assert question in rendered.plain
+        assert rendered.plain.count(selected) == 2
+        assert "[dim]First[/] [/description]" in rendered.plain
+        assert "[bold]B[/]" in rendered.plain
+        assert "[dim]Second[/] [/description]" in rendered.plain
+        style = "bold cyan" if decision == "timeout" else "bold green"
+        assert any(str(span.style) == style for span in rendered.spans)
+
+    @pytest.mark.parametrize(
+        ("tool_input", "expected"),
+        [
+            (
+                {"question": "Keep [bold]literal[/] [/unexpected]?"},
+                "    Q: Keep [bold]literal[/] [/unexpected]?",
+            ),
+            ({"[bold]key[/]": "[/value]"}, "    [bold]key[/]: [/value]"),
+        ],
+    )
+    def test_simple_markup_renders_literally(self, tool_input, expected):
+        rendered = Text.from_markup(_format_ask_user_question_detail({"tool_input": tool_input}))
+        assert rendered.plain == expected
+
     def test_structured_with_answers(self):
         data = {
             "tool_input": {

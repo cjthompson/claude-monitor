@@ -47,22 +47,22 @@ def _format_ask_user_question_inline(tool_input: dict) -> str:
             selected = answers.get(q_text, "")
             option_labels = [o.get("label", "") for o in options if o.get("label")]
             if q_text:
-                line = f' "{q_text}"'
+                line = f' "{escape(q_text)}"'
                 if option_labels:
                     choices_str = " / ".join(option_labels)
-                    line += f" [{choices_str}]"
+                    line += f" {escape(f'[{choices_str}]')}"
                 if selected:
-                    line += f" -> [bold]{selected}[/]"
+                    line += f" -> [bold]{escape(selected)}[/]"
                 parts.append(line)
     else:
         # Simple format with just 'question' key
         question = tool_input.get("question", "")
         if question:
-            parts.append(f' "{question[:200]}"')
+            parts.append(f' "{escape(question[:200])}"')
         elif tool_input:
             # Fallback: show first couple keys
             for k, v in list(tool_input.items())[:2]:
-                parts.append(f" {k}={str(v)[:80]}")
+                parts.append(f" {escape(k)}={escape(str(v)[:80])}")
 
     return "".join(parts) if parts else ""
 
@@ -83,38 +83,36 @@ def _format_ask_user_question_detail(data: dict) -> str:
             options = q.get("options", [])
             selected = answers.get(q_text, "")
             if q_text:
-                lines.append(f"    [dim]Q:[/] {q_text}")
+                lines.append(f"    [dim]Q:[/] {escape(q_text)}")
             for o in options:
                 label = o.get("label", "")
                 desc = o.get("description", "")
                 if label:
+                    label_text = escape(label)
+                    description = f"  [dim]{escape(desc)}[/]" if desc else ""
                     if selected and label == selected:
                         if is_auto:
                             marker = "[bold cyan]>>[/]"
-                            lines.append(
-                                f"      {marker} [bold cyan]{label}[/]"
-                                + (f"  [dim]{desc}[/]" if desc else "")
-                            )
+                            lines.append(f"      {marker} [bold cyan]{label_text}[/]" + description)
                         else:
                             marker = "[bold green]>>[/]"
                             lines.append(
-                                f"      {marker} [bold green]{label}[/]"
-                                + (f"  [dim]{desc}[/]" if desc else "")
+                                f"      {marker} [bold green]{label_text}[/]" + description
                             )
                     else:
-                        lines.append(f"         {label}" + (f"  [dim]{desc}[/]" if desc else ""))
+                        lines.append(f"         {label_text}" + description)
             if selected:
                 mode = "[cyan]auto[/]" if is_auto else "[green]manual[/]"
-                lines.append(f"    [dim]Answer:[/] [bold]{selected}[/]  ({mode})")
+                lines.append(f"    [dim]Answer:[/] [bold]{escape(selected)}[/]  ({mode})")
             if i < len(questions) - 1:
                 lines.append("")
     else:
         question = tool_input.get("question", "")
         if question:
-            lines.append(f"    [dim]Q:[/] {question[:300]}")
+            lines.append(f"    [dim]Q:[/] {escape(question[:300])}")
         elif tool_input:
             for k, v in list(tool_input.items())[:3]:
-                lines.append(f"    [dim]{k}:[/] {str(v)[:200]}")
+                lines.append(f"    [dim]{escape(k)}:[/] {escape(str(v)[:200])}")
 
     return "\n".join(lines)
 
